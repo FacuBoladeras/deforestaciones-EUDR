@@ -5,11 +5,47 @@
 `configs/default.yml` es el punto de entrada declarativo de la primera prueba.
 Los modelos de `deforestation_pipeline.config` rechazan parámetros desconocidos
 y estructuras incompletas. La configuración validada es inmutable durante una
-ejecución.
+ejecución. En particular, las colecciones que participan en su identidad
+(`data.indices` y `output.formats`) se normalizan a tuplas y no pueden mutarse
+después de la validación.
 
-El hash de parámetros es un SHA-256 calculado sobre una representación JSON
-canónica del modelo validado. Por lo tanto, no depende del orden de las claves
-ni del formato superficial del YAML.
+El hash de parámetros (`parameters_hash`) es un SHA-256 calculado sobre una
+representación JSON canónica del modelo validado: claves ordenadas, sin
+espacios de formato y con valores ya normalizados por Pydantic. Por lo tanto,
+no depende del orden de las claves ni del formato superficial del YAML.
+
+La semántica vigente es deliberadamente amplia: el digest incluye todos los
+campos de `PipelineConfig`. En consecuencia, un cambio válido de parámetro,
+la ruta `output.directory` o el orden de las listas `data.indices` y
+`output.formats` modifica el digest. Las listas se tratan como secuencias y no
+como conjuntos, aunque sus validadores impiden valores duplicados.
+
+Este hash identifica la configuración validada actual; **todavía no es una
+identidad científica definitiva de una ejecución**. En particular,
+`analysis_end_date: null` permanece nulo hasta que un ejecutor futuro resuelva
+la fecha efectiva, y los parámetros operativos de salida comparten el mismo
+digest que los parámetros metodológicos. La separación entre identidad
+científica y configuración de ejecución se incorporará en un incremento
+posterior y no debe inferirse de este valor.
+
+## Configuración resuelta e identidades de corrida
+
+Antes de ejecutar un análisis, `resolve_run_config(config, analysis_end_date)`
+recibe una fecha final concreta y devuelve una `ResolvedPipelineConfig`
+inmutable. Si el YAML ya declara una fecha final, debe coincidir con la fecha
+recibida; en caso contrario se rechaza la corrida. La configuración de origen
+nunca se muta.
+
+Las identidades de una corrida resuelta son deliberadamente distintas:
+
+- `scientific_parameters_hash` incluye `schema_version`, `analysis`, `spatial`
+  y `data`; excluye las opciones de salida.
+- `execution_config_hash` incluye la configuración resuelta completa, incluidos
+  `output.directory` y `output.formats`.
+
+Ambas incluyen la fecha final efectiva. `parameters_hash` permanece disponible
+para caracterizar la configuración original completa y no debe sustituir las
+identidades de una corrida resuelta.
 
 ## Parámetros de dominio
 

@@ -2,6 +2,7 @@
 
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -9,9 +10,13 @@ from pydantic import ValidationError
 from deforestation_pipeline.config import (
     ConfigurationError,
     PipelineConfig,
+    ResolvedPipelineConfig,
+    execution_config_hash,
     load_config,
     load_license_registry,
     parameters_hash,
+    resolve_run_config,
+    scientific_parameters_hash,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +30,226 @@ def test_default_config_is_valid_and_deterministic() -> None:
     assert config.spatial.forest_definition_min_area_ha == 0.5
     assert config.spatial.preserve_subthreshold_events is True
     assert len(parameters_hash(config)) == 64
-    assert parameters_hash(config) == parameters_hash(config)
+
+
+def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
+    """El digest se calcula sobre el contenido validado, no sobre un YAML dado."""
+    config = PipelineConfig.model_validate(
+        {
+            "schema_version": "1.0.0",
+            "analysis": {
+                "cutoff_date": "2020-12-31",
+                "benchmark_start_date": "2019-01-01",
+                "analysis_end_date": "2021-01-01",
+                "random_seed": 7,
+            },
+            "spatial": {
+                "interchange_crs": "EPSG:4326",
+                "area_crs_strategy": "auto_equal_area",
+                "forest_definition_min_area_ha": 0.5,
+                "minimum_coordinate_decimals": 6,
+                "preserve_subthreshold_events": True,
+            },
+            "data": {
+                "benchmark_sensor": "HLS",
+                "target_resolution_m": 30,
+                "composition_interval": "monthly",
+                "indices": ["NDVI"],
+            },
+            "output": {"directory": "outputs", "formats": ["json"]},
+        }
+    )
+
+    assert parameters_hash(config) == (
+        "7681379230f87e2df18ee489a536dc453f80fef3fd2b9d74539c61b238b42895"
+    )
+
+
+def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
+    tmp_path: Path,
+) -> None:
+    """YAML equivalente produce el mismo modelo validado y el mismo digest."""
+    first = tmp_path / "first.yml"
+    second = tmp_path / "second.yml"
+    first.write_text(
+        "\n".join(
+            [
+                'schema_version: "1.0.0"',
+                "analysis:",
+                "  cutoff_date: 2020-12-31",
+                "  benchmark_start_date: 2019-01-01",
+                "  analysis_end_date: 2021-01-01",
+                "  random_seed: 7",
+                "spatial:",
+                "  interchange_crs: EPSG:4326",
+                "  area_crs_strategy: auto_equal_area",
+                "  forest_definition_min_area_ha: 0.5",
+                "  minimum_coordinate_decimals: 6",
+                "  preserve_subthreshold_events: true",
+                "data:",
+                "  benchmark_sensor: HLS",
+                "  target_resolution_m: 30",
+                "  composition_interval: monthly",
+                "  indices: [NDVI, EVI2]",
+                "output:",
+                "  directory: outputs",
+                "  formats: [json, geojson]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    second.write_text(
+        "\n".join(
+            [
+                "# Same semantic configuration, deliberately reordered and formatted.",
+                "output: {formats: [json, geojson], directory: outputs}",
+                (
+                    "data: {indices: [NDVI, EVI2], composition_interval: monthly, "
+                    "target_resolution_m: 30, benchmark_sensor: HLS}"
+                ),
+                (
+                    "spatial: {preserve_subthreshold_events: true, "
+                    "minimum_coordinate_decimals: 6, forest_definition_min_area_ha: 0.5, "
+                    "area_crs_strategy: auto_equal_area, interchange_crs: EPSG:4326}"
+                ),
+                (
+                    "analysis: {random_seed: 7, analysis_end_date: 2021-01-01, "
+                    "benchmark_start_date: 2019-01-01, cutoff_date: 2020-12-31}"
+                ),
+                'schema_version: "1.0.0"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert parameters_hash(load_config(first)) == parameters_hash(load_config(second))
+
+
+def test_parameters_hash_changes_when_a_valid_parameter_changes() -> None:
+    """Cambiar un parámetro válido modifica la identidad vigente."""
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    baseline = PipelineConfig.model_validate(payload)
+    payload["analysis"]["random_seed"] = 43
+    changed = PipelineConfig.model_validate(payload)
+
+    assert parameters_hash(changed) != parameters_hash(baseline)
+
+
+def test_parameters_hash_currently_includes_output_directory() -> None:
+    """Caracteriza que la ruta operativa forma parte del digest actual."""
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    baseline = PipelineConfig.model_validate(payload)
+    payload["output"]["directory"] = "other-output"
+    changed = PipelineConfig.model_validate(payload)
+
+    assert parameters_hash(changed) != parameters_hash(baseline)
+
+
+def test_parameters_hash_currently_treats_list_order_as_significant() -> None:
+    """Caracteriza que el orden de índices y formatos forma parte del digest."""
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    baseline = PipelineConfig.model_validate(payload)
+    payload["data"]["indices"] = list(reversed(payload["data"]["indices"]))
+    changed = PipelineConfig.model_validate(payload)
+
+    assert parameters_hash(changed) != parameters_hash(baseline)
+
+
+def test_indices_are_deeply_immutable_and_cannot_change_the_hash() -> None:
+    """Los índices validados no pueden mutarse luego de calcular su identidad."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    digest = parameters_hash(config)
+
+    with pytest.raises(TypeError):
+        cast(Any, config.data.indices)[0] = "EVI2"
+
+    assert parameters_hash(config) == digest
+
+
+def test_output_formats_are_deeply_immutable_and_cannot_change_the_hash() -> None:
+    """Los formatos validados no pueden mutarse luego de calcular su identidad."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    digest = parameters_hash(config)
+
+    with pytest.raises(TypeError):
+        cast(Any, config.output.formats)[0] = "csv"
+
+    assert parameters_hash(config) == digest
+
+
+def test_resolve_run_config_replaces_a_missing_analysis_end_date() -> None:
+    """Una corrida recibe siempre una fecha final concreta y explícita."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+
+    resolved = resolve_run_config(config, date(2024, 12, 31))
+
+    assert isinstance(resolved, ResolvedPipelineConfig)
+    assert resolved.analysis.analysis_end_date == date(2024, 12, 31)
+
+
+def test_resolve_run_config_preserves_an_explicit_matching_end_date() -> None:
+    """Una fecha declarada se conserva cuando coincide con la de la corrida."""
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    payload["analysis"]["analysis_end_date"] = date(2024, 12, 31)
+    config = PipelineConfig.model_validate(payload)
+
+    resolved = resolve_run_config(config, date(2024, 12, 31))
+
+    assert resolved.analysis.analysis_end_date == date(2024, 12, 31)
+
+
+def test_resolve_run_config_rejects_a_conflicting_explicit_end_date() -> None:
+    """La fecha efectiva no puede contradecir un YAML ya fijado."""
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    payload["analysis"]["analysis_end_date"] = date(2024, 12, 31)
+    config = PipelineConfig.model_validate(payload)
+
+    with pytest.raises(ValueError, match="analysis_end_date"):
+        resolve_run_config(config, date(2025, 1, 1))
+
+
+def test_resolve_run_config_does_not_mutate_the_source_config() -> None:
+    """Resolver una corrida devuelve otro modelo y conserva el config de entrada."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+
+    resolved = resolve_run_config(config, date(2024, 12, 31))
+
+    assert config.analysis.analysis_end_date is None
+    assert resolved is not config
+
+
+def test_scientific_hash_ignores_operational_output_changes() -> None:
+    """La identidad científica excluye el destino y formatos de salida."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    baseline = resolve_run_config(config, date(2024, 12, 31))
+    payload = baseline.model_dump()
+    payload["output"]["directory"] = "other-output"
+    changed = ResolvedPipelineConfig.model_validate(payload)
+
+    assert scientific_parameters_hash(changed) == scientific_parameters_hash(baseline)
+
+
+def test_execution_hash_includes_operational_output_changes() -> None:
+    """La identidad de ejecución incluye el destino y formatos de salida."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    baseline = resolve_run_config(config, date(2024, 12, 31))
+    payload = baseline.model_dump()
+    payload["output"]["directory"] = "other-output"
+    changed = ResolvedPipelineConfig.model_validate(payload)
+
+    assert execution_config_hash(changed) != execution_config_hash(baseline)
+
+
+def test_resolved_end_date_changes_scientific_and_execution_identities() -> None:
+    """El período efectivo forma parte de ambas identidades de la corrida."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    first = resolve_run_config(config, date(2024, 12, 31))
+    second = resolve_run_config(config, date(2025, 1, 1))
+
+    assert scientific_parameters_hash(first) != scientific_parameters_hash(second)
+    assert execution_config_hash(first) != execution_config_hash(second)
 
 
 def test_config_rejects_a_modified_cutoff_date() -> None:

@@ -34,6 +34,33 @@ El modelo automático no puede emitir `conversion_confirmed`. La confirmación
 requiere una revisión humana documentada y un contrato posterior que la
 represente explícitamente.
 
+### Validación semántica previa a la exportación
+
+`AnalysisSummary` es el contrato de transporte: valida tipos, rangos y algunas
+relaciones estructurales. Antes de exportar evidencia, el productor automático
+debe pasar esa instancia por `validate_analysis_summary`:
+
+```python
+from deforestation_pipeline.result_validation import validate_analysis_summary
+
+summary = validate_analysis_summary(summary)
+```
+
+Esta frontera de dominio rechaza identificadores repetidos, eventos fuera del
+período analizado, contradicciones entre estado y superficie probable, y
+conversiones atribuidas a regeneración, perturbación temporal o uso
+desconocido. Devuelve la misma instancia cuando es válida; si detecta problemas,
+`AnalysisSummaryValidationError` expone todas las violaciones legibles en
+`violations`.
+
+Una superficie agregada de conversión probable debe estar respaldada por al
+menos un evento con conversión probable, y viceversa. Esta correspondencia
+valida la existencia de soporte, no la igualdad numérica de las superficies.
+
+Los totales del resumen no se comparan con una suma directa de eventos. Los
+eventos pueden solaparse espacialmente y esa suma inflaría la superficie. La
+agregación espacial auditable pertenece a una etapa posterior.
+
 ## Fechas y procedencia
 
 La fecha de corte ambiental es invariable: `2020-12-31`. `created_at` y la

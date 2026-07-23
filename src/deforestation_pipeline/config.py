@@ -107,11 +107,11 @@ class DataConfig(StrictConfigModel):
     benchmark_sensor: Literal["HLS"]
     target_resolution_m: Literal[30]
     composition_interval: Literal["monthly"]
-    indices: Annotated[list[SpectralIndex], Field(min_length=1)]
+    indices: Annotated[tuple[SpectralIndex, ...], Field(min_length=1)]
 
     @field_validator("indices")
     @classmethod
-    def indices_are_unique(cls, value: list[SpectralIndex]) -> list[SpectralIndex]:
+    def indices_are_unique(cls, value: tuple[SpectralIndex, ...]) -> tuple[SpectralIndex, ...]:
         """Evita calcular o registrar dos veces la misma variable."""
         if len(value) != len(set(value)):
             raise ValueError("indices no puede contener valores repetidos")
@@ -122,11 +122,11 @@ class OutputConfig(StrictConfigModel):
     """Destino y formatos de la primera prueba."""
 
     directory: Path
-    formats: Annotated[list[OutputFormat], Field(min_length=1)]
+    formats: Annotated[tuple[OutputFormat, ...], Field(min_length=1)]
 
     @field_validator("formats")
     @classmethod
-    def formats_are_unique(cls, value: list[OutputFormat]) -> list[OutputFormat]:
+    def formats_are_unique(cls, value: tuple[OutputFormat, ...]) -> tuple[OutputFormat, ...]:
         """Evita declarar salidas duplicadas."""
         if len(value) != len(set(value)):
             raise ValueError("formats no puede contener valores repetidos")
@@ -141,6 +141,18 @@ class PipelineConfig(StrictConfigModel):
     spatial: SpatialConfig
     data: DataConfig
     output: OutputConfig
+
+
+class ResolvedAnalysisConfig(AnalysisConfig):
+    """Período de una corrida cuya fecha final ya fue fijada explícitamente."""
+
+    analysis_end_date: date
+
+
+class ResolvedPipelineConfig(PipelineConfig):
+    """Configuración inmutable lista para identificar y ejecutar una corrida."""
+
+    analysis: ResolvedAnalysisConfig
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -170,12 +182,42 @@ def load_license_registry(path: Path) -> LicenseRegistry:
     return LicenseRegistry.model_validate(_load_yaml_mapping(path))
 
 
-def parameters_hash(config: PipelineConfig) -> str:
-    """Calcula SHA-256 sobre la representación JSON canónica de la configuración."""
+def resolve_run_config(config: PipelineConfig, analysis_end_date: date) -> ResolvedPipelineConfig:
+    """Fija la fecha final de una corrida sin mutar su configuración de origen."""
+    declared_end_date = config.analysis.analysis_end_date
+    if declared_end_date is not None and declared_end_date != analysis_end_date:
+        raise ValueError("analysis_end_date declarada no coincide con la fecha final de la corrida")
+
+    payload = config.model_dump(mode="python")
+    payload["analysis"]["analysis_end_date"] = analysis_end_date
+    return ResolvedPipelineConfig.model_validate(payload)
+
+
+def _canonical_hash(payload: object) -> str:
+    """Calcula SHA-256 sobre una representación JSON canónica."""
     canonical = json.dumps(
-        config.model_dump(mode="json"),
+        payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def parameters_hash(config: PipelineConfig) -> str:
+    """Calcula SHA-256 sobre la representación JSON canónica de la configuración."""
+    return _canonical_hash(config.model_dump(mode="json"))
+
+
+def scientific_parameters_hash(config: ResolvedPipelineConfig) -> str:
+    """Identifica los parámetros metodológicos de una corrida ya resuelta."""
+    payload = config.model_dump(mode="json")
+    scientific_payload = {
+        field: payload[field] for field in ("schema_version", "analysis", "spatial", "data")
+    }
+    return _canonical_hash(scientific_payload)
+
+
+def execution_config_hash(config: ResolvedPipelineConfig) -> str:
+    """Identifica la configuración completa, incluidos detalles operativos."""
+    return _canonical_hash(config.model_dump(mode="json"))
