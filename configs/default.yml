@@ -1,0 +1,36 @@
+schema_version: "1.0.0"
+
+analysis:
+  cutoff_date: 2020-12-31
+  benchmark_start_date: 2019-01-01
+  analysis_end_date: null
+  random_seed: 42
+
+spatial:
+  interchange_crs: "EPSG:4326"
+  area_crs_strategy: "auto_equal_area"
+  forest_definition_min_area_ha: 0.5
+  minimum_coordinate_decimals: 6
+  preserve_subthreshold_events: true
+
+data:
+  benchmark_sensor: "HLS"
+  target_resolution_m: 30
+  composition_interval: "monthly"
+  indices:
+    - "NDVI"
+    - "EVI2"
+    - "NBR"
+    - "NDMI"
+    - "NMDI"
+    - "LSWI"
+    - "NIRv"
+    - "kNDVI"
+
+output:
+  directory: "outputs"
+  formats:
+    - "json"
+    - "geojson"
+    - "csv"
+    - "png"

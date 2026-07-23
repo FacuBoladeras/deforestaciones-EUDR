@@ -1,0 +1,21 @@
+{
+  "establishment_id": "synthetic-establishment-001",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [-63.010000, -25.010000],
+        [-62.990000, -25.010000],
+        [-62.990000, -24.990000],
+        [-63.010000, -24.990000],
+        [-63.010000, -25.010000]
+      ]
+    ]
+  },
+  "geometry_crs": "EPSG:4326",
+  "geometry_source": "other",
+  "geometry_version": "synthetic-v1",
+  "geometry_registered_at": "2026-07-23T00:00:00Z",
+  "province": null,
+  "ecoregion": null
+}
