@@ -1,0 +1,86 @@
+schema_version: "1.0.0"
+
+sources:
+  - source_id: "hls_l30_v2"
+    family: "HLS"
+    product: "HLSL30"
+    provider: "NASA LP DAAC"
+    collection_id: "NASA/HLS/HLSL30/v002"
+    version: "2.0"
+    spatial_resolution_m: 30
+    availability_start: 2013-04-11
+    availability_end: null
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-24
+    doi_url: "https://doi.org/10.5067/HLS/HLSL30.002"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/NASA_HLS_HLSL30_v002"
+    documentation_url: "https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf"
+    data_terms_summary: >-
+      NASA promotes full and open sharing with research, applications,
+      private industry, academia, and the general public.
+    platform_terms_separate: true
+    bands:
+      - role: "blue"
+        source_band: "B2"
+      - role: "green"
+        source_band: "B3"
+      - role: "red"
+        source_band: "B4"
+      - role: "nir"
+        source_band: "B5"
+      - role: "swir1"
+        source_band: "B6"
+      - role: "swir2"
+        source_band: "B7"
+      - role: "qa"
+        source_band: "Fmask"
+    qa_mask_bits:
+      cloud: 1
+      adjacent_to_cloud_or_shadow: 2
+      cloud_shadow: 3
+      snow_or_ice: 4
+      water: 5
+      aerosol_first_bit: 6
+      aerosol_last_bit: 7
+
+  - source_id: "hls_s30_v2"
+    family: "HLS"
+    product: "HLSS30"
+    provider: "NASA LP DAAC"
+    collection_id: "NASA/HLS/HLSS30/v002"
+    version: "2.0"
+    spatial_resolution_m: 30
+    availability_start: 2015-11-28
+    availability_end: null
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-24
+    doi_url: "https://doi.org/10.5067/HLS/HLSS30.002"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/NASA_HLS_HLSS30_v002"
+    documentation_url: "https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf"
+    data_terms_summary: >-
+      NASA promotes full and open sharing with research, applications,
+      private industry, academia, and the general public.
+    platform_terms_separate: true
+    bands:
+      - role: "blue"
+        source_band: "B2"
+      - role: "green"
+        source_band: "B3"
+      - role: "red"
+        source_band: "B4"
+      - role: "nir"
+        source_band: "B8A"
+      - role: "swir1"
+        source_band: "B11"
+      - role: "swir2"
+        source_band: "B12"
+      - role: "qa"
+        source_band: "Fmask"
+    qa_mask_bits:
+      cloud: 1
+      adjacent_to_cloud_or_shadow: 2
+      cloud_shadow: 3
+      snow_or_ice: 4
+      water: 5
+      aerosol_first_bit: 6
+      aerosol_last_bit: 7

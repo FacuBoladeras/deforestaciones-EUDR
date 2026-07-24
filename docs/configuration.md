@@ -20,13 +20,9 @@ la ruta `output.directory` o el orden de las listas `data.indices` y
 `output.formats` modifica el digest. Las listas se tratan como secuencias y no
 como conjuntos, aunque sus validadores impiden valores duplicados.
 
-Este hash identifica la configuración validada actual; **todavía no es una
-identidad científica definitiva de una ejecución**. En particular,
-`analysis_end_date: null` permanece nulo hasta que un ejecutor futuro resuelva
-la fecha efectiva, y los parámetros operativos de salida comparten el mismo
-digest que los parámetros metodológicos. La separación entre identidad
-científica y configuración de ejecución se incorporará en un incremento
-posterior y no debe inferirse de este valor.
+Este hash identifica la configuración validada original. La identidad
+científica y la identidad operativa de cada corrida se registran por separado,
+como se explica en la sección siguiente.
 
 ## Configuración resuelta e identidades de corrida
 
@@ -54,6 +50,9 @@ Los siguientes valores no son hiperparámetros calibrables:
 - `cutoff_date: 2020-12-31`;
 - `forest_definition_min_area_ha: 0.5`;
 - `interchange_crs: EPSG:4326`;
+- `area_crs_strategy: auto_equal_area`, para medir superficie sin depender de
+  un huso;
+- `raster_crs_strategy: local_utm`, para una grilla métrica compatible con GEE;
 - `minimum_coordinate_decimals: 6`;
 - `preserve_subthreshold_events: true`.
 
@@ -63,9 +62,20 @@ también los eventos menores como evidencia intermedia.
 
 ## Parámetros del benchmark
 
-La configuración inicial declara HLS a 30 m y composiciones mensuales para
-reproducir una línea de comparación metodológica. Esto no modifica la decisión
-de usar Sentinel-2 a 10 m como fuente óptica principal del MVP mejorado.
+La configuración 1.1.0 declara HLS a 30 m y un composite anual por mediana para
+la primera prueba real. También fija explícitamente:
+
+- separación entre el CRS equivalente de medición y la grilla UTM local del
+  raster;
+- escala nativa HLS `0.0001` y offset `0`, conservados como procedencia;
+- multiplicador Earth Engine `1` y offset `0`, porque la colección GEE ya
+  entrega reflectancia física;
+- descarte de aerosol alto;
+- preservación de agua;
+- nodata `-9999`;
+- límites de descarga directa de 32.000.000 bytes y 10.000 píxeles por eje;
+- rangos de visualización RGB y por índice;
+- resolución de render PNG.
 
 Los índices declarados son NDVI, EVI2, NBR, NDMI, NMDI, LSWI, NIRv y kNDVI.
 La inclusión en la configuración no implica que todos deban incorporarse a un
@@ -75,9 +85,9 @@ modelo final: su selección deberá justificarse con validación.
 comenzar el análisis y registrarla como valor concreto en el manifiesto. Nunca
 debe quedar nula en el resumen final.
 
-Los identificadores de colecciones GEE no se incorporan todavía. Se definirán
-en el catálogo cuando se verifiquen versión, disponibilidad, licencia,
-atribución y restricciones.
+Los identificadores de HLSL30 y HLSS30 se mantienen en `data/catalog.yml`, no
+en la configuración científica. Las fechas efectivas del composite se reciben
+por CLI y deben definir un año calendario completo.
 
 ## Uso desde Python
 
@@ -101,6 +111,6 @@ uv run python scripts/export_schema.py
 La prueba automatizada compara el archivo generado con el modelo para detectar
 derivas silenciosas.
 
-`data/licenses.yml` sólo debe contener datasets efectivamente verificados y
-utilizados. Cada registro requiere proveedor, colección, versión, licencia,
-fecha de acceso, atribución y restricciones.
+`data/licenses.yml` registra HLSL30 y HLSS30 desde su primer uso efectivo de
+píxeles. Cada registro contiene proveedor, colección, versión, condiciones,
+fecha de acceso, atribución y restricciones de plataforma.

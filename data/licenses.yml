@@ -1,2 +1,35 @@
 schema_version: "1.0.0"
-datasets: []
+datasets:
+  - dataset_id: "hls_l30_v2"
+    provider: "NASA LP DAAC"
+    collection: "NASA/HLS/HLSL30/v002"
+    version: "2.0"
+    license: "NASA full and open data sharing"
+    access_date: 2026-07-24
+    attribution: >-
+      Contains modified Harmonized Landsat Sentinel-2 HLSL30 v2.0 data
+      provided by NASA LP DAAC.
+    restrictions:
+      - >-
+        Earth Engine platform terms and project registration apply
+        separately from the source data terms.
+      - >-
+        Dataset availability in Earth Engine does not establish that every
+        future commercial use is covered by the current platform modality.
+
+  - dataset_id: "hls_s30_v2"
+    provider: "NASA LP DAAC"
+    collection: "NASA/HLS/HLSS30/v002"
+    version: "2.0"
+    license: "NASA full and open data sharing"
+    access_date: 2026-07-24
+    attribution: >-
+      Contains modified Harmonized Landsat Sentinel-2 HLSS30 v2.0 data
+      provided by NASA LP DAAC.
+    restrictions:
+      - >-
+        Earth Engine platform terms and project registration apply
+        separately from the source data terms.
+      - >-
+        Dataset availability in Earth Engine does not establish that every
+        future commercial use is covered by the current platform modality.

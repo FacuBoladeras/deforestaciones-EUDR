@@ -1,4 +1,4 @@
-schema_version: "1.0.0"
+schema_version: "1.1.0"
 
 analysis:
   cutoff_date: 2020-12-31
@@ -9,6 +9,7 @@ analysis:
 spatial:
   interchange_crs: "EPSG:4326"
   area_crs_strategy: "auto_equal_area"
+  raster_crs_strategy: "local_utm"
   forest_definition_min_area_ha: 0.5
   minimum_coordinate_decimals: 6
   preserve_subthreshold_events: true
@@ -16,7 +17,14 @@ spatial:
 data:
   benchmark_sensor: "HLS"
   target_resolution_m: 30
-  composition_interval: "monthly"
+  composition_interval: "annual"
+  composition_reducer: "median"
+  source_native_reflectance_scale_factor: 0.0001
+  source_native_reflectance_offset: 0.0
+  earth_engine_reflectance_multiplier: 1.0
+  earth_engine_reflectance_offset: 0.0
+  mask_high_aerosol: true
+  preserve_water: true
   indices:
     - "NDVI"
     - "EVI2"
@@ -34,3 +42,35 @@ output:
     - "geojson"
     - "csv"
     - "png"
+    - "geotiff"
+  raster_nodata: -9999.0
+  maximum_direct_download_bytes: 32000000
+  maximum_direct_download_dimension: 10000
+  rgb_min_reflectance: 0.01
+  rgb_max_reflectance: 0.18
+  index_visualization_ranges:
+    - index: "NDVI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "EVI2"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NBR"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NDMI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NMDI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "LSWI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NIRv"
+      minimum: -0.1
+      maximum: 0.8
+    - index: "kNDVI"
+      minimum: 0.0
+      maximum: 1.0
+  png_dpi: 150

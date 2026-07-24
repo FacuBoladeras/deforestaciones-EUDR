@@ -1,8 +1,9 @@
 # Runner local de prueba
 
-`pruebas.py` es una interfaz exclusivamente local para recorrer las capacidades
-que el pipeline implementa hoy. No inicia un servidor, no usa Google Earth
-Engine, no descarga imágenes y no accede a datasets remotos.
+`pruebas.py` es una interfaz local: no inicia un servidor y publica todo en una
+carpeta de corrida. Por defecto no accede a datos remotos. Con flags explícitos
+puede consultar GEE y, para un ROI pequeño, descargar los primeros productos
+raster HLS.
 
 ## Entrada admitida
 
@@ -24,6 +25,9 @@ uv run python pruebas.py data/samples/local_test_polygon.geojson `
   --analysis-end-date 2026-07-23
 ```
 
+La consulta GEE es opcional y requiere fechas explícitas. Su uso se documenta
+en `docs/gee_access.md`.
+
 Opciones principales:
 
 ```text
@@ -43,6 +47,8 @@ Cada corrida crea una carpeta nueva y nunca sobrescribe una carpeta existente:
 
 ```text
 outputs/local_tests/<establecimiento>__<fecha-UTC>__<analysis-id>/
+├── catalog/
+│   └── source_plan.json
 ├── config/
 │   └── resolved_config.json
 ├── geometry/
@@ -50,6 +56,19 @@ outputs/local_tests/<establecimiento>__<fecha-UTC>__<analysis-id>/
 │   ├── normalized_wgs84.geojson
 │   ├── analysis_geometry.geojson
 │   └── validation.json
+├── gee/                         # sólo cuando se usa --query-gee
+│   ├── scene_metadata.json
+│   ├── composite_input_inventory.json
+│   └── composite_metadata.json
+├── rasters/                     # sólo con --build-hls-composite
+│   ├── hls_annual_reflectance.tif
+│   ├── hls_annual_indices.tif
+│   └── hls_valid_observation_count.tif
+├── figures/                     # sólo con --build-hls-composite
+│   ├── rgb.png
+│   ├── indices_panel.png
+│   ├── valid_observations.png
+│   └── indices/
 ├── input/
 │   └── source.geojson
 ├── measurements/
@@ -64,6 +83,10 @@ hashes científico y de ejecución, la identidad del análisis y si el árbol de
 trabajo Git estaba modificado. El manifiesto se excluye de su propia lista para
 evitar un hash autorreferencial.
 
+`catalog/source_plan.json` enumera las colecciones HLS v2 y sus bandas
+requeridas, pero declara `remote_data_accessed: false`: es un plan local, no el
+resultado de una consulta.
+
 La geometría original interpretada usa `.json`, no `.geojson`, porque puede
 permanecer en un CRS distinto de WGS 84. Las geometrías normalizada y de
 análisis sí se exportan como GeoJSON en EPSG:4326.
@@ -76,6 +99,9 @@ El resumen indica `stage: spatial_preparation` y
 - se valida y, si corresponde, repara la geometría;
 - se normaliza a EPSG:4326;
 - se calcula la superficie en hectáreas;
+- se valida localmente qué productos HLS serían compatibles con el benchmark;
+- opcionalmente se consultan IDs, fechas y nubosidad de escenas HLS;
+- opcionalmente se genera un composite anual RGB e índices con píxeles reales;
 - no se construye bosque de referencia 2020;
 - no se detectan cambios;
 - no se atribuye uso posterior;

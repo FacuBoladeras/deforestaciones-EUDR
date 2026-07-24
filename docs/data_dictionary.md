@@ -69,3 +69,14 @@ fecha de registro de la geometría requieren zona horaria.
 Cada dataset utilizado debe registrar proveedor, colección, versión, licencia,
 fecha de acceso, atribución y restricciones. `data/licenses.yml` no debe
 rellenarse con fuentes que todavía no hayan sido verificadas e incorporadas.
+
+## Catálogo de fuentes candidatas
+
+`data/catalog.yml` registra colecciones candidatas verificadas pero todavía no
+utilizadas. Su contrato tipado está en `deforestation_pipeline.catalog`.
+Catalogar no equivale a acceder: el plan local conserva
+`remote_data_accessed: false` y no agrega entradas a `data/licenses.yml`.
+
+HLS v2 se representa mediante sus dos productos constituyentes, HLSL30 y
+HLSS30. Cada producto conserva su propio mapeo de bandas hacia los roles rojo,
+NIR, SWIR 1, SWIR 2 y calidad.

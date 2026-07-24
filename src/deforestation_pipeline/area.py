@@ -62,6 +62,19 @@ class AreaMeasurement:
     utm_hemisphere: str | None
 
 
+def select_projected_crs(
+    validated_geometry: ValidatedGeometry,
+    strategy: AreaCrsStrategy,
+) -> str:
+    """Selecciona un CRS métrico sin confundir la elección con una medición."""
+    geometry = validated_geometry.analysis_geometry
+    violations = _area_geometry_violations(geometry)
+    if violations:
+        raise AreaMeasurementError(violations)
+    calculation_crs, _, _ = _select_calculation_crs(geometry, strategy)
+    return _crs_identifier(calculation_crs)
+
+
 def measure_area(
     validated_geometry: ValidatedGeometry,
     strategy: AreaCrsStrategy = AreaCrsStrategy.AUTO_EQUAL_AREA,

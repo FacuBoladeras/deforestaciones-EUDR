@@ -29,6 +29,7 @@ def test_default_config_is_valid_and_deterministic() -> None:
     assert config.analysis.cutoff_date == date(2020, 12, 31)
     assert config.spatial.forest_definition_min_area_ha == 0.5
     assert config.spatial.preserve_subthreshold_events is True
+    assert config.spatial.raster_crs_strategy == "local_utm"
     assert len(parameters_hash(config)) == 64
 
 
@@ -36,7 +37,7 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
     """El digest se calcula sobre el contenido validado, no sobre un YAML dado."""
     config = PipelineConfig.model_validate(
         {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "analysis": {
                 "cutoff_date": "2020-12-31",
                 "benchmark_start_date": "2019-01-01",
@@ -46,6 +47,7 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
             "spatial": {
                 "interchange_crs": "EPSG:4326",
                 "area_crs_strategy": "auto_equal_area",
+                "raster_crs_strategy": "local_utm",
                 "forest_definition_min_area_ha": 0.5,
                 "minimum_coordinate_decimals": 6,
                 "preserve_subthreshold_events": True,
@@ -53,15 +55,32 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
             "data": {
                 "benchmark_sensor": "HLS",
                 "target_resolution_m": 30,
-                "composition_interval": "monthly",
+                "composition_interval": "annual",
+                "composition_reducer": "median",
+                "source_native_reflectance_scale_factor": 0.0001,
+                "source_native_reflectance_offset": 0.0,
+                "earth_engine_reflectance_multiplier": 1.0,
+                "earth_engine_reflectance_offset": 0.0,
+                "mask_high_aerosol": True,
+                "preserve_water": True,
                 "indices": ["NDVI"],
             },
-            "output": {"directory": "outputs", "formats": ["json"]},
+            "output": {
+                "directory": "outputs",
+                "formats": ["json", "png", "geotiff"],
+                "raster_nodata": -9999.0,
+                "maximum_direct_download_bytes": 32_000_000,
+                "maximum_direct_download_dimension": 10_000,
+                "rgb_min_reflectance": 0.01,
+                "rgb_max_reflectance": 0.18,
+                "index_visualization_ranges": [{"index": "NDVI", "minimum": -1.0, "maximum": 1.0}],
+                "png_dpi": 150,
+            },
         }
     )
 
     assert parameters_hash(config) == (
-        "7681379230f87e2df18ee489a536dc453f80fef3fd2b9d74539c61b238b42895"
+        "a43522380d3989de96ec7a6ee1c4d95a7693474b17c6352c3d519fbb3dc50ab2"
     )
 
 
@@ -74,7 +93,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
     first.write_text(
         "\n".join(
             [
-                'schema_version: "1.0.0"',
+                'schema_version: "1.1.0"',
                 "analysis:",
                 "  cutoff_date: 2020-12-31",
                 "  benchmark_start_date: 2019-01-01",
@@ -83,17 +102,34 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                 "spatial:",
                 "  interchange_crs: EPSG:4326",
                 "  area_crs_strategy: auto_equal_area",
+                "  raster_crs_strategy: local_utm",
                 "  forest_definition_min_area_ha: 0.5",
                 "  minimum_coordinate_decimals: 6",
                 "  preserve_subthreshold_events: true",
                 "data:",
                 "  benchmark_sensor: HLS",
                 "  target_resolution_m: 30",
-                "  composition_interval: monthly",
+                "  composition_interval: annual",
+                "  composition_reducer: median",
+                "  source_native_reflectance_scale_factor: 0.0001",
+                "  source_native_reflectance_offset: 0.0",
+                "  earth_engine_reflectance_multiplier: 1.0",
+                "  earth_engine_reflectance_offset: 0.0",
+                "  mask_high_aerosol: true",
+                "  preserve_water: true",
                 "  indices: [NDVI, EVI2]",
                 "output:",
                 "  directory: outputs",
-                "  formats: [json, geojson]",
+                "  formats: [json, geojson, png, geotiff]",
+                "  raster_nodata: -9999.0",
+                "  maximum_direct_download_bytes: 32000000",
+                "  maximum_direct_download_dimension: 10000",
+                "  rgb_min_reflectance: 0.01",
+                "  rgb_max_reflectance: 0.18",
+                "  index_visualization_ranges:",
+                "    - {index: NDVI, minimum: -1.0, maximum: 1.0}",
+                "    - {index: EVI2, minimum: -1.0, maximum: 1.0}",
+                "  png_dpi: 150",
                 "",
             ]
         ),
@@ -103,21 +139,37 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
         "\n".join(
             [
                 "# Same semantic configuration, deliberately reordered and formatted.",
-                "output: {formats: [json, geojson], directory: outputs}",
                 (
-                    "data: {indices: [NDVI, EVI2], composition_interval: monthly, "
-                    "target_resolution_m: 30, benchmark_sensor: HLS}"
+                    "output: {png_dpi: 150, index_visualization_ranges: "
+                    "[{maximum: 1.0, minimum: -1.0, index: NDVI}, "
+                    "{minimum: -1.0, index: EVI2, maximum: 1.0}], "
+                    "rgb_max_reflectance: 0.18, rgb_min_reflectance: 0.01, "
+                    "maximum_direct_download_dimension: 10000, "
+                    "maximum_direct_download_bytes: 32000000, "
+                    "raster_nodata: -9999.0, formats: [json, geojson, png, geotiff], "
+                    "directory: outputs}"
+                ),
+                (
+                    "data: {indices: [NDVI, EVI2], preserve_water: true, "
+                    "mask_high_aerosol: true, earth_engine_reflectance_offset: 0.0, "
+                    "earth_engine_reflectance_multiplier: 1.0, "
+                    "source_native_reflectance_offset: 0.0, "
+                    "source_native_reflectance_scale_factor: 0.0001, "
+                    "composition_reducer: median, "
+                    "composition_interval: annual, target_resolution_m: 30, "
+                    "benchmark_sensor: HLS}"
                 ),
                 (
                     "spatial: {preserve_subthreshold_events: true, "
                     "minimum_coordinate_decimals: 6, forest_definition_min_area_ha: 0.5, "
-                    "area_crs_strategy: auto_equal_area, interchange_crs: EPSG:4326}"
+                    "raster_crs_strategy: local_utm, area_crs_strategy: auto_equal_area, "
+                    "interchange_crs: EPSG:4326}"
                 ),
                 (
                     "analysis: {random_seed: 7, analysis_end_date: 2021-01-01, "
                     "benchmark_start_date: 2019-01-01, cutoff_date: 2020-12-31}"
                 ),
-                'schema_version: "1.0.0"',
+                'schema_version: "1.1.0"',
                 "",
             ]
         ),
@@ -270,12 +322,18 @@ def test_config_rejects_a_modified_forest_area_threshold() -> None:
         PipelineConfig.model_validate(payload)
 
 
-def test_license_registry_starts_empty() -> None:
-    """No deben declararse licencias de fuentes aún no utilizadas."""
+def test_license_registry_records_both_hls_products_used_by_step_10() -> None:
+    """El primer uso de píxeles debe registrar condiciones y atribución."""
     registry = load_license_registry(PROJECT_ROOT / "data" / "licenses.yml")
 
     assert registry.schema_version == "1.0.0"
-    assert registry.datasets == []
+    assert tuple(dataset.dataset_id for dataset in registry.datasets) == (
+        "hls_l30_v2",
+        "hls_s30_v2",
+    )
+    assert all(dataset.provider == "NASA LP DAAC" for dataset in registry.datasets)
+    assert all("modified" in dataset.attribution.lower() for dataset in registry.datasets)
+    assert all(dataset.restrictions for dataset in registry.datasets)
 
 
 def test_yaml_root_must_be_a_mapping(tmp_path: Path) -> None:

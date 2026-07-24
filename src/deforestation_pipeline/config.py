@@ -48,6 +48,19 @@ class SpectralIndex(StrEnum):
     KNDVI = "kNDVI"
 
 
+class CompositionInterval(StrEnum):
+    """Intervalos temporales admitidos para composiciones ópticas."""
+
+    MONTHLY = "monthly"
+    ANNUAL = "annual"
+
+
+class CompositionReducer(StrEnum):
+    """Reductores explícitos para no ocultar cómo se sintetiza el período."""
+
+    MEDIAN = "median"
+
+
 class OutputFormat(StrEnum):
     """Formatos mínimos de evidencia de la primera prueba."""
 
@@ -55,6 +68,21 @@ class OutputFormat(StrEnum):
     GEOJSON = "geojson"
     CSV = "csv"
     PNG = "png"
+    GEOTIFF = "geotiff"
+
+
+class IndexVisualizationRange(StrictConfigModel):
+    """Escala fija de presentación para un índice; no altera el raster científico."""
+
+    index: SpectralIndex
+    minimum: float
+    maximum: float
+
+    @model_validator(mode="after")
+    def bounds_are_ordered(self) -> IndexVisualizationRange:
+        if self.minimum >= self.maximum:
+            raise ValueError("minimum debe ser menor que maximum")
+        return self
 
 
 class AnalysisConfig(StrictConfigModel):
@@ -88,9 +116,20 @@ class SpatialConfig(StrictConfigModel):
 
     interchange_crs: Literal["EPSG:4326"]
     area_crs_strategy: AreaCrsStrategy
+    raster_crs_strategy: AreaCrsStrategy
     forest_definition_min_area_ha: PositiveHectares
     minimum_coordinate_decimals: AtLeastSix
     preserve_subthreshold_events: Literal[True]
+
+    @field_validator("raster_crs_strategy")
+    @classmethod
+    def raster_grid_uses_local_utm(
+        cls,
+        value: AreaCrsStrategy,
+    ) -> AreaCrsStrategy:
+        if value is not AreaCrsStrategy.LOCAL_UTM:
+            raise ValueError("raster_crs_strategy debe ser local_utm en el Paso 10")
+        return value
 
     @field_validator("forest_definition_min_area_ha")
     @classmethod
@@ -106,7 +145,14 @@ class DataConfig(StrictConfigModel):
 
     benchmark_sensor: Literal["HLS"]
     target_resolution_m: Literal[30]
-    composition_interval: Literal["monthly"]
+    composition_interval: CompositionInterval
+    composition_reducer: CompositionReducer
+    source_native_reflectance_scale_factor: float
+    source_native_reflectance_offset: float
+    earth_engine_reflectance_multiplier: float
+    earth_engine_reflectance_offset: float
+    mask_high_aerosol: Literal[True]
+    preserve_water: Literal[True]
     indices: Annotated[tuple[SpectralIndex, ...], Field(min_length=1)]
 
     @field_validator("indices")
@@ -117,12 +163,37 @@ class DataConfig(StrictConfigModel):
             raise ValueError("indices no puede contener valores repetidos")
         return value
 
+    @model_validator(mode="after")
+    def hls_scaling_is_the_documented_v2_scaling(self) -> DataConfig:
+        if self.source_native_reflectance_scale_factor != 0.0001:
+            raise ValueError("source_native_reflectance_scale_factor debe ser 0.0001 para HLS v2")
+        if self.source_native_reflectance_offset != 0.0:
+            raise ValueError("source_native_reflectance_offset debe ser 0 para HLS v2")
+        if self.earth_engine_reflectance_multiplier != 1.0:
+            raise ValueError(
+                "earth_engine_reflectance_multiplier debe ser 1 porque GEE ya entrega "
+                "reflectancia escalada"
+            )
+        if self.earth_engine_reflectance_offset != 0.0:
+            raise ValueError("earth_engine_reflectance_offset debe ser 0")
+        return self
+
 
 class OutputConfig(StrictConfigModel):
     """Destino y formatos de la primera prueba."""
 
     directory: Path
     formats: Annotated[tuple[OutputFormat, ...], Field(min_length=1)]
+    raster_nodata: float
+    maximum_direct_download_bytes: Annotated[int, Field(gt=0, le=32_000_000)]
+    maximum_direct_download_dimension: Annotated[int, Field(gt=0, le=10_000)]
+    rgb_min_reflectance: float
+    rgb_max_reflectance: float
+    index_visualization_ranges: Annotated[
+        tuple[IndexVisualizationRange, ...],
+        Field(min_length=1),
+    ]
+    png_dpi: Annotated[int, Field(ge=72, le=600)]
 
     @field_validator("formats")
     @classmethod
@@ -132,15 +203,44 @@ class OutputConfig(StrictConfigModel):
             raise ValueError("formats no puede contener valores repetidos")
         return value
 
+    @model_validator(mode="after")
+    def visualization_parameters_are_consistent(self) -> OutputConfig:
+        if self.raster_nodata != -9999.0:
+            raise ValueError("raster_nodata debe ser -9999")
+        if self.rgb_min_reflectance >= self.rgb_max_reflectance:
+            raise ValueError("rgb_min_reflectance debe ser menor que rgb_max_reflectance")
+        range_indices = tuple(item.index for item in self.index_visualization_ranges)
+        if len(range_indices) != len(set(range_indices)):
+            raise ValueError("index_visualization_ranges contiene índices repetidos")
+        return self
+
+    @property
+    def index_visualization_range_map(
+        self,
+    ) -> dict[SpectralIndex, tuple[float, float]]:
+        """Materializa una copia por índice para el render local."""
+        return {
+            item.index: (item.minimum, item.maximum) for item in self.index_visualization_ranges
+        }
+
 
 class PipelineConfig(StrictConfigModel):
     """Configuración raíz del pipeline."""
 
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.1.0"]
     analysis: AnalysisConfig
     spatial: SpatialConfig
     data: DataConfig
     output: OutputConfig
+
+    @model_validator(mode="after")
+    def every_requested_index_has_a_visualization_range(self) -> PipelineConfig:
+        configured = tuple(item.index for item in self.output.index_visualization_ranges)
+        if set(configured) != set(self.data.indices):
+            raise ValueError(
+                "index_visualization_ranges debe cubrir exactamente los índices solicitados"
+            )
+        return self
 
 
 class ResolvedAnalysisConfig(AnalysisConfig):

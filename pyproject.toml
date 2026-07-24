@@ -9,9 +9,13 @@ description = "Pipeline reproducible de evidencia geoespacial para cadenas bovin
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "earthengine-api>=1.7.35,<1.8",
+    "matplotlib>=3.10,<4",
+    "numpy>=2.3,<3",
     "pydantic>=2.12,<3",
     "pyproj>=3.7,<4",
     "pyyaml>=6,<7",
+    "rasterio>=1.4,<2",
     "shapely>=2.1,<3",
 ]
 
@@ -32,6 +36,10 @@ packages = ["src/deforestation_pipeline"]
 python_version = "3.12"
 strict = true
 files = ["src", "tests", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["rasterio", "rasterio.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = [
