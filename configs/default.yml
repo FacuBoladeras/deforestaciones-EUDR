@@ -1,4 +1,4 @@
-schema_version: "1.1.0"
+schema_version: "1.2.0"
 
 analysis:
   cutoff_date: 2020-12-31
@@ -46,6 +46,7 @@ output:
   raster_nodata: -9999.0
   maximum_direct_download_bytes: 32000000
   maximum_direct_download_dimension: 10000
+  maximum_series_download_bytes: 256000000
   rgb_min_reflectance: 0.01
   rgb_max_reflectance: 0.18
   index_visualization_ranges:

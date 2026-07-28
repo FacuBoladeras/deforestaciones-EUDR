@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_default_config_declares_the_annual_hls_raster_experiment() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.1.0"
+    assert config.schema_version == "1.2.0"
     assert config.data.composition_interval == "annual"
     assert config.data.composition_reducer == "median"
     assert config.data.source_native_reflectance_scale_factor == 0.0001
@@ -25,6 +25,7 @@ def test_default_config_declares_the_annual_hls_raster_experiment() -> None:
     assert config.output.raster_nodata == -9999.0
     assert config.output.maximum_direct_download_bytes == 32_000_000
     assert config.output.maximum_direct_download_dimension == 10_000
+    assert config.output.maximum_series_download_bytes == 256_000_000
     assert config.output.rgb_min_reflectance < config.output.rgb_max_reflectance
 
 

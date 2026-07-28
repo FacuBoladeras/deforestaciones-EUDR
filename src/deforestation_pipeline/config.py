@@ -187,6 +187,7 @@ class OutputConfig(StrictConfigModel):
     raster_nodata: float
     maximum_direct_download_bytes: Annotated[int, Field(gt=0, le=32_000_000)]
     maximum_direct_download_dimension: Annotated[int, Field(gt=0, le=10_000)]
+    maximum_series_download_bytes: Annotated[int, Field(gt=0, le=512_000_000)]
     rgb_min_reflectance: float
     rgb_max_reflectance: float
     index_visualization_ranges: Annotated[
@@ -227,7 +228,7 @@ class OutputConfig(StrictConfigModel):
 class PipelineConfig(StrictConfigModel):
     """Configuración raíz del pipeline."""
 
-    schema_version: Literal["1.1.0"]
+    schema_version: Literal["1.2.0"]
     analysis: AnalysisConfig
     spatial: SpatialConfig
     data: DataConfig

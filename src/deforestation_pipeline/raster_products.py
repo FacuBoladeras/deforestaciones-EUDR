@@ -28,6 +28,7 @@ from deforestation_pipeline.hls_composite import (
     REFLECTANCE_BAND_NAMES,
     HlsCompositeImages,
 )
+from deforestation_pipeline.schemas import RasterGridSpec
 
 matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
@@ -65,6 +66,7 @@ class DirectDownloadEstimate(BaseModel):
     band_count: int = Field(gt=0)
     bytes_per_sample: int = Field(gt=0)
     estimated_uncompressed_bytes: int = Field(gt=0)
+    grid_sha256: str | None = None
 
 
 class RasterValidation(BaseModel):
@@ -81,7 +83,9 @@ class RasterValidation(BaseModel):
     data_types: tuple[str, ...]
     nodata: float
     resolution_m: tuple[float, float]
+    transform: tuple[float, float, float, float, float, float]
     bounds: tuple[float, float, float, float]
+    grid_sha256: str
     minimum_by_band: tuple[float, ...]
     maximum_by_band: tuple[float, ...]
 
@@ -109,12 +113,14 @@ class HlsRasterMaterialization:
     estimates: tuple[DirectDownloadEstimate, ...]
     validations: tuple[RasterValidation, ...]
     visualizations: tuple[VisualizationRecord, ...]
+    grid_spec: RasterGridSpec
 
     def metadata_payload(self) -> dict[str, object]:
         return {
             "download_method": "ee.Image.getDownloadURL",
             "signed_urls_persisted": False,
             "resolution_degraded": False,
+            "grid": self.grid_spec.model_dump(mode="json"),
             "estimates": [estimate.model_dump(mode="json") for estimate in self.estimates],
             "raster_validations": [
                 validation.model_dump(mode="json") for validation in self.validations
@@ -170,6 +176,27 @@ def estimate_direct_download(
     )
 
 
+def estimate_fixed_grid_download(
+    *,
+    grid_spec: RasterGridSpec,
+    band_count: int,
+    bytes_per_sample: int,
+) -> DirectDownloadEstimate:
+    """Estima bytes desde la grilla contractual, sin recalcular dimensiones."""
+    return DirectDownloadEstimate(
+        target_crs=grid_spec.target_crs,
+        scale_m=grid_spec.resolution_m,
+        width=grid_spec.width,
+        height=grid_spec.height,
+        band_count=band_count,
+        bytes_per_sample=bytes_per_sample,
+        estimated_uncompressed_bytes=(
+            grid_spec.width * grid_spec.height * band_count * bytes_per_sample
+        ),
+        grid_sha256=grid_spec.grid_sha256,
+    )
+
+
 def validate_direct_download(
     estimate: DirectDownloadEstimate,
     *,
@@ -189,10 +216,8 @@ def validate_direct_download(
 def validate_geotiff_bytes(
     content: bytes,
     *,
-    expected_crs: str,
-    expected_scale_m: float,
+    expected_grid: RasterGridSpec,
     expected_band_names: tuple[str, ...],
-    nodata: float,
     artifact_path: str,
 ) -> tuple[bytes, RasterValidation]:
     """Normaliza metadatos y reabre el GeoTIFF para verificar sus invariantes."""
@@ -201,30 +226,41 @@ def validate_geotiff_bytes(
             with source_memory.open() as source:
                 if source.crs is None:
                     raise RasterDownloadError("geotiff_missing_crs")
-                expected_raster_crs = rasterio.crs.CRS.from_user_input(expected_crs)
+                expected_raster_crs = rasterio.crs.CRS.from_user_input(expected_grid.target_crs)
                 if source.crs != expected_raster_crs:
                     raise RasterDownloadError("geotiff_crs_mismatch")
                 if source.count != len(expected_band_names):
                     raise RasterDownloadError("geotiff_band_count_mismatch")
                 if source.width <= 0 or source.height <= 0:
                     raise RasterDownloadError("geotiff_empty_grid")
-                resolution = (abs(float(source.transform.a)), abs(float(source.transform.e)))
-                if not all(
-                    math.isclose(value, expected_scale_m, abs_tol=1e-6) for value in resolution
+                if source.width != expected_grid.width or source.height != expected_grid.height:
+                    raise RasterDownloadError("geotiff_grid_dimensions_mismatch")
+                source_transform = _affine_transform_values(source.transform)
+                if not _numeric_tuples_match(
+                    source_transform,
+                    expected_grid.transform,
+                    absolute_tolerance=1e-8,
                 ):
-                    raise RasterDownloadError("geotiff_resolution_mismatch")
-                if not (
-                    math.isclose(float(source.transform.b), 0.0, abs_tol=1e-12)
-                    and math.isclose(float(source.transform.d), 0.0, abs_tol=1e-12)
+                    raise RasterDownloadError("geotiff_grid_transform_mismatch")
+                source_bounds = (
+                    float(source.bounds.left),
+                    float(source.bounds.bottom),
+                    float(source.bounds.right),
+                    float(source.bounds.top),
+                )
+                if not _numeric_tuples_match(
+                    source_bounds,
+                    expected_grid.bounds,
+                    absolute_tolerance=1e-8,
                 ):
-                    raise RasterDownloadError("geotiff_rotated_grid_not_supported")
+                    raise RasterDownloadError("geotiff_grid_bounds_mismatch")
                 values = source.read()
                 profile = source.profile.copy()
 
         profile.update(
             driver="GTiff",
             count=len(expected_band_names),
-            nodata=nodata,
+            nodata=expected_grid.nodata,
             compress="deflate",
         )
         with MemoryFile() as normalized_memory:
@@ -239,10 +275,8 @@ def validate_geotiff_bytes(
 
     validation = _inspect_normalized_geotiff(
         normalized_content,
-        expected_crs=expected_crs,
-        expected_scale_m=expected_scale_m,
+        expected_grid=expected_grid,
         expected_band_names=expected_band_names,
-        nodata=nodata,
         artifact_path=artifact_path,
     )
     return normalized_content, validation
@@ -253,11 +287,16 @@ def materialize_hls_raster_products(
     product: HlsCompositeImages,
     aoi_wgs84: BaseGeometry,
     output_config: OutputConfig,
-    target_crs: str,
-    scale_m: int,
+    grid_spec: RasterGridSpec,
     fetch_bytes: FetchBytes | None = None,
 ) -> HlsRasterMaterialization:
-    """Descarga tres GeoTIFF pequeños y genera exclusivamente PNG locales."""
+    """Descarga cinco GeoTIFF sobre una grilla exacta y genera PNG locales."""
+    if not math.isclose(
+        grid_spec.nodata,
+        output_config.raster_nodata,
+        abs_tol=1e-9,
+    ):
+        raise RasterDownloadError("grid_nodata_mismatch")
     effective_fetch = fetch_bytes or _fetch_url_bytes
     raster_specs = (
         (
@@ -284,6 +323,22 @@ def materialize_hls_raster_products(
             2,
             "int16",
         ),
+        (
+            "rasters/hls_valid_observation_count_l30.tif",
+            "hls_valid_observation_count_l30",
+            product.valid_observation_count_l30,
+            ("valid_observation_count_l30",),
+            2,
+            "int16",
+        ),
+        (
+            "rasters/hls_valid_observation_count_s30.tif",
+            "hls_valid_observation_count_s30",
+            product.valid_observation_count_s30,
+            ("valid_observation_count_s30",),
+            2,
+            "int16",
+        ),
     )
     files: dict[str, bytes] = {}
     estimates: list[DirectDownloadEstimate] = []
@@ -298,10 +353,8 @@ def materialize_hls_raster_products(
         output_type,
     ) in raster_specs:
         estimate = validate_direct_download(
-            estimate_direct_download(
-                aoi_wgs84=aoi_wgs84,
-                target_crs=target_crs,
-                scale_m=scale_m,
+            estimate_fixed_grid_download(
+                grid_spec=grid_spec,
                 band_count=len(band_names),
                 bytes_per_sample=bytes_per_sample,
             ),
@@ -314,9 +367,9 @@ def materialize_hls_raster_products(
         parameters = {
             "name": download_name,
             "bands": list(band_names),
-            "region": mapping_for_earth_engine(aoi_wgs84),
-            "scale": scale_m,
-            "crs": target_crs,
+            "crs": grid_spec.target_crs,
+            "crs_transform": list(grid_spec.transform),
+            "dimensions": [grid_spec.width, grid_spec.height],
             "format": "GEO_TIFF",
         }
         try:
@@ -338,10 +391,8 @@ def materialize_hls_raster_products(
             raise RasterDownloadError("download_response_too_large")
         normalized, validation = validate_geotiff_bytes(
             raw_content,
-            expected_crs=target_crs,
-            expected_scale_m=scale_m,
+            expected_grid=grid_spec,
             expected_band_names=band_names,
-            nodata=output_config.raster_nodata,
             artifact_path=artifact_path,
         )
         files[artifact_path] = normalized
@@ -360,23 +411,15 @@ def materialize_hls_raster_products(
         estimates=tuple(estimates),
         validations=tuple(validations),
         visualizations=visualization_records,
+        grid_spec=grid_spec,
     )
-
-
-def mapping_for_earth_engine(geometry: BaseGeometry) -> dict[str, object]:
-    """Devuelve una copia GeoJSON simple apta para parámetros de descarga."""
-    from shapely.geometry import mapping
-
-    return dict(mapping(geometry))
 
 
 def _inspect_normalized_geotiff(
     content: bytes,
     *,
-    expected_crs: str,
-    expected_scale_m: float,
+    expected_grid: RasterGridSpec,
     expected_band_names: tuple[str, ...],
-    nodata: float,
     artifact_path: str,
 ) -> RasterValidation:
     try:
@@ -386,33 +429,58 @@ def _inspect_normalized_geotiff(
                 if descriptions != expected_band_names:
                     raise RasterDownloadError("geotiff_band_names_mismatch")
                 if dataset.crs is None or dataset.crs != rasterio.crs.CRS.from_user_input(
-                    expected_crs
+                    expected_grid.target_crs
                 ):
                     raise RasterDownloadError("geotiff_crs_mismatch")
                 if dataset.nodata is None or not math.isclose(
                     float(dataset.nodata),
-                    nodata,
+                    expected_grid.nodata,
                     abs_tol=1e-6,
                 ):
                     raise RasterDownloadError("geotiff_nodata_mismatch")
+                if dataset.width != expected_grid.width or dataset.height != expected_grid.height:
+                    raise RasterDownloadError("geotiff_grid_dimensions_mismatch")
+                transform_values = _affine_transform_values(dataset.transform)
+                if not _numeric_tuples_match(
+                    transform_values,
+                    expected_grid.transform,
+                    absolute_tolerance=1e-8,
+                ):
+                    raise RasterDownloadError("geotiff_grid_transform_mismatch")
+                bounds = dataset.bounds
+                bounds_values = (
+                    float(bounds.left),
+                    float(bounds.bottom),
+                    float(bounds.right),
+                    float(bounds.top),
+                )
+                if not _numeric_tuples_match(
+                    bounds_values,
+                    expected_grid.bounds,
+                    absolute_tolerance=1e-8,
+                ):
+                    raise RasterDownloadError("geotiff_grid_bounds_mismatch")
                 resolution = (
                     abs(float(dataset.transform.a)),
                     abs(float(dataset.transform.e)),
                 )
                 if not all(
-                    math.isclose(value, expected_scale_m, abs_tol=1e-6) for value in resolution
+                    math.isclose(value, expected_grid.resolution_m, abs_tol=1e-6)
+                    for value in resolution
                 ):
                     raise RasterDownloadError("geotiff_resolution_mismatch")
                 values = dataset.read().astype(np.float64, copy=False)
                 minimums: list[float] = []
                 maximums: list[float] = []
                 for band in values:
-                    valid = np.isfinite(band) & ~np.isclose(band, nodata)
+                    valid = np.isfinite(band) & ~np.isclose(
+                        band,
+                        expected_grid.nodata,
+                    )
                     if not np.any(valid):
                         raise RasterDownloadError("geotiff_band_has_no_valid_pixels")
                     minimums.append(float(np.min(band[valid])))
                     maximums.append(float(np.max(band[valid])))
-                bounds = dataset.bounds
                 return RasterValidation(
                     artifact_path=artifact_path,
                     crs=dataset.crs.to_string(),
@@ -423,12 +491,9 @@ def _inspect_normalized_geotiff(
                     data_types=tuple(dataset.dtypes),
                     nodata=float(dataset.nodata),
                     resolution_m=resolution,
-                    bounds=(
-                        float(bounds.left),
-                        float(bounds.bottom),
-                        float(bounds.right),
-                        float(bounds.top),
-                    ),
+                    transform=transform_values,
+                    bounds=bounds_values,
+                    grid_sha256=expected_grid.grid_sha256,
                     minimum_by_band=tuple(minimums),
                     maximum_by_band=tuple(maximums),
                 )
@@ -436,6 +501,31 @@ def _inspect_normalized_geotiff(
         raise
     except Exception:
         raise RasterDownloadError("geotiff_validation_failed") from None
+
+
+def _affine_transform_values(
+    affine: Any,
+) -> tuple[float, float, float, float, float, float]:
+    return (
+        float(affine.a),
+        float(affine.b),
+        float(affine.c),
+        float(affine.d),
+        float(affine.e),
+        float(affine.f),
+    )
+
+
+def _numeric_tuples_match(
+    first: tuple[float, ...],
+    second: tuple[float, ...],
+    *,
+    absolute_tolerance: float,
+) -> bool:
+    return len(first) == len(second) and all(
+        math.isclose(left, right, abs_tol=absolute_tolerance)
+        for left, right in zip(first, second, strict=True)
+    )
 
 
 def _fetch_url_bytes(url: str, maximum_bytes: int) -> bytes:

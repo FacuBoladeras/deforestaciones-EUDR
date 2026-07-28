@@ -13,15 +13,24 @@ from shapely.geometry import Point, Polygon, box
 
 from deforestation_pipeline.config import load_config
 from deforestation_pipeline.hls_composite import HlsCompositeImages
+from deforestation_pipeline.raster_grid import derive_raster_grid_spec
 from deforestation_pipeline.raster_products import (
     RasterDownloadError,
     estimate_direct_download,
+    estimate_fixed_grid_download,
     materialize_hls_raster_products,
     validate_direct_download,
     validate_geotiff_bytes,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TEST_AOI = box(-63.0, -33.0, -62.999, -32.999)
+TEST_GRID = derive_raster_grid_spec(
+    aoi_wgs84=TEST_AOI,
+    target_crs="EPSG:32720",
+    resolution_m=30,
+    nodata=-9999,
+)
 
 
 def test_download_estimate_is_computed_in_the_explicit_target_grid() -> None:
@@ -58,6 +67,20 @@ def test_download_guard_rejects_size_or_dimension_without_changing_resolution() 
 
     assert "direct_download_limit_exceeded" in str(captured.value)
     assert estimate.scale_m == 30
+
+
+def test_fixed_grid_estimate_uses_exact_contract_dimensions() -> None:
+    estimate = estimate_fixed_grid_download(
+        grid_spec=TEST_GRID,
+        band_count=6,
+        bytes_per_sample=4,
+    )
+
+    assert estimate.target_crs == TEST_GRID.target_crs
+    assert estimate.width == TEST_GRID.width
+    assert estimate.height == TEST_GRID.height
+    assert estimate.grid_sha256 == TEST_GRID.grid_sha256
+    assert estimate.estimated_uncompressed_bytes == (TEST_GRID.width * TEST_GRID.height * 6 * 4)
 
 
 class _DownloadImage:
@@ -104,29 +127,31 @@ def _geotiff_bytes(
 
 
 def test_downloaded_geotiff_is_normalized_and_scientifically_validated() -> None:
+    values = np.full((2, TEST_GRID.height, TEST_GRID.width), 0.1, dtype=np.float32)
+    values[0, 0, 0] = 0.4
+    values[1, 0, 0] = -0.5
+    values[1, -1, -1] = 1.0
     content = _geotiff_bytes(
         band_count=2,
         dtype="float32",
-        values=np.array(
-            [
-                [[0.1, 0.2], [0.3, 0.4]],
-                [[-0.5, 0.0], [0.5, 1.0]],
-            ],
-            dtype=np.float32,
-        ),
+        values=values,
+        crs=TEST_GRID.target_crs,
+        transform_value=Affine(*TEST_GRID.transform),
     )
 
     normalized, validation = validate_geotiff_bytes(
         content,
-        expected_crs="EPSG:6933",
-        expected_scale_m=30,
+        expected_grid=TEST_GRID,
         expected_band_names=("red", "NDVI"),
-        nodata=-9999.0,
         artifact_path="rasters/test.tif",
     )
 
     assert normalized.startswith((b"II*\x00", b"MM\x00*"))
-    assert validation.crs == "EPSG:6933"
+    assert validation.crs == TEST_GRID.target_crs
+    assert validation.grid_sha256 == TEST_GRID.grid_sha256
+    assert validation.transform == pytest.approx(TEST_GRID.transform)
+    assert validation.width == TEST_GRID.width
+    assert validation.height == TEST_GRID.height
     assert validation.band_names == ("red", "NDVI")
     assert validation.resolution_m == (30.0, 30.0)
     assert validation.minimum_by_band == pytest.approx((0.1, -0.5))
@@ -138,14 +163,18 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls() -
     reflectance = _DownloadImage("reflectance")
     indices = _DownloadImage("indices")
     count = _DownloadImage("count")
+    count_l30 = _DownloadImage("count_l30")
+    count_s30 = _DownloadImage("count_s30")
     product = HlsCompositeImages(
         reflectance=reflectance,
         indices=indices,
         valid_observation_count=count,
+        valid_observation_count_l30=count_l30,
+        valid_observation_count_s30=count_s30,
         metadata=cast(Any, None),
     )
-    height = 6
-    width = 8
+    height = TEST_GRID.height
+    width = TEST_GRID.width
     reflectance_values = np.stack(
         [
             np.full((height, width), value, dtype=np.float32)
@@ -164,25 +193,44 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls() -
             band_count=6,
             dtype="float32",
             values=reflectance_values,
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
         ),
         "https://example.invalid/indices": _geotiff_bytes(
             band_count=8,
             dtype="float32",
             values=index_values,
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
         ),
         "https://example.invalid/count": _geotiff_bytes(
             band_count=1,
             dtype="int16",
             values=count_values,
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
+        ),
+        "https://example.invalid/count_l30": _geotiff_bytes(
+            band_count=1,
+            dtype="int16",
+            values=np.full((1, height, width), 7, dtype=np.int16),
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
+        ),
+        "https://example.invalid/count_s30": _geotiff_bytes(
+            band_count=1,
+            dtype="int16",
+            values=np.full((1, height, width), 5, dtype=np.int16),
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
         ),
     }
 
     result = materialize_hls_raster_products(
         product=product,
-        aoi_wgs84=box(-63.0, -33.0, -62.99, -32.99),
+        aoi_wgs84=TEST_AOI,
         output_config=config.output,
-        target_crs="EPSG:6933",
-        scale_m=30,
+        grid_spec=TEST_GRID,
         fetch_bytes=lambda url, maximum_bytes: responses[url],
     )
 
@@ -190,6 +238,8 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls() -
         "rasters/hls_annual_reflectance.tif",
         "rasters/hls_annual_indices.tif",
         "rasters/hls_valid_observation_count.tif",
+        "rasters/hls_valid_observation_count_l30.tif",
+        "rasters/hls_valid_observation_count_s30.tif",
     }
     expected_figures = {
         "figures/rgb.png",
@@ -199,8 +249,10 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls() -
     }
     assert set(result.files) == expected_rasters | expected_figures
     assert all(result.files[path].startswith(b"\x89PNG") for path in expected_figures)
-    assert len(result.validations) == 3
-    assert len(result.estimates) == 3
+    assert len(result.validations) == 5
+    assert len(result.estimates) == 5
+    assert result.grid_spec == TEST_GRID
+    assert all(item.grid_sha256 == TEST_GRID.grid_sha256 for item in result.validations)
     assert all("example.invalid" not in str(item) for item in result.metadata_payload().values())
     assert reflectance.unmask_value == -9999.0
     download_parameters = reflectance.download_parameters
@@ -208,9 +260,9 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls() -
     assert download_parameters == {
         "name": "hls_annual_reflectance",
         "bands": ["blue", "green", "red", "nir", "swir1", "swir2"],
-        "region": download_parameters["region"],
-        "scale": 30,
-        "crs": "EPSG:6933",
+        "crs": TEST_GRID.target_crs,
+        "crs_transform": list(TEST_GRID.transform),
+        "dimensions": [TEST_GRID.width, TEST_GRID.height],
         "format": "GEO_TIFF",
     }
 
@@ -239,17 +291,19 @@ def test_download_estimate_rejects_invalid_geometry_or_crs(
 
 
 @pytest.mark.parametrize(
-    ("content", "expected_crs", "expected_scale", "band_names", "expected_code"),
+    ("content", "band_names", "expected_code"),
     [
         (
             _geotiff_bytes(
                 band_count=1,
                 dtype="float32",
-                values=np.ones((1, 2, 2), dtype=np.float32),
+                values=np.ones(
+                    (1, TEST_GRID.height, TEST_GRID.width),
+                    dtype=np.float32,
+                ),
                 crs="EPSG:4326",
+                transform_value=Affine(*TEST_GRID.transform),
             ),
-            "EPSG:6933",
-            30,
             ("red",),
             "geotiff_crs_mismatch",
         ),
@@ -257,10 +311,13 @@ def test_download_estimate_rejects_invalid_geometry_or_crs(
             _geotiff_bytes(
                 band_count=1,
                 dtype="float32",
-                values=np.ones((1, 2, 2), dtype=np.float32),
+                values=np.ones(
+                    (1, TEST_GRID.height, TEST_GRID.width),
+                    dtype=np.float32,
+                ),
+                crs=TEST_GRID.target_crs,
+                transform_value=Affine(*TEST_GRID.transform),
             ),
-            "EPSG:6933",
-            30,
             ("red", "nir"),
             "geotiff_band_count_mismatch",
         ),
@@ -268,18 +325,39 @@ def test_download_estimate_rejects_invalid_geometry_or_crs(
             _geotiff_bytes(
                 band_count=1,
                 dtype="float32",
-                values=np.ones((1, 2, 2), dtype=np.float32),
-                transform_value=from_origin(-6_000_000, -3_000_000, 60, 60),
+                values=np.ones(
+                    (1, TEST_GRID.height, TEST_GRID.width),
+                    dtype=np.float32,
+                ),
+                crs=TEST_GRID.target_crs,
+                transform_value=Affine(
+                    TEST_GRID.resolution_m,
+                    0,
+                    TEST_GRID.transform[2] + TEST_GRID.resolution_m,
+                    0,
+                    -TEST_GRID.resolution_m,
+                    TEST_GRID.transform[5],
+                ),
             ),
-            "EPSG:6933",
-            30,
             ("red",),
-            "geotiff_resolution_mismatch",
+            "geotiff_grid_transform_mismatch",
+        ),
+        (
+            _geotiff_bytes(
+                band_count=1,
+                dtype="float32",
+                values=np.ones(
+                    (1, TEST_GRID.height + 1, TEST_GRID.width),
+                    dtype=np.float32,
+                ),
+                crs=TEST_GRID.target_crs,
+                transform_value=Affine(*TEST_GRID.transform),
+            ),
+            ("red",),
+            "geotiff_grid_dimensions_mismatch",
         ),
         (
             b"no-es-un-tiff",
-            "EPSG:6933",
-            30,
             ("red",),
             "geotiff_unreadable",
         ),
@@ -287,18 +365,14 @@ def test_download_estimate_rejects_invalid_geometry_or_crs(
 )
 def test_geotiff_contract_rejects_structural_mismatches(
     content: bytes,
-    expected_crs: str,
-    expected_scale: float,
     band_names: tuple[str, ...],
     expected_code: str,
 ) -> None:
     with pytest.raises(RasterDownloadError, match=expected_code):
         validate_geotiff_bytes(
             content,
-            expected_crs=expected_crs,
-            expected_scale_m=expected_scale,
+            expected_grid=TEST_GRID,
             expected_band_names=band_names,
-            nodata=-9999.0,
             artifact_path="rasters/invalid.tif",
         )
 
@@ -331,16 +405,17 @@ def test_download_url_failures_are_classified_without_remote_text(
         reflectance=_FailingDownloadImage(remote_message),
         indices=_DownloadImage("indices"),
         valid_observation_count=_DownloadImage("count"),
+        valid_observation_count_l30=_DownloadImage("count_l30"),
+        valid_observation_count_s30=_DownloadImage("count_s30"),
         metadata=cast(Any, None),
     )
 
     with pytest.raises(RasterDownloadError) as captured:
         materialize_hls_raster_products(
             product=product,
-            aoi_wgs84=box(-63.0, -33.0, -62.99, -32.99),
+            aoi_wgs84=TEST_AOI,
             output_config=config.output,
-            target_crs="EPSG:6933",
-            scale_m=30,
+            grid_spec=TEST_GRID,
             fetch_bytes=lambda url, maximum_bytes: b"",
         )
 

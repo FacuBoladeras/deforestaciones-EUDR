@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import ValidationError
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
@@ -46,13 +45,23 @@ from deforestation_pipeline.hls_composite import (
     HlsCompositeRequest,
     build_hls_annual_composite,
 )
+from deforestation_pipeline.hls_series import (
+    HlsSeriesMaterialization,
+    HlsSeriesRequest,
+    materialize_hls_annual_series,
+)
+from deforestation_pipeline.raster_grid import derive_raster_grid_spec
 from deforestation_pipeline.raster_products import (
     HlsRasterMaterialization,
     materialize_hls_raster_products,
 )
-from deforestation_pipeline.schemas import DatasetRecord, GeoJSONGeometry
+from deforestation_pipeline.schemas import DatasetRecord
+from deforestation_pipeline.vector_ingestion import (
+    ingest_local_vector,
+    readable_vector_drivers,
+)
 
-LOCAL_BUNDLE_SCHEMA_VERSION = "1.1.0"
+LOCAL_BUNDLE_SCHEMA_VERSION = "1.3.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yml"
 DEFAULT_CATALOG_PATH = PROJECT_ROOT / "data" / "catalog.yml"
@@ -69,7 +78,7 @@ def run_local_vector_pipeline(
     input_path: Path,
     output_root: Path,
     config_path: Path,
-    source_crs: str,
+    source_crs: str | None,
     establishment_id: str,
     analysis_end_date: date,
     created_at: datetime | None = None,
@@ -77,6 +86,9 @@ def run_local_vector_pipeline(
     gee_query: GeeMetadataQuery | None = None,
     gee_credentials_path: Path | None = None,
     generate_hls_composite: bool = False,
+    hls_series_request: HlsSeriesRequest | None = None,
+    vector_layer: str | None = None,
+    dissolve_all: bool = False,
 ) -> Path:
     """Ejecuta validación y medición local, y publica un paquete auditable."""
     run_created_at = created_at or datetime.now(UTC)
@@ -85,12 +97,17 @@ def run_local_vector_pipeline(
     if not establishment_id.strip():
         raise LocalVectorInputError("establishment_id no puede estar vacío")
 
-    input_bytes, geometry_contract = _load_local_geojson(input_path)
+    ingestion = ingest_local_vector(
+        input_path,
+        declared_crs=source_crs,
+        layer=vector_layer,
+        dissolve_all=dissolve_all,
+    )
     config = load_config(config_path)
     resolved_config = resolve_run_config(config, analysis_end_date)
     catalog = load_source_catalog(catalog_path)
     source_plan = build_benchmark_source_plan(catalog, resolved_config)
-    validated = validate_geometry(geometry_contract, source_crs)
+    validated = validate_geometry(ingestion.geometry, ingestion.source_crs)
     measurement = measure_area(
         validated,
         resolved_config.spatial.area_crs_strategy,
@@ -98,16 +115,23 @@ def run_local_vector_pipeline(
     gee_result: GeeMetadataQueryResult | None = None
     composite_product: HlsCompositeImages | None = None
     raster_materialization: HlsRasterMaterialization | None = None
+    series_materialization: HlsSeriesMaterialization | None = None
+    if hls_series_request is not None and (gee_query is not None or generate_hls_composite):
+        raise LocalVectorInputError(
+            "la serie HLS no se combina con la consulta o composite anual individual"
+        )
     if generate_hls_composite and gee_query is None:
         raise LocalVectorInputError(
             "generate_hls_composite requiere una consulta GEE con fechas explícitas"
         )
-    if gee_query is not None:
+    remote_requested = gee_query is not None or hls_series_request is not None
+    if remote_requested:
         if gee_credentials_path is None:
             raise LocalVectorInputError(
                 "gee_credentials_path es obligatorio cuando se solicita GEE"
             )
         gee_session = authenticate_earth_engine(gee_credentials_path)
+    if gee_query is not None:
         gee_result = query_hls_scene_metadata(
             session=gee_session,
             plan=source_plan,
@@ -134,15 +158,41 @@ def run_local_vector_pipeline(
                 request=composite_request,
                 generated_at=run_created_at,
             )
+            raster_grid = derive_raster_grid_spec(
+                aoi_wgs84=validated.analysis_geometry,
+                target_crs=composite_request.target_crs,
+                resolution_m=composite_request.scale_m,
+                nodata=resolved_config.output.raster_nodata,
+            )
             raster_materialization = materialize_hls_raster_products(
                 product=composite_product,
                 aoi_wgs84=validated.analysis_geometry,
                 output_config=resolved_config.output,
-                target_crs=composite_request.target_crs,
-                scale_m=composite_request.scale_m,
+                grid_spec=raster_grid,
             )
+    if hls_series_request is not None:
+        raster_target_crs = select_projected_crs(
+            validated,
+            resolved_config.spatial.raster_crs_strategy,
+        )
+        raster_grid = derive_raster_grid_spec(
+            aoi_wgs84=validated.analysis_geometry,
+            target_crs=raster_target_crs,
+            resolution_m=resolved_config.data.target_resolution_m,
+            nodata=resolved_config.output.raster_nodata,
+        )
+        series_materialization = materialize_hls_annual_series(
+            session=gee_session,
+            plan=source_plan,
+            data_config=resolved_config.data,
+            output_config=resolved_config.output,
+            aoi_wgs84=validated.analysis_geometry,
+            grid_spec=raster_grid,
+            request=hls_series_request,
+            generated_at=run_created_at,
+        )
 
-    input_sha256 = _sha256(input_bytes)
+    input_sha256 = ingestion.input_sha256
     catalog_sha256 = _sha256(catalog_path.read_bytes())
     scientific_hash = scientific_parameters_hash(resolved_config)
     execution_hash = execution_config_hash(resolved_config)
@@ -153,10 +203,14 @@ def run_local_vector_pipeline(
                 "deforestation-pipeline:local-vector",
                 establishment_id,
                 input_sha256,
-                source_crs,
+                ingestion.source_crs,
                 scientific_hash,
                 catalog_sha256,
-                _gee_query_identity(gee_query, generate_hls_composite),
+                _gee_query_identity(
+                    gee_query,
+                    generate_hls_composite,
+                    hls_series_request,
+                ),
             )
         ),
     )
@@ -169,8 +223,8 @@ def run_local_vector_pipeline(
 
     area_payload = _area_payload(measurement)
     validation_payload = _validation_payload(validated)
-    remote_data_accessed = gee_result is not None
-    pixel_data_accessed = raster_materialization is not None
+    remote_data_accessed = gee_result is not None or series_materialization is not None
+    pixel_data_accessed = raster_materialization is not None or series_materialization is not None
     datasets = _dataset_records_for_query(
         source_plan=source_plan,
         access_date=run_created_at.date(),
@@ -191,7 +245,12 @@ def run_local_vector_pipeline(
         "remote_data_accessed": remote_data_accessed,
         "pixel_data_accessed": pixel_data_accessed,
     }
-    if pixel_data_accessed:
+    if series_materialization is not None:
+        access_limitation = (
+            "La serie contiene composites anuales comparables; cada composite es una "
+            "síntesis temporal y no representa una fecha de adquisición única."
+        )
+    elif pixel_data_accessed:
         access_limitation = (
             "El composite anual es una síntesis temporal y no representa una fecha "
             "de adquisición única."
@@ -209,11 +268,16 @@ def run_local_vector_pipeline(
     run_summary = {
         **common_metadata,
         "stage": (
-            "annual_hls_composite"
-            if pixel_data_accessed
-            else ("scene_metadata_inventory" if remote_data_accessed else "spatial_preparation")
+            "annual_hls_time_series"
+            if series_materialization is not None
+            else (
+                "annual_hls_composite"
+                if pixel_data_accessed
+                else ("scene_metadata_inventory" if remote_data_accessed else "spatial_preparation")
+            )
         ),
         "final_assessment_generated": False,
+        "input": ingestion.provenance_payload(),
         "geometry": validation_payload,
         "area": area_payload,
         "catalog": {
@@ -224,7 +288,23 @@ def run_local_vector_pipeline(
         "datasets": [dataset.model_dump(mode="json") for dataset in datasets],
         "limitations": limitations,
     }
-    if gee_result is not None:
+    if series_materialization is not None:
+        run_summary["gee"] = {
+            "metadata_only": False,
+            "mode": "annual_hls_time_series",
+            "start_year": series_materialization.metadata.start_year,
+            "end_year": series_materialization.metadata.end_year,
+            "years": list(series_materialization.metadata.years),
+            "grid_sha256": series_materialization.grid_spec.grid_sha256,
+            "grid_path": "temporal/grid.json",
+            "series_metadata_path": "temporal/series_metadata.json",
+            "coverage_path": "temporal/coverage.json",
+            "summary_table_path": "tables/hls_annual_summary.csv",
+            "annual_rgb_panel_path": "figures/temporal/annual_rgb_panel.png",
+            "index_timeseries_path": "figures/temporal/index_timeseries.png",
+            "observation_coverage_path": "figures/temporal/observation_coverage.png",
+        }
+    elif gee_result is not None:
         gee_summary: dict[str, object] = {
             "query_result_path": "gee/scene_metadata.json",
             "metadata_only": not pixel_data_accessed,
@@ -241,13 +321,21 @@ def run_local_vector_pipeline(
                     "valid_observation_count_raster_path": (
                         "rasters/hls_valid_observation_count.tif"
                     ),
+                    "l30_observation_count_raster_path": (
+                        "rasters/hls_valid_observation_count_l30.tif"
+                    ),
+                    "s30_observation_count_raster_path": (
+                        "rasters/hls_valid_observation_count_s30.tif"
+                    ),
+                    "raster_grid_path": "spatial/raster_grid.json",
                     "rgb_figure_path": "figures/rgb.png",
                     "indices_panel_path": "figures/indices_panel.png",
                 }
             )
         run_summary["gee"] = gee_summary
     files = {
-        "input/source.geojson": input_bytes,
+        "input/converted.geojson": ingestion.converted_geojson_bytes,
+        "input/ingestion.json": _json_bytes(ingestion.provenance_payload()),
         "catalog/source_plan.json": _json_bytes(
             {
                 "catalog_sha256": catalog_sha256,
@@ -275,6 +363,7 @@ def run_local_vector_pipeline(
         "environment.json": _json_bytes(_environment_payload()),
         "run_summary.json": _json_bytes(run_summary),
     }
+    files.update(ingestion.bundle_source_files())
     if gee_result is not None:
         files["gee/scene_metadata.json"] = _json_bytes(gee_result.model_dump(mode="json"))
     if composite_product is not None and raster_materialization is not None:
@@ -294,7 +383,12 @@ def run_local_vector_pipeline(
                 "raster_materialization": raster_materialization.metadata_payload(),
             }
         )
+        files["spatial/raster_grid.json"] = _json_bytes(
+            raster_materialization.grid_spec.model_dump(mode="json")
+        )
         files.update(raster_materialization.files)
+    if series_materialization is not None:
+        files.update(series_materialization.files)
     _publish_bundle(
         run_directory=run_directory,
         files=files,
@@ -303,52 +397,6 @@ def run_local_vector_pipeline(
         datasets=tuple(dataset.model_dump(mode="json") for dataset in datasets),
     )
     return run_directory
-
-
-def _load_local_geojson(path: Path) -> tuple[bytes, GeoJSONGeometry]:
-    if path.suffix.lower() not in {".geojson", ".json"}:
-        raise LocalVectorInputError("el runner local admite únicamente GeoJSON (.geojson o .json)")
-    try:
-        content = path.read_bytes()
-    except OSError as error:
-        raise LocalVectorInputError(f"no se pudo leer {path}: {error}") from error
-    try:
-        document: object = json.loads(content)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise LocalVectorInputError(f"GeoJSON inválido en {path}: {error}") from error
-    if not isinstance(document, Mapping):
-        raise LocalVectorInputError("el nodo raíz del GeoJSON debe ser un objeto")
-
-    geometry_payload = _extract_geometry_payload(document)
-    try:
-        geometry = GeoJSONGeometry.model_validate(geometry_payload)
-    except ValidationError as error:
-        raise LocalVectorInputError(f"geometría GeoJSON incompatible: {error}") from error
-    return content, geometry
-
-
-def _extract_geometry_payload(document: Mapping[str, object]) -> object:
-    document_type = document.get("type")
-    if document_type == "FeatureCollection":
-        features = document.get("features")
-        if not isinstance(features, list) or len(features) != 1:
-            raise LocalVectorInputError(
-                "FeatureCollection debe contener exactamente una Feature por corrida"
-            )
-        feature = features[0]
-        if not isinstance(feature, Mapping) or feature.get("type") != "Feature":
-            raise LocalVectorInputError("features[0] debe ser una Feature GeoJSON")
-        return _feature_geometry(feature)
-    if document_type == "Feature":
-        return _feature_geometry(document)
-    return document
-
-
-def _feature_geometry(feature: Mapping[str, object]) -> object:
-    geometry = feature.get("geometry")
-    if not isinstance(geometry, Mapping):
-        raise LocalVectorInputError("la Feature debe contener una geometría no nula")
-    return geometry
 
 
 def _area_payload(measurement: AreaMeasurement) -> dict[str, Any]:
@@ -450,10 +498,12 @@ def _environment_payload() -> dict[str, object]:
             package: _package_version(package)
             for package in (
                 "earthengine-api",
+                "geopandas",
                 "matplotlib",
                 "numpy",
                 "pydantic",
                 "pyproj",
+                "pyogrio",
                 "PyYAML",
                 "rasterio",
                 "shapely",
@@ -510,13 +560,18 @@ def _media_type(path: Path) -> str:
         return "image/tiff"
     if path.suffix.lower() == ".png":
         return "image/png"
+    if path.suffix.lower() == ".csv":
+        return "text/csv"
     return "application/json"
 
 
 def _gee_query_identity(
     query: GeeMetadataQuery | None,
     generate_hls_composite: bool,
+    series_request: HlsSeriesRequest | None,
 ) -> str:
+    if series_request is not None:
+        return f"gee:annual-series:{series_request.start_year}:{series_request.end_year}"
     if query is None:
         return "gee:not-requested"
     return (
@@ -563,11 +618,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entrada CLI local de ``pruebas.py``."""
     parser = argparse.ArgumentParser(
         description=(
-            "Valida un GeoJSON local, mide su superficie y escribe un paquete "
-            "auditable. El acceso GEE y la descarga raster son explícitos."
+            "Convierte un vector local al contrato interno, valida su geometría "
+            "y escribe un paquete auditable. Puede ejecutar todo lo disponible "
+            "hasta el Paso 11."
         )
     )
-    parser.add_argument("vector", type=Path, help="GeoJSON local con una geometría")
+    parser.add_argument(
+        "vector",
+        type=Path,
+        nargs="?",
+        help="archivo vectorial local legible por los drivers GDAL instalados",
+    )
+    parser.add_argument(
+        "--list-vector-formats",
+        action="store_true",
+        help="lista los drivers vectoriales de lectura disponibles y termina",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -586,7 +652,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_CATALOG_PATH,
         help=f"catálogo local YAML (default: {DEFAULT_CATALOG_PATH})",
     )
-    parser.add_argument("--source-crs", default="EPSG:4326", help="CRS declarado del vector")
+    parser.add_argument(
+        "--source-crs",
+        help="CRS sólo si falta en la fuente; si existe debe coincidir",
+    )
+    parser.add_argument(
+        "--layer",
+        help="capa a leer; es obligatoria cuando la fuente contiene varias",
+    )
+    parser.add_argument(
+        "--dissolve-all",
+        action="store_true",
+        help="une explícitamente todas las entidades de la capa en un territorio",
+    )
     parser.add_argument(
         "--establishment-id",
         help="identificador; por defecto se usa el nombre del archivo",
@@ -608,6 +686,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "construye un composite HLS de año calendario, descarga GeoTIFF "
             "pequeños y genera PNG locales"
         ),
+    )
+    parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="ejecuta todo lo implementado hasta el Paso 11, incluido GEE y rasters",
+    )
+    parser.add_argument(
+        "--hls-year",
+        type=int,
+        help="un único año calendario cerrado para --full-pipeline",
+    )
+    parser.add_argument(
+        "--hls-start-year",
+        type=int,
+        help="primer año cerrado del rango HLS inclusivo para --full-pipeline",
+    )
+    parser.add_argument(
+        "--hls-end-year",
+        type=int,
+        help="último año cerrado del rango HLS inclusivo para --full-pipeline",
     )
     parser.add_argument(
         "--credentials",
@@ -632,11 +730,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="máximo de escenas devueltas por colección (1..50)",
     )
     arguments = parser.parse_args(argv)
+    if arguments.list_vector_formats:
+        print("\n".join(readable_vector_drivers()))
+        return 0
+    if arguments.vector is None:
+        parser.error("debe indicar un archivo vectorial")
+    vector_path: Path = arguments.vector
     created_at = datetime.now(UTC)
-    establishment_id = arguments.establishment_id or arguments.vector.stem
+    establishment_id = arguments.establishment_id or vector_path.stem
     analysis_end_date = arguments.analysis_end_date or created_at.date()
     gee_query = None
-    if arguments.query_gee:
+    generate_hls_composite = arguments.build_hls_composite
+    hls_series_request = None
+    if arguments.full_pipeline:
+        range_requested = arguments.hls_start_year is not None or arguments.hls_end_year is not None
+        if arguments.hls_year is None and not range_requested:
+            parser.error(
+                "--full-pipeline requiere --hls-year o el rango completo "
+                "--hls-start-year/--hls-end-year"
+            )
+        if arguments.hls_year is not None and range_requested:
+            parser.error("--hls-year no se combina con un rango HLS")
+        if range_requested and (arguments.hls_start_year is None or arguments.hls_end_year is None):
+            parser.error("el rango HLS requiere --hls-start-year y --hls-end-year")
+        if (
+            arguments.query_gee
+            or arguments.build_hls_composite
+            or arguments.gee_start_date is not None
+            or arguments.gee_end_date is not None
+        ):
+            parser.error("--full-pipeline no se combina con flags GEE de bajo nivel")
+        if arguments.hls_year is not None:
+            if not 2015 <= arguments.hls_year < created_at.year:
+                parser.error(
+                    f"--hls-year debe ser un año cerrado entre 2015 y {created_at.year - 1}"
+                )
+            gee_query = GeeMetadataQuery(
+                start_date=date(arguments.hls_year, 1, 1),
+                end_date=date(arguments.hls_year + 1, 1, 1),
+                max_scenes_per_source=arguments.max_scenes_per_source,
+            )
+            generate_hls_composite = True
+        else:
+            if not (2015 <= arguments.hls_start_year <= arguments.hls_end_year < created_at.year):
+                parser.error(
+                    "el rango HLS debe estar ordenado y contener años cerrados "
+                    f"entre 2015 y {created_at.year - 1}"
+                )
+            hls_series_request = HlsSeriesRequest(
+                start_year=arguments.hls_start_year,
+                end_year=arguments.hls_end_year,
+            )
+    elif (
+        arguments.hls_year is not None
+        or arguments.hls_start_year is not None
+        or arguments.hls_end_year is not None
+    ):
+        parser.error("--hls-year y los rangos HLS requieren --full-pipeline")
+    elif arguments.query_gee:
         if arguments.gee_start_date is None or arguments.gee_end_date is None:
             parser.error("--query-gee requiere --gee-start-date y --gee-end-date")
         gee_query = GeeMetadataQuery(
@@ -650,7 +801,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--build-hls-composite requiere --query-gee")
     try:
         run_directory = run_local_vector_pipeline(
-            input_path=arguments.vector,
+            input_path=vector_path,
             output_root=arguments.output_root,
             config_path=arguments.config,
             source_crs=arguments.source_crs,
@@ -659,8 +810,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             created_at=created_at,
             catalog_path=arguments.catalog,
             gee_query=gee_query,
-            gee_credentials_path=(arguments.credentials if arguments.query_gee else None),
-            generate_hls_composite=arguments.build_hls_composite,
+            gee_credentials_path=(
+                arguments.credentials
+                if gee_query is not None or hls_series_request is not None
+                else None
+            ),
+            generate_hls_composite=generate_hls_composite,
+            hls_series_request=hls_series_request,
+            vector_layer=arguments.layer,
+            dissolve_all=arguments.dissolve_all,
         )
     except (OSError, RuntimeError, ValueError) as error:
         parser.exit(2, f"Error: {error}\n")

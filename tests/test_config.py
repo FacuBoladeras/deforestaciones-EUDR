@@ -37,7 +37,7 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
     """El digest se calcula sobre el contenido validado, no sobre un YAML dado."""
     config = PipelineConfig.model_validate(
         {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "analysis": {
                 "cutoff_date": "2020-12-31",
                 "benchmark_start_date": "2019-01-01",
@@ -71,6 +71,7 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
                 "raster_nodata": -9999.0,
                 "maximum_direct_download_bytes": 32_000_000,
                 "maximum_direct_download_dimension": 10_000,
+                "maximum_series_download_bytes": 256_000_000,
                 "rgb_min_reflectance": 0.01,
                 "rgb_max_reflectance": 0.18,
                 "index_visualization_ranges": [{"index": "NDVI", "minimum": -1.0, "maximum": 1.0}],
@@ -80,7 +81,7 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
     )
 
     assert parameters_hash(config) == (
-        "a43522380d3989de96ec7a6ee1c4d95a7693474b17c6352c3d519fbb3dc50ab2"
+        "8ac73e287477ffc6b3f9c87a3f0b87884f34f9ec4f4fdb70b8c4c97fe8c90947"
     )
 
 
@@ -93,7 +94,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
     first.write_text(
         "\n".join(
             [
-                'schema_version: "1.1.0"',
+                'schema_version: "1.2.0"',
                 "analysis:",
                 "  cutoff_date: 2020-12-31",
                 "  benchmark_start_date: 2019-01-01",
@@ -124,6 +125,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                 "  raster_nodata: -9999.0",
                 "  maximum_direct_download_bytes: 32000000",
                 "  maximum_direct_download_dimension: 10000",
+                "  maximum_series_download_bytes: 256000000",
                 "  rgb_min_reflectance: 0.01",
                 "  rgb_max_reflectance: 0.18",
                 "  index_visualization_ranges:",
@@ -146,6 +148,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                     "rgb_max_reflectance: 0.18, rgb_min_reflectance: 0.01, "
                     "maximum_direct_download_dimension: 10000, "
                     "maximum_direct_download_bytes: 32000000, "
+                    "maximum_series_download_bytes: 256000000, "
                     "raster_nodata: -9999.0, formats: [json, geojson, png, geotiff], "
                     "directory: outputs}"
                 ),
@@ -169,7 +172,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                     "analysis: {random_seed: 7, analysis_end_date: 2021-01-01, "
                     "benchmark_start_date: 2019-01-01, cutoff_date: 2020-12-31}"
                 ),
-                'schema_version: "1.1.0"',
+                'schema_version: "1.2.0"',
                 "",
             ]
         ),

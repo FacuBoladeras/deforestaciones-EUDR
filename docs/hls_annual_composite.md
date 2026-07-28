@@ -14,7 +14,8 @@ implementa línea base forestal, cambio, atribución ni una conclusión EUDR.
 5. Conservar agua y usar la reflectancia física ya escalada por Earth Engine.
 6. Combinar ambas colecciones y calcular mediana anual por banda.
 7. Calcular NDVI, EVI2, NBR, NDMI, NMDI, LSWI, NIRv y kNDVI.
-8. Conservar el conteo de observaciones válidas por píxel.
+8. Conservar el conteo de observaciones válidas por píxel total y separado
+   para HLSL30 y HLSS30.
 
 Los índices se calculan desde la reflectancia mediana. No son la mediana de
 índices calculados escena por escena. NDMI y LSWI usan la misma expresión
@@ -22,7 +23,7 @@ NIR/SWIR1 en esta convención y, por lo tanto, son equivalentes.
 
 ## Descarga
 
-Los tres GeoTIFF se solicitan a 30 m en el huso UTM local que contiene por
+Los cinco GeoTIFF se solicitan a 30 m en el huso UTM local que contiene por
 completo al ROI. Esta grilla se versiona por separado del CRS equivalente
 EPSG:6933 usado para medir superficie: ambos son métricos, pero cumplen
 responsabilidades distintas. Si el ROI cruza un huso UTM, la corrida falla de
@@ -32,7 +33,9 @@ La estimación conservadora usa ancho × alto × bandas × bytes por muestra. Si
 se superan 32.000.000 bytes o 10.000 píxeles por eje, la corrida falla sin
 remuestrear ni dividir el ROI silenciosamente.
 
-Cada GeoTIFF descargado se reabre y verifica:
+Cada solicitud fija explícitamente CRS, transformación afín y dimensiones del
+`RasterGridSpec`; no usa una extensión implícita elegida por GEE. Cada GeoTIFF
+descargado se reabre y verifica:
 
 - CRS, transformación y resolución;
 - cantidad, orden y nombres de bandas;

@@ -166,6 +166,8 @@ class HlsCompositeImages:
     reflectance: Any = field(repr=False, compare=False)
     indices: Any = field(repr=False, compare=False)
     valid_observation_count: Any = field(repr=False, compare=False)
+    valid_observation_count_l30: Any = field(repr=False, compare=False)
+    valid_observation_count_s30: Any = field(repr=False, compare=False)
     metadata: HlsCompositeMetadata
 
 
@@ -272,6 +274,20 @@ def build_hls_annual_composite(
             .toUint16()
             .clip(remote_aoi)
         )
+        valid_observation_count_l30 = _sensor_observation_count(
+            collection=normalized_collections[0],
+            scene_count=l30_inventory.scene_count,
+            combined_collection=combined,
+            output_band="valid_observation_count_l30",
+            remote_aoi=remote_aoi,
+        )
+        valid_observation_count_s30 = _sensor_observation_count(
+            collection=normalized_collections[1],
+            scene_count=s30_inventory.scene_count,
+            combined_collection=combined,
+            output_band="valid_observation_count_s30",
+            remote_aoi=remote_aoi,
+        )
         indices = _build_index_image(reflectance, data_config.indices).clip(remote_aoi)
     except HlsCompositeError:
         raise
@@ -282,6 +298,8 @@ def build_hls_annual_composite(
         reflectance=reflectance,
         indices=indices,
         valid_observation_count=valid_observation_count,
+        valid_observation_count_l30=valid_observation_count_l30,
+        valid_observation_count_s30=valid_observation_count_s30,
         metadata=HlsCompositeMetadata(
             generated_at=generation_time,
             start_date=request.start_date,
@@ -315,6 +333,22 @@ def build_hls_annual_composite(
             ),
         ),
     )
+
+
+def _sensor_observation_count(
+    *,
+    collection: Any,
+    scene_count: int,
+    combined_collection: Any,
+    output_band: str,
+    remote_aoi: Any,
+) -> Any:
+    """Conserva una banda cero explícita cuando un sensor no aportó escenas."""
+    source = collection if scene_count > 0 else combined_collection
+    count = source.select([BandRole.RED.value]).count()
+    if scene_count == 0:
+        count = count.multiply(0)
+    return count.rename(output_band).toUint16().clip(remote_aoi)
 
 
 def _validate_composite_inputs(

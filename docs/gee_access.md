@@ -84,6 +84,17 @@ para una evaluación.
 
 ## Composite anual y descarga
 
+La vía simple para una prueba territorial completa es:
+
+```powershell
+uv run python pruebas.py C:/datos/territorio.gpkg `
+  --layer parcela `
+  --full-pipeline `
+  --hls-year 2023
+```
+
+El modo explícito equivalente, útil para depuración, es:
+
 ```powershell
 uv run python pruebas.py data/samples/local_test_polygon.geojson `
   --query-gee `
@@ -91,6 +102,18 @@ uv run python pruebas.py data/samples/local_test_polygon.geojson `
   --gee-start-date 2023-01-01 `
   --gee-end-date 2024-01-01
 ```
+
+La serie anual del Paso 11 usa:
+
+```powershell
+uv run python pruebas.py data/samples/local_test_polygon.geojson `
+  --full-pipeline `
+  --hls-start-year 2019 `
+  --hls-end-year 2024
+```
+
+El rango es inclusivo y sólo acepta años cerrados. Se autentica una vez y se
+mantiene una única grilla explícita para todas las descargas.
 
 La descarga usa `ee.Image.getDownloadURL` únicamente si cada raster estimado
 queda por debajo de 32 MB y 10.000 píxeles por dimensión. El pipeline nunca

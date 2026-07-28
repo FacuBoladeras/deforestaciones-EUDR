@@ -62,7 +62,7 @@ también los eventos menores como evidencia intermedia.
 
 ## Parámetros del benchmark
 
-La configuración 1.1.0 declara HLS a 30 m y un composite anual por mediana para
+La configuración 1.2.0 declara HLS a 30 m y un composite anual por mediana para
 la primera prueba real. También fija explícitamente:
 
 - separación entre el CRS equivalente de medición y la grilla UTM local del
@@ -74,6 +74,7 @@ la primera prueba real. También fija explícitamente:
 - preservación de agua;
 - nodata `-9999`;
 - límites de descarga directa de 32.000.000 bytes y 10.000 píxeles por eje;
+- límite agregado de 256.000.000 bytes sin comprimir estimados por serie;
 - rangos de visualización RGB y por índice;
 - resolución de render PNG.
 
@@ -89,6 +90,12 @@ Los identificadores de HLSL30 y HLSS30 se mantienen en `data/catalog.yml`, no
 en la configuración científica. Las fechas efectivas del composite se reciben
 por CLI y deben definir un año calendario completo.
 
+El Paso 11 deriva `RasterGridSpec` una sola vez a partir del AOI, el CRS raster
+resuelto, `data.target_resolution_m` y `output.raster_nodata`. La misma
+transformación y dimensiones se envían a GEE para cada año y se validan al
+reabrir los GeoTIFF. El presupuesto `maximum_series_download_bytes` se evalúa
+antes de construir el primer composite remoto.
+
 ## Uso desde Python
 
 ```python
@@ -102,7 +109,8 @@ digest = parameters_hash(config)
 
 ## Contrato y licencias
 
-El JSON Schema del resumen se regenera desde el modelo Pydantic:
+Los JSON Schema del resumen, la grilla, los metadatos temporales y la cobertura
+se regeneran desde los modelos Pydantic:
 
 ```powershell
 uv run python scripts/export_schema.py

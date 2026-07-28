@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime
 from enum import StrEnum
+from math import isclose, isfinite
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pyproj import CRS
+from pyproj.exceptions import CRSError
 
 EUDR_CUTOFF_DATE = date(2020, 12, 31)
 SUMMARY_SCHEMA_VERSION = "1.0.0"
 SUMMARY_SCHEMA_ID = "urn:deforestation-pipeline:analysis-summary:1.0.0"
+RASTER_GRID_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
+RASTER_GRID_SCHEMA_ID = "urn:deforestation-pipeline:raster-grid:1.0.0"
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 NonNegativeHectares = Annotated[float, Field(ge=0)]
 Probability = Annotated[float, Field(ge=0, le=1)]
 Sha256Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+AffineTransform = tuple[float, float, float, float, float, float]
+RasterBounds = tuple[float, float, float, float]
+RasterGridAlignment = Literal["projected_crs_origin_outward_snap"]
+RasterPixelOrientation = Literal["north_up"]
 
 
 class StrictModel(BaseModel):
@@ -110,6 +121,89 @@ class LicenseRegistry(StrictModel):
         return value
 
 
+class RasterGridSpec(StrictModel):
+    """Contrato espacial inmutable para comparar productos píxel a píxel."""
+
+    schema_version: Literal["1.0.0"] = RASTER_GRID_SCHEMA_VERSION
+    target_crs: NonEmptyString
+    resolution_m: Annotated[float, Field(gt=0)]
+    width: Annotated[int, Field(gt=0)]
+    height: Annotated[int, Field(gt=0)]
+    transform: AffineTransform
+    bounds: RasterBounds
+    alignment_strategy: RasterGridAlignment
+    pixel_orientation: RasterPixelOrientation
+    nodata: float
+    aoi_mask_required: Literal[True]
+    grid_sha256: Sha256Digest
+
+    @field_validator("target_crs")
+    @classmethod
+    def target_crs_is_projected_in_metres(cls, value: str) -> str:
+        """Normaliza el CRS y excluye sistemas no proyectados o no métricos."""
+        try:
+            crs = CRS.from_user_input(value)
+        except CRSError:
+            raise ValueError("target_crs debe ser un CRS reconocible") from None
+        if not crs.is_projected:
+            raise ValueError("target_crs debe ser proyectado")
+        axis_units = {axis.unit_name.lower() for axis in crs.axis_info if axis.unit_name}
+        if not axis_units or not axis_units <= {"metre", "meter"}:
+            raise ValueError("target_crs debe usar metros")
+        authority = crs.to_authority()
+        return ":".join(authority) if authority is not None else crs.to_string()
+
+    @model_validator(mode="after")
+    def grid_is_internally_consistent(self) -> RasterGridSpec:
+        """Impide deserializar una identidad espacial parcial o adulterada."""
+        numeric_values = (
+            self.resolution_m,
+            self.nodata,
+            *self.transform,
+            *self.bounds,
+        )
+        if not all(isfinite(value) for value in numeric_values):
+            raise ValueError("la grilla sólo admite valores numéricos finitos")
+
+        x_scale, x_shear, x_origin, y_shear, y_scale, y_origin = self.transform
+        if not (
+            isclose(x_scale, self.resolution_m, abs_tol=1e-9)
+            and isclose(y_scale, -self.resolution_m, abs_tol=1e-9)
+            and isclose(x_shear, 0.0, abs_tol=1e-12)
+            and isclose(y_shear, 0.0, abs_tol=1e-12)
+        ):
+            raise ValueError("transform no representa una grilla norte-arriba a resolution_m")
+
+        left, bottom, right, top = self.bounds
+        if not left < right or not bottom < top:
+            raise ValueError("bounds debe seguir el orden left,bottom,right,top")
+        expected_bounds = (
+            x_origin,
+            y_origin + y_scale * self.height,
+            x_origin + x_scale * self.width,
+            y_origin,
+        )
+        if not all(
+            isclose(actual, expected, abs_tol=1e-8)
+            for actual, expected in zip(self.bounds, expected_bounds, strict=True)
+        ):
+            raise ValueError("bounds no coinciden con transform, width y height")
+
+        expected_hash = raster_grid_sha256(
+            target_crs=self.target_crs,
+            resolution_m=self.resolution_m,
+            width=self.width,
+            height=self.height,
+            transform=self.transform,
+            bounds=self.bounds,
+            alignment_strategy=self.alignment_strategy,
+            pixel_orientation=self.pixel_orientation,
+        )
+        if self.grid_sha256 != expected_hash:
+            raise ValueError("grid_sha256 no coincide con la identidad espacial")
+        return self
+
+
 class ChangeEvent(StrictModel):
     """Evento de cambio separado de una conclusión legal o humana."""
 
@@ -189,6 +283,47 @@ def analysis_summary_json_schema() -> dict[str, Any]:
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["x-schema-version"] = SUMMARY_SCHEMA_VERSION
     return schema
+
+
+def raster_grid_json_schema() -> dict[str, Any]:
+    """Devuelve el JSON Schema canónico de la grilla raster 1.0.0."""
+    schema = RasterGridSpec.model_json_schema(mode="serialization")
+    schema["$id"] = RASTER_GRID_SCHEMA_ID
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["x-schema-version"] = RASTER_GRID_SCHEMA_VERSION
+    return schema
+
+
+def raster_grid_sha256(
+    *,
+    target_crs: str,
+    resolution_m: float,
+    width: int,
+    height: int,
+    transform: AffineTransform,
+    bounds: RasterBounds,
+    alignment_strategy: RasterGridAlignment,
+    pixel_orientation: RasterPixelOrientation,
+) -> str:
+    """Identifica sólo la grilla espacial, sin mezclar codificación ni máscara."""
+    payload = {
+        "alignment_strategy": alignment_strategy,
+        "bounds": bounds,
+        "height": height,
+        "pixel_orientation": pixel_orientation,
+        "resolution_m": resolution_m,
+        "target_crs": target_crs,
+        "transform": transform,
+        "width": width,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _require_timezone(value: datetime, field_name: str) -> datetime:

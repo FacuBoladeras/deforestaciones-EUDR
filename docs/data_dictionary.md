@@ -10,6 +10,44 @@ Todo cambio incompatible exige un nuevo archivo de esquema y una decisión
 explícita de migración. `analysis_version` identifica el código o modelo usado;
 no reemplaza la versión del esquema.
 
+La identidad espacial temporal usa un contrato independiente,
+`RasterGridSpec` 1.0.0, cuyo archivo canónico es
+`data/schemas/raster-grid-v1.0.0.json`. Separar ambos contratos evita confundir
+el formato del resumen de evaluación con la grilla de los productos raster.
+
+Los contratos temporales `HlsSeriesMetadata` y
+`HlsSeriesCoverageDocument` usan versión `1.0.0`; sus esquemas canónicos son
+`hls-series-metadata-v1.0.0.json` y
+`hls-series-coverage-v1.0.0.json`.
+
+## Grilla raster temporal
+
+`RasterGridSpec` conserva CRS métrico, resolución, dimensiones, transformación
+afín, bounds, orientación, estrategia de alineación, nodata y la obligación de
+aplicar la máscara exacta del AOI.
+
+`grid_sha256` identifica únicamente los componentes espaciales. Excluye nodata
+y la máscara porque ambos pertenecen a la codificación o validez del producto,
+no a la correspondencia espacial entre píxeles.
+
+El modelo valida que una grilla sea norte-arriba, sin rotación, y que sus
+bounds coincidan con la transformación, el ancho y el alto. La derivación local
+se describe en `docs/temporal_grid.md`.
+
+## Serie anual HLS
+
+`HlsSeriesMetadata` fija el rango inclusivo, años materializados, hash de
+grilla, fuentes HLS, método de composite, presupuesto estimado y rutas de cada
+producto anual. `final_assessment_generated` es siempre `false`.
+
+`HlsSeriesCoverageDocument` informa por año el número de escenas y, dentro del
+ROI exacto, cantidad y fracción de píxeles observados para el total, HLSL30 y
+HLSS30. También conserva percentiles de conteos y banderas de calidad.
+
+Los estados `complete_observed_coverage`, `partial_observed_coverage` y
+`no_observed_coverage` describen disponibilidad de observaciones. NO son
+estados de riesgo, cambio o cumplimiento.
+
 ## Entrada de establecimiento
 
 `EstablishmentInput` conserva el identificador, la geometría declarada, su CRS,

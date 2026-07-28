@@ -347,6 +347,8 @@ def test_annual_composite_uses_complete_inventory_and_builds_requested_bands() -
     )
     assert result.indices.bands == tuple(index.value for index in config.data.indices)
     assert result.valid_observation_count.bands == ("valid_observation_count",)
+    assert result.valid_observation_count_l30.bands == ("valid_observation_count_l30",)
+    assert result.valid_observation_count_s30.bands == ("valid_observation_count_s30",)
     assert result.metadata.input_scene_count == 3
     assert result.metadata.complete_scene_inventory is True
     assert tuple(source.scene_count for source in result.metadata.sources) == (2, 1)

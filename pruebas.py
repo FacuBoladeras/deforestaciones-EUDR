@@ -1,4 +1,4 @@
-"""Runner local del pipeline para pruebas manuales con un vector GeoJSON."""
+"""Runner local multiformato para ejecutar las capacidades actuales del pipeline."""
 
 from deforestation_pipeline.local_runner import main
 
