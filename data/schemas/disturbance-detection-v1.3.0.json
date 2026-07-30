@@ -1,0 +1,417 @@
+{
+  "$defs": {
+    "CcdcBenchmarkConfig": {
+      "additionalProperties": false,
+      "description": "Perfil reproducible para el benchmark CCDC de Earth Engine.",
+      "properties": {
+        "api_reference_accessed_at": {
+          "format": "date",
+          "title": "Api Reference Accessed At",
+          "type": "string"
+        },
+        "api_reference_last_updated": {
+          "format": "date",
+          "title": "Api Reference Last Updated",
+          "type": "string"
+        },
+        "api_reference_url": {
+          "const": "https://developers.google.com/earth-engine/apidocs/ee-algorithms-temporalsegmentation-ccdc",
+          "title": "Api Reference Url",
+          "type": "string"
+        },
+        "breakpoint_bands": {
+          "items": {
+            "$ref": "#/$defs/DisturbanceIndex"
+          },
+          "minItems": 1,
+          "title": "Breakpoint Bands",
+          "type": "array"
+        },
+        "change_probability_semantics": {
+          "const": "algorithmic_breakpoint_pseudo_probability_not_deforestation_probability",
+          "title": "Change Probability Semantics",
+          "type": "string"
+        },
+        "chi_square_probability": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Chi Square Probability",
+          "type": "number"
+        },
+        "comparative_sensor_profile": {
+          "const": "hlsl30_hlss30_deferred",
+          "title": "Comparative Sensor Profile",
+          "type": "string"
+        },
+        "comparative_sensor_profile_enabled": {
+          "const": false,
+          "title": "Comparative Sensor Profile Enabled",
+          "type": "boolean"
+        },
+        "date_format": {
+          "const": 1,
+          "title": "Date Format",
+          "type": "integer"
+        },
+        "earth_engine_python_api_version": {
+          "const": "1.7.36",
+          "title": "Earth Engine Python Api Version",
+          "type": "string"
+        },
+        "input_temporal_granularity": {
+          "const": "dense_masked_observations",
+          "title": "Input Temporal Granularity",
+          "type": "string"
+        },
+        "lambda": {
+          "minimum": 0,
+          "title": "Lambda",
+          "type": "number"
+        },
+        "magnitude_direction": {
+          "const": "decrease_is_positive",
+          "title": "Magnitude Direction",
+          "type": "string"
+        },
+        "max_iterations": {
+          "minimum": 0,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "min_num_of_years_scaler": {
+          "exclusiveMinimum": 0,
+          "title": "Min Num Of Years Scaler",
+          "type": "number"
+        },
+        "min_observations": {
+          "minimum": 1,
+          "title": "Min Observations",
+          "type": "integer"
+        },
+        "output_semantics_reference_url": {
+          "const": "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_GLOBAL_CCDC_V1",
+          "title": "Output Semantics Reference Url",
+          "type": "string"
+        },
+        "post_cutoff_break_threshold_applied": {
+          "const": false,
+          "title": "Post Cutoff Break Threshold Applied",
+          "type": "boolean"
+        },
+        "raw_array_output_preserved": {
+          "const": true,
+          "title": "Raw Array Output Preserved",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_product": {
+          "const": "HLSL30",
+          "title": "Source Product",
+          "type": "string"
+        },
+        "source_profile": {
+          "const": "hlsl30_only",
+          "title": "Source Profile",
+          "type": "string"
+        },
+        "tmask_bands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tmask Bands",
+          "type": "array"
+        },
+        "tmask_policy": {
+          "const": "disabled_hls_fmask_preapplied",
+          "title": "Tmask Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "earth_engine_python_api_version",
+        "api_reference_url",
+        "api_reference_last_updated",
+        "api_reference_accessed_at",
+        "output_semantics_reference_url",
+        "source_profile",
+        "source_product",
+        "input_temporal_granularity",
+        "breakpoint_bands",
+        "min_observations",
+        "chi_square_probability",
+        "min_num_of_years_scaler",
+        "date_format",
+        "lambda",
+        "max_iterations",
+        "tmask_policy",
+        "tmask_bands",
+        "magnitude_direction",
+        "change_probability_semantics",
+        "comparative_sensor_profile",
+        "comparative_sensor_profile_enabled",
+        "raw_array_output_preserved",
+        "post_cutoff_break_threshold_applied"
+      ],
+      "title": "CcdcBenchmarkConfig",
+      "type": "object"
+    },
+    "DisturbanceDetector": {
+      "description": "Detectores planificados con roles diferentes y evidencia separada.",
+      "enum": [
+        "robust_seasonal_pre_post",
+        "ccdc_benchmark"
+      ],
+      "title": "DisturbanceDetector",
+      "type": "string"
+    },
+    "DisturbanceIndex": {
+      "description": "Subconjunto inicial, deliberadamente pequeño, para detectar señales.",
+      "enum": [
+        "NDVI",
+        "NBR",
+        "NDMI",
+        "NIRv"
+      ],
+      "title": "DisturbanceIndex",
+      "type": "string"
+    },
+    "RobustSeasonalDetectorConfig": {
+      "additionalProperties": false,
+      "description": "Parámetros versionados del diagnóstico 14.2 y su regla de señal 14.3.",
+      "properties": {
+        "anomaly_threshold_applied": {
+          "const": true,
+          "title": "Anomaly Threshold Applied",
+          "type": "boolean"
+        },
+        "long_gap_minimum_consecutive_missing_periods": {
+          "minimum": 2,
+          "title": "Long Gap Minimum Consecutive Missing Periods",
+          "type": "integer"
+        },
+        "mad_scale_constant": {
+          "exclusiveMinimum": 0,
+          "title": "Mad Scale Constant",
+          "type": "number"
+        },
+        "minimum_consecutive_signal_periods": {
+          "minimum": 2,
+          "title": "Minimum Consecutive Signal Periods",
+          "type": "integer"
+        },
+        "minimum_index_support_count": {
+          "minimum": 2,
+          "title": "Minimum Index Support Count",
+          "type": "integer"
+        },
+        "minimum_reference_observations": {
+          "minimum": 1,
+          "title": "Minimum Reference Observations",
+          "type": "integer"
+        },
+        "minimum_valid_post_cutoff_periods": {
+          "minimum": 2,
+          "title": "Minimum Valid Post Cutoff Periods",
+          "type": "integer"
+        },
+        "missing_data_policy": {
+          "const": "preserve_nan_without_interpolation",
+          "title": "Missing Data Policy",
+          "type": "string"
+        },
+        "missing_period_streak_policy": {
+          "const": "break_without_recovery_inference",
+          "title": "Missing Period Streak Policy",
+          "type": "string"
+        },
+        "persistence_rule_applied": {
+          "const": true,
+          "title": "Persistence Rule Applied",
+          "type": "boolean"
+        },
+        "reference_comparison_policy": {
+          "const": "same_season_only",
+          "title": "Reference Comparison Policy",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.1.0",
+          "default": "1.1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "score_aggregation": {
+          "const": "maximum_positive_standardized_magnitude",
+          "title": "Score Aggregation",
+          "type": "string"
+        },
+        "standardized_magnitude_threshold": {
+          "exclusiveMinimum": 0,
+          "title": "Standardized Magnitude Threshold",
+          "type": "number"
+        },
+        "threshold_calibration_status": {
+          "const": "conservative_benchmark_requires_independent_validation",
+          "title": "Threshold Calibration Status",
+          "type": "string"
+        },
+        "vegetation_loss_direction": {
+          "const": "decrease_is_positive",
+          "title": "Vegetation Loss Direction",
+          "type": "string"
+        },
+        "zero_scale_policy": {
+          "const": "not_standardizable",
+          "title": "Zero Scale Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "minimum_reference_observations",
+        "mad_scale_constant",
+        "vegetation_loss_direction",
+        "reference_comparison_policy",
+        "zero_scale_policy",
+        "missing_data_policy",
+        "standardized_magnitude_threshold",
+        "minimum_index_support_count",
+        "minimum_consecutive_signal_periods",
+        "minimum_valid_post_cutoff_periods",
+        "missing_period_streak_policy",
+        "long_gap_minimum_consecutive_missing_periods",
+        "threshold_calibration_status",
+        "score_aggregation",
+        "anomaly_threshold_applied",
+        "persistence_rule_applied"
+      ],
+      "title": "RobustSeasonalDetectorConfig",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:disturbance-detection:1.3.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Políticas científicas previas a implementar o parametrizar detectores.",
+  "properties": {
+    "analysis_start_date": {
+      "format": "date",
+      "title": "Analysis Start Date",
+      "type": "string"
+    },
+    "attribution_allowed": {
+      "const": false,
+      "title": "Attribution Allowed",
+      "type": "boolean"
+    },
+    "automatic_final_assessment_allowed": {
+      "const": false,
+      "title": "Automatic Final Assessment Allowed",
+      "type": "boolean"
+    },
+    "baseline_disagreement_policy": {
+      "const": "evaluate_and_flag",
+      "title": "Baseline Disagreement Policy",
+      "type": "string"
+    },
+    "ccdc_benchmark": {
+      "$ref": "#/$defs/CcdcBenchmarkConfig"
+    },
+    "cutoff_straddling_period_policy": {
+      "const": "exclude",
+      "title": "Cutoff Straddling Period Policy",
+      "type": "string"
+    },
+    "detection_indices": {
+      "items": {
+        "$ref": "#/$defs/DisturbanceIndex"
+      },
+      "minItems": 2,
+      "title": "Detection Indices",
+      "type": "array"
+    },
+    "long_gap_interpolation_allowed": {
+      "const": false,
+      "title": "Long Gap Interpolation Allowed",
+      "type": "boolean"
+    },
+    "minimum_baseline_source_count": {
+      "minimum": 2,
+      "title": "Minimum Baseline Source Count",
+      "type": "integer"
+    },
+    "planned_detectors": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/DisturbanceDetector"
+        },
+        {
+          "$ref": "#/$defs/DisturbanceDetector"
+        }
+      ],
+      "title": "Planned Detectors",
+      "type": "array"
+    },
+    "preserve_detector_disagreement": {
+      "const": true,
+      "title": "Preserve Detector Disagreement",
+      "type": "boolean"
+    },
+    "preserve_detector_evidence": {
+      "const": true,
+      "title": "Preserve Detector Evidence",
+      "type": "boolean"
+    },
+    "reference_history_start_date": {
+      "format": "date",
+      "title": "Reference History Start Date",
+      "type": "string"
+    },
+    "robust_seasonal": {
+      "$ref": "#/$defs/RobustSeasonalDetectorConfig"
+    },
+    "schema_version": {
+      "const": "1.3.0",
+      "default": "1.3.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "score_semantics": {
+      "const": "uncalibrated_disturbance_evidence_score",
+      "title": "Score Semantics",
+      "type": "string"
+    },
+    "spatial_area_threshold_applied": {
+      "const": false,
+      "title": "Spatial Area Threshold Applied",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "reference_history_start_date",
+    "analysis_start_date",
+    "minimum_baseline_source_count",
+    "detection_indices",
+    "planned_detectors",
+    "robust_seasonal",
+    "ccdc_benchmark",
+    "score_semantics",
+    "baseline_disagreement_policy",
+    "cutoff_straddling_period_policy",
+    "preserve_detector_evidence",
+    "preserve_detector_disagreement",
+    "long_gap_interpolation_allowed",
+    "attribution_allowed",
+    "spatial_area_threshold_applied",
+    "automatic_final_assessment_allowed"
+  ],
+  "title": "DisturbanceDetectionConfig",
+  "type": "object",
+  "x-schema-version": "1.3.0"
+}

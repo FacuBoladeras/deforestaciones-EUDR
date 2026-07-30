@@ -51,6 +51,8 @@ def test_geojson_is_converted_to_the_single_internal_geometry_contract(
     assert converted["properties"] == {}
     assert converted["geometry"]["type"] == "Polygon"
     assert result.source_files == {"territorio.geojson": source.read_bytes()}
+    assert result.provenance_payload()["converted_path"] == "json/input/converted.geojson"
+    assert result.bundle_source_files() == {"source/territorio.geojson": source.read_bytes()}
     assert len(result.input_sha256) == 64
 
 

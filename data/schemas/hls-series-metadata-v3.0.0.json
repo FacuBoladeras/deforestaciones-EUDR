@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "HlsSeriesYearProductRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "composite_input_inventory_path": {
+          "title": "Composite Input Inventory Path",
+          "type": "string"
+        },
+        "composite_metadata_path": {
+          "title": "Composite Metadata Path",
+          "type": "string"
+        },
+        "indices_raster_path": {
+          "title": "Indices Raster Path",
+          "type": "string"
+        },
+        "l30_observation_count_raster_path": {
+          "title": "L30 Observation Count Raster Path",
+          "type": "string"
+        },
+        "reflectance_raster_path": {
+          "title": "Reflectance Raster Path",
+          "type": "string"
+        },
+        "s30_observation_count_raster_path": {
+          "title": "S30 Observation Count Raster Path",
+          "type": "string"
+        },
+        "valid_observation_count_raster_path": {
+          "title": "Valid Observation Count Raster Path",
+          "type": "string"
+        },
+        "year": {
+          "title": "Year",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "year",
+        "composite_metadata_path",
+        "composite_input_inventory_path",
+        "reflectance_raster_path",
+        "indices_raster_path",
+        "valid_observation_count_raster_path",
+        "l30_observation_count_raster_path",
+        "s30_observation_count_raster_path"
+      ],
+      "title": "HlsSeriesYearProductRecord",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:hls-series-metadata:3.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "annual_composite_method": {
+      "const": "median_reflectance_then_indices",
+      "title": "Annual Composite Method",
+      "type": "string"
+    },
+    "coverage_path": {
+      "const": "json/temporal/annual/coverage.json",
+      "default": "json/temporal/annual/coverage.json",
+      "title": "Coverage Path",
+      "type": "string"
+    },
+    "end_year": {
+      "title": "End Year",
+      "type": "integer"
+    },
+    "final_assessment_generated": {
+      "const": false,
+      "default": false,
+      "title": "Final Assessment Generated",
+      "type": "boolean"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "grid_path": {
+      "const": "json/temporal/annual/grid.json",
+      "default": "json/temporal/annual/grid.json",
+      "title": "Grid Path",
+      "type": "string"
+    },
+    "grid_sha256": {
+      "title": "Grid Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "3.0.0",
+      "default": "3.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_products": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "const": "HLSL30",
+          "type": "string"
+        },
+        {
+          "const": "HLSS30",
+          "type": "string"
+        }
+      ],
+      "title": "Source Products",
+      "type": "array"
+    },
+    "start_year": {
+      "title": "Start Year",
+      "type": "integer"
+    },
+    "summary_table_path": {
+      "const": "tables/annual/summary.csv",
+      "default": "tables/annual/summary.csv",
+      "title": "Summary Table Path",
+      "type": "string"
+    },
+    "total_estimated_uncompressed_bytes": {
+      "exclusiveMinimum": 0,
+      "title": "Total Estimated Uncompressed Bytes",
+      "type": "integer"
+    },
+    "year_products": {
+      "items": {
+        "$ref": "#/$defs/HlsSeriesYearProductRecord"
+      },
+      "title": "Year Products",
+      "type": "array"
+    },
+    "years": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Years",
+      "type": "array"
+    }
+  },
+  "required": [
+    "generated_at",
+    "start_year",
+    "end_year",
+    "years",
+    "grid_sha256",
+    "source_products",
+    "annual_composite_method",
+    "total_estimated_uncompressed_bytes",
+    "year_products"
+  ],
+  "title": "HlsSeriesMetadata",
+  "type": "object",
+  "x-schema-version": "3.0.0"
+}

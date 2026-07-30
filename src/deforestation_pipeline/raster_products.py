@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any
+from typing import Any, Literal
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -34,6 +36,10 @@ matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
 FetchBytes = Callable[[str, int], bytes]
+AllNodataBandPolicy = Literal["reject", "allow_for_missing_period"]
+DOWNLOAD_TRANSFER_MAX_ATTEMPTS = 2
+DOWNLOAD_TRANSFER_RETRY_DELAY_SECONDS = 1.0
+DOWNLOAD_TRANSFER_TIMEOUT_SECONDS = 180
 INDEX_COLORMAPS: dict[SpectralIndex, str] = {
     SpectralIndex.NDVI: "RdYlGn",
     SpectralIndex.EVI2: "RdYlGn",
@@ -49,9 +55,41 @@ INDEX_COLORMAPS: dict[SpectralIndex, str] = {
 class RasterDownloadError(RuntimeError):
     """Fallo legible que nunca persiste una URL firmada."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        artifact_path: str | None = None,
+        product: str | None = None,
+        band_index: int | None = None,
+    ) -> None:
         self.code = code
-        super().__init__(f"Descarga raster fallida: {code}")
+        self.artifact_path = artifact_path
+        self.product = product
+        self.band_index = band_index
+        artifact_label = artifact_path or "<unknown>"
+        product_label = product or "<unknown>"
+        band_label = str(band_index) if band_index is not None else "<not_applicable>"
+        super().__init__(
+            "Descarga raster fallida: "
+            f"{code}; artifact_path={artifact_label}; "
+            f"product={product_label}; band_index={band_label}"
+        )
+
+    def with_context(
+        self,
+        *,
+        artifact_path: str,
+        product: str,
+        band_index: int | None = None,
+    ) -> RasterDownloadError:
+        """Completa contexto conocido sin incorporar texto remoto ni URLs."""
+        return RasterDownloadError(
+            self.code,
+            artifact_path=self.artifact_path or artifact_path,
+            product=self.product or product,
+            band_index=self.band_index if self.band_index is not None else band_index,
+        )
 
 
 class DirectDownloadEstimate(BaseModel):
@@ -86,8 +124,10 @@ class RasterValidation(BaseModel):
     transform: tuple[float, float, float, float, float, float]
     bounds: tuple[float, float, float, float]
     grid_sha256: str
-    minimum_by_band: tuple[float, ...]
-    maximum_by_band: tuple[float, ...]
+    minimum_by_band: tuple[float | None, ...]
+    maximum_by_band: tuple[float | None, ...]
+    valid_pixel_count_by_band: tuple[int, ...]
+    all_nodata_band_names: tuple[str, ...]
 
 
 class VisualizationRecord(BaseModel):
@@ -98,6 +138,7 @@ class VisualizationRecord(BaseModel):
     path: str
     source_raster: str
     band_name: str
+    title: str
     display_min: float | None
     display_max: float | None
     colormap: str
@@ -129,6 +170,15 @@ class HlsRasterMaterialization:
                 visualization.model_dump(mode="json") for visualization in self.visualizations
             ],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SingleRasterMaterialization:
+    """Un GeoTIFF normalizado sobre la grilla contractual."""
+
+    content: bytes
+    estimate: DirectDownloadEstimate
+    validation: RasterValidation
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,8 +269,11 @@ def validate_geotiff_bytes(
     expected_grid: RasterGridSpec,
     expected_band_names: tuple[str, ...],
     artifact_path: str,
+    product: str | None = None,
+    all_nodata_band_policy: AllNodataBandPolicy = "reject",
 ) -> tuple[bytes, RasterValidation]:
     """Normaliza metadatos y reabre el GeoTIFF para verificar sus invariantes."""
+    product_name = product or artifact_path
     try:
         with MemoryFile(content) as source_memory:
             with source_memory.open() as source:
@@ -268,8 +321,11 @@ def validate_geotiff_bytes(
                 normalized.write(values)
                 normalized.descriptions = expected_band_names
             normalized_content = bytes(normalized_memory.read())
-    except RasterDownloadError:
-        raise
+    except RasterDownloadError as error:
+        raise error.with_context(
+            artifact_path=artifact_path,
+            product=product_name,
+        ) from None
     except Exception:
         raise RasterDownloadError("geotiff_unreadable") from None
 
@@ -278,8 +334,106 @@ def validate_geotiff_bytes(
         expected_grid=expected_grid,
         expected_band_names=expected_band_names,
         artifact_path=artifact_path,
+        product=product_name,
+        all_nodata_band_policy=all_nodata_band_policy,
     )
     return normalized_content, validation
+
+
+def materialize_ee_image_to_grid(
+    *,
+    image: Any,
+    band_names: tuple[str, ...],
+    artifact_path: str,
+    download_name: str,
+    output_config: OutputConfig,
+    grid_spec: RasterGridSpec,
+    output_type: Literal["float32", "int16"],
+    fetch_bytes: FetchBytes | None = None,
+) -> SingleRasterMaterialization:
+    """Descarga una imagen GEE arbitraria sin relajar grilla ni presupuesto."""
+    product_name = download_name
+    if not math.isclose(
+        grid_spec.nodata,
+        output_config.raster_nodata,
+        abs_tol=1e-9,
+    ):
+        raise RasterDownloadError(
+            "grid_nodata_mismatch",
+            artifact_path=artifact_path,
+            product=product_name,
+        )
+    try:
+        estimate = validate_direct_download(
+            estimate_fixed_grid_download(
+                grid_spec=grid_spec,
+                band_count=len(band_names),
+                bytes_per_sample=4 if output_type == "float32" else 2,
+            ),
+            maximum_bytes=output_config.maximum_direct_download_bytes,
+            maximum_dimension=output_config.maximum_direct_download_dimension,
+        )
+    except RasterDownloadError as error:
+        raise error.with_context(
+            artifact_path=artifact_path,
+            product=product_name,
+        ) from None
+    prepared = image.toFloat() if output_type == "float32" else image.toInt16()
+    prepared = prepared.unmask(output_config.raster_nodata, False)
+    parameters = {
+        "name": download_name,
+        "bands": list(band_names),
+        "crs": grid_spec.target_crs,
+        "crs_transform": list(grid_spec.transform),
+        "dimensions": [grid_spec.width, grid_spec.height],
+        "format": "GEO_TIFF",
+    }
+    try:
+        url = prepared.getDownloadURL(parameters)
+    except Exception as error:
+        raise RasterDownloadError(
+            _remote_download_error_code(error),
+            artifact_path=artifact_path,
+            product=product_name,
+        ) from None
+    if not isinstance(url, str) or urlparse(url).scheme != "https":
+        raise RasterDownloadError(
+            "download_url_invalid",
+            artifact_path=artifact_path,
+            product=product_name,
+        )
+    effective_fetch = fetch_bytes or _fetch_url_bytes
+    try:
+        raw_content = effective_fetch(url, output_config.maximum_direct_download_bytes)
+    except RasterDownloadError as error:
+        raise error.with_context(
+            artifact_path=artifact_path,
+            product=product_name,
+        ) from None
+    except Exception:
+        raise RasterDownloadError(
+            "download_transfer_failed",
+            artifact_path=artifact_path,
+            product=product_name,
+        ) from None
+    if len(raw_content) > output_config.maximum_direct_download_bytes:
+        raise RasterDownloadError(
+            "download_response_too_large",
+            artifact_path=artifact_path,
+            product=product_name,
+        )
+    normalized, validation = validate_geotiff_bytes(
+        raw_content,
+        expected_grid=grid_spec,
+        expected_band_names=band_names,
+        artifact_path=artifact_path,
+        product=product_name,
+    )
+    return SingleRasterMaterialization(
+        content=normalized,
+        estimate=estimate,
+        validation=validation,
+    )
 
 
 def materialize_hls_raster_products(
@@ -289,6 +443,7 @@ def materialize_hls_raster_products(
     output_config: OutputConfig,
     grid_spec: RasterGridSpec,
     fetch_bytes: FetchBytes | None = None,
+    artifact_kind: Literal["annual", "period"] = "annual",
 ) -> HlsRasterMaterialization:
     """Descarga cinco GeoTIFF sobre una grilla exacta y genera PNG locales."""
     if not math.isclose(
@@ -296,27 +451,31 @@ def materialize_hls_raster_products(
         output_config.raster_nodata,
         abs_tol=1e-9,
     ):
-        raise RasterDownloadError("grid_nodata_mismatch")
+        raise RasterDownloadError(
+            "grid_nodata_mismatch",
+            artifact_path="<hls_bundle>",
+            product=f"hls_{artifact_kind}",
+        )
     effective_fetch = fetch_bytes or _fetch_url_bytes
     raster_specs = (
         (
-            "rasters/hls_annual_reflectance.tif",
-            "hls_annual_reflectance",
+            f"tiffs/hls_{artifact_kind}_reflectance.tif",
+            f"hls_{artifact_kind}_reflectance",
             product.reflectance,
             REFLECTANCE_BAND_NAMES,
             4,
             "float32",
         ),
         (
-            "rasters/hls_annual_indices.tif",
-            "hls_annual_indices",
+            f"tiffs/hls_{artifact_kind}_indices.tif",
+            f"hls_{artifact_kind}_indices",
             product.indices,
             tuple(item.index.value for item in output_config.index_visualization_ranges),
             4,
             "float32",
         ),
         (
-            "rasters/hls_valid_observation_count.tif",
+            "tiffs/hls_valid_observation_count.tif",
             "hls_valid_observation_count",
             product.valid_observation_count,
             ("valid_observation_count",),
@@ -324,7 +483,7 @@ def materialize_hls_raster_products(
             "int16",
         ),
         (
-            "rasters/hls_valid_observation_count_l30.tif",
+            "tiffs/hls_valid_observation_count_l30.tif",
             "hls_valid_observation_count_l30",
             product.valid_observation_count_l30,
             ("valid_observation_count_l30",),
@@ -332,7 +491,7 @@ def materialize_hls_raster_products(
             "int16",
         ),
         (
-            "rasters/hls_valid_observation_count_s30.tif",
+            "tiffs/hls_valid_observation_count_s30.tif",
             "hls_valid_observation_count_s30",
             product.valid_observation_count_s30,
             ("valid_observation_count_s30",),
@@ -352,18 +511,24 @@ def materialize_hls_raster_products(
         bytes_per_sample,
         output_type,
     ) in raster_specs:
-        estimate = validate_direct_download(
-            estimate_fixed_grid_download(
-                grid_spec=grid_spec,
-                band_count=len(band_names),
-                bytes_per_sample=bytes_per_sample,
-            ),
-            maximum_bytes=output_config.maximum_direct_download_bytes,
-            maximum_dimension=output_config.maximum_direct_download_dimension,
-        )
+        try:
+            estimate = validate_direct_download(
+                estimate_fixed_grid_download(
+                    grid_spec=grid_spec,
+                    band_count=len(band_names),
+                    bytes_per_sample=bytes_per_sample,
+                ),
+                maximum_bytes=output_config.maximum_direct_download_bytes,
+                maximum_dimension=output_config.maximum_direct_download_dimension,
+            )
+        except RasterDownloadError as error:
+            raise error.with_context(
+                artifact_path=artifact_path,
+                product=download_name,
+            ) from None
         estimates.append(estimate)
-        prepared = image.unmask(output_config.raster_nodata)
-        prepared = prepared.toFloat() if output_type == "float32" else prepared.toInt16()
+        prepared = image.toFloat() if output_type == "float32" else image.toInt16()
+        prepared = prepared.unmask(output_config.raster_nodata, False)
         parameters = {
             "name": download_name,
             "bands": list(band_names),
@@ -375,33 +540,65 @@ def materialize_hls_raster_products(
         try:
             url = prepared.getDownloadURL(parameters)
         except Exception as error:
-            raise RasterDownloadError(_remote_download_error_code(error)) from None
+            raise RasterDownloadError(
+                _remote_download_error_code(error),
+                artifact_path=artifact_path,
+                product=download_name,
+            ) from None
         if not isinstance(url, str) or urlparse(url).scheme != "https":
-            raise RasterDownloadError("download_url_invalid")
+            raise RasterDownloadError(
+                "download_url_invalid",
+                artifact_path=artifact_path,
+                product=download_name,
+            )
         try:
             raw_content = effective_fetch(
                 url,
                 output_config.maximum_direct_download_bytes,
             )
-        except RasterDownloadError:
-            raise
+        except RasterDownloadError as error:
+            raise error.with_context(
+                artifact_path=artifact_path,
+                product=download_name,
+            ) from None
         except Exception:
-            raise RasterDownloadError("download_transfer_failed") from None
+            raise RasterDownloadError(
+                "download_transfer_failed",
+                artifact_path=artifact_path,
+                product=download_name,
+            ) from None
         if len(raw_content) > output_config.maximum_direct_download_bytes:
-            raise RasterDownloadError("download_response_too_large")
+            raise RasterDownloadError(
+                "download_response_too_large",
+                artifact_path=artifact_path,
+                product=download_name,
+            )
         normalized, validation = validate_geotiff_bytes(
             raw_content,
             expected_grid=grid_spec,
             expected_band_names=band_names,
             artifact_path=artifact_path,
+            product=download_name,
+            all_nodata_band_policy=(
+                "allow_for_missing_period"
+                if artifact_kind == "period" and output_type == "float32"
+                else "reject"
+            ),
         )
         files[artifact_path] = normalized
         validations.append(validation)
 
+    reflectance_path = f"tiffs/hls_{artifact_kind}_reflectance.tif"
+    indices_path = f"tiffs/hls_{artifact_kind}_indices.tif"
+    count_path = "tiffs/hls_valid_observation_count.tif"
     figures, visualization_records = _render_visualizations(
-        reflectance_content=files["rasters/hls_annual_reflectance.tif"],
-        indices_content=files["rasters/hls_annual_indices.tif"],
-        count_content=files["rasters/hls_valid_observation_count.tif"],
+        reflectance_content=files[reflectance_path],
+        indices_content=files[indices_path],
+        count_content=files["tiffs/hls_valid_observation_count.tif"],
+        reflectance_source_path=reflectance_path,
+        indices_source_path=indices_path,
+        count_source_path=count_path,
+        composite_label=("anual" if artifact_kind == "annual" else "del período"),
         aoi_wgs84=aoi_wgs84,
         output_config=output_config,
     )
@@ -421,6 +618,8 @@ def _inspect_normalized_geotiff(
     expected_grid: RasterGridSpec,
     expected_band_names: tuple[str, ...],
     artifact_path: str,
+    product: str,
+    all_nodata_band_policy: AllNodataBandPolicy,
 ) -> RasterValidation:
     try:
         with MemoryFile(content) as memory:
@@ -470,17 +669,44 @@ def _inspect_normalized_geotiff(
                 ):
                     raise RasterDownloadError("geotiff_resolution_mismatch")
                 values = dataset.read().astype(np.float64, copy=False)
-                minimums: list[float] = []
-                maximums: list[float] = []
-                for band in values:
-                    valid = np.isfinite(band) & ~np.isclose(
+                minimums: list[float | None] = []
+                maximums: list[float | None] = []
+                valid_counts: list[int] = []
+                all_nodata_band_names: list[str] = []
+                valid_masks = tuple(
+                    np.isfinite(band)
+                    & ~np.isclose(
                         band,
                         expected_grid.nodata,
                     )
+                    for band in values
+                )
+                empty_band_indices = tuple(
+                    index for index, valid in enumerate(valid_masks) if not np.any(valid)
+                )
+                if empty_band_indices and (
+                    all_nodata_band_policy == "reject"
+                    or len(empty_band_indices) != len(expected_band_names)
+                ):
+                    raise RasterDownloadError(
+                        "geotiff_band_has_no_valid_pixels",
+                        artifact_path=artifact_path,
+                        product=product,
+                        band_index=empty_band_indices[0],
+                    )
+                for band_index, (band_name, band) in enumerate(
+                    zip(expected_band_names, values, strict=True)
+                ):
+                    valid = valid_masks[band_index]
                     if not np.any(valid):
-                        raise RasterDownloadError("geotiff_band_has_no_valid_pixels")
+                        minimums.append(None)
+                        maximums.append(None)
+                        valid_counts.append(0)
+                        all_nodata_band_names.append(band_name)
+                        continue
                     minimums.append(float(np.min(band[valid])))
                     maximums.append(float(np.max(band[valid])))
+                    valid_counts.append(int(np.count_nonzero(valid)))
                 return RasterValidation(
                     artifact_path=artifact_path,
                     crs=dataset.crs.to_string(),
@@ -496,11 +722,20 @@ def _inspect_normalized_geotiff(
                     grid_sha256=expected_grid.grid_sha256,
                     minimum_by_band=tuple(minimums),
                     maximum_by_band=tuple(maximums),
+                    valid_pixel_count_by_band=tuple(valid_counts),
+                    all_nodata_band_names=tuple(all_nodata_band_names),
                 )
-    except RasterDownloadError:
-        raise
+    except RasterDownloadError as error:
+        raise error.with_context(
+            artifact_path=artifact_path,
+            product=product,
+        ) from None
     except Exception:
-        raise RasterDownloadError("geotiff_validation_failed") from None
+        raise RasterDownloadError(
+            "geotiff_validation_failed",
+            artifact_path=artifact_path,
+            product=product,
+        ) from None
 
 
 def _affine_transform_values(
@@ -530,14 +765,56 @@ def _numeric_tuples_match(
 
 def _fetch_url_bytes(url: str, maximum_bytes: int) -> bytes:
     request = Request(url, headers={"User-Agent": "deforestation-pipeline/0.1"})
-    try:
-        with urlopen(request, timeout=180) as response:
-            content = bytes(response.read(maximum_bytes + 1))
-    except Exception:
-        raise RasterDownloadError("download_transfer_failed") from None
-    if len(content) > maximum_bytes:
-        raise RasterDownloadError("download_response_too_large")
-    return content
+    for attempt in range(1, DOWNLOAD_TRANSFER_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(
+                request,
+                timeout=DOWNLOAD_TRANSFER_TIMEOUT_SECONDS,
+            ) as response:
+                content = bytes(response.read(maximum_bytes + 1))
+        except Exception as error:
+            code = _download_transfer_error_code(error)
+            if attempt < DOWNLOAD_TRANSFER_MAX_ATTEMPTS and _is_retryable_transfer_error(code):
+                time.sleep(DOWNLOAD_TRANSFER_RETRY_DELAY_SECONDS)
+                continue
+            raise RasterDownloadError(code) from None
+        if len(content) > maximum_bytes:
+            raise RasterDownloadError("download_response_too_large")
+        return content
+    raise AssertionError("bucle de descarga sin resultado")
+
+
+def _download_transfer_error_code(error: Exception) -> str:
+    """Clasifica fallas sin persistir URL firmada ni texto remoto."""
+    if isinstance(error, HTTPError):
+        if error.code in {401, 403}:
+            return "permission_denied"
+        if error.code == 429:
+            return "quota_or_rate_limit"
+        if error.code in {408, 504}:
+            return "timeout"
+        if error.code == 413:
+            return "remote_size_limit_exceeded"
+        if 500 <= error.code <= 599:
+            return "remote_server_error"
+        return "download_transfer_failed"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, URLError) and isinstance(
+        error.reason,
+        TimeoutError,
+    ):
+        return "timeout"
+    return "download_transfer_failed"
+
+
+def _is_retryable_transfer_error(code: str) -> bool:
+    return code in {
+        "download_transfer_failed",
+        "quota_or_rate_limit",
+        "remote_server_error",
+        "timeout",
+    }
 
 
 def _render_visualizations(
@@ -545,6 +822,10 @@ def _render_visualizations(
     reflectance_content: bytes,
     indices_content: bytes,
     count_content: bytes,
+    reflectance_source_path: str,
+    indices_source_path: str,
+    count_source_path: str,
+    composite_label: str,
     aoi_wgs84: BaseGeometry,
     output_config: OutputConfig,
 ) -> tuple[dict[str, bytes], tuple[VisualizationRecord, ...]]:
@@ -557,18 +838,21 @@ def _render_visualizations(
     records: list[VisualizationRecord] = []
 
     rgb_path = "figures/rgb.png"
+    rgb_title = f"Composite {composite_label} HLS — RGB"
     files[rgb_path] = _render_rgb(
         reflectance,
         aoi_projected,
         display_min=output_config.rgb_min_reflectance,
         display_max=output_config.rgb_max_reflectance,
         dpi=output_config.png_dpi,
+        title=rgb_title,
     )
     records.append(
         VisualizationRecord(
             path=rgb_path,
-            source_raster="rasters/hls_annual_reflectance.tif",
+            source_raster=reflectance_source_path,
             band_name="red,green,blue",
+            title=rgb_title,
             display_min=output_config.rgb_min_reflectance,
             display_max=output_config.rgb_max_reflectance,
             colormap="RGB",
@@ -579,14 +863,15 @@ def _render_visualizations(
 
     visualization_ranges = output_config.index_visualization_range_map
     for index in (item.index for item in output_config.index_visualization_ranges):
-        path = f"figures/indices/{index.value}.png"
+        path = f"figures/index_{index.value}.png"
         display_min, display_max = visualization_ranges[index]
         colormap = INDEX_COLORMAPS[index]
+        index_title = f"Composite HLS — {index.value}"
         files[path] = _render_single_band(
             indices,
             aoi_projected,
             band_name=index.value,
-            title=f"Composite anual HLS — {index.value}",
+            title=index_title,
             display_min=display_min,
             display_max=display_max,
             colormap=colormap,
@@ -595,8 +880,9 @@ def _render_visualizations(
         records.append(
             VisualizationRecord(
                 path=path,
-                source_raster="rasters/hls_annual_indices.tif",
+                source_raster=indices_source_path,
                 band_name=index.value,
+                title=index_title,
                 display_min=display_min,
                 display_max=display_max,
                 colormap=colormap,
@@ -606,16 +892,19 @@ def _render_visualizations(
         )
 
     panel_path = "figures/indices_panel.png"
+    panel_title = f"Índices del composite {composite_label} HLS"
     files[panel_path] = _render_index_panel(
         indices,
         aoi_projected,
         output_config=output_config,
+        title=panel_title,
     )
     records.append(
         VisualizationRecord(
             path=panel_path,
-            source_raster="rasters/hls_annual_indices.tif",
+            source_raster=indices_source_path,
             band_name="all_indices",
+            title=panel_title,
             display_min=None,
             display_max=None,
             colormap="per_index",
@@ -627,11 +916,12 @@ def _render_visualizations(
     count_values = count.values[0][~count.mask[0]]
     count_max = max(1.0, float(np.max(count_values)))
     count_path = "figures/valid_observations.png"
+    count_title = "Observaciones HLS válidas por píxel"
     files[count_path] = _render_single_band(
         count,
         aoi_projected,
         band_name="valid_observation_count",
-        title="Observaciones HLS válidas por píxel",
+        title=count_title,
         display_min=0.0,
         display_max=count_max,
         colormap="viridis",
@@ -640,8 +930,9 @@ def _render_visualizations(
     records.append(
         VisualizationRecord(
             path=count_path,
-            source_raster="rasters/hls_valid_observation_count.tif",
+            source_raster=count_source_path,
             band_name="valid_observation_count",
+            title=count_title,
             display_min=0.0,
             display_max=count_max,
             colormap="viridis",
@@ -705,6 +996,7 @@ def _render_rgb(
     display_min: float,
     display_max: float,
     dpi: int,
+    title: str,
 ) -> bytes:
     indices = {name: position for position, name in enumerate(raster.band_names)}
     try:
@@ -724,7 +1016,7 @@ def _render_rgb(
         axis,
         raster,
         aoi_projected,
-        title="Composite anual HLS — RGB",
+        title=title,
     )
     return _figure_bytes(figure, dpi)
 
@@ -765,6 +1057,7 @@ def _render_index_panel(
     aoi_projected: BaseGeometry,
     *,
     output_config: OutputConfig,
+    title: str,
 ) -> bytes:
     ranges = output_config.index_visualization_range_map
     items = output_config.index_visualization_ranges
@@ -803,7 +1096,7 @@ def _render_index_panel(
         )
     for axis in flat_axes[len(items) :]:
         axis.set_visible(False)
-    figure.suptitle("Índices del composite anual HLS")
+    figure.suptitle(title)
     return _figure_bytes(figure, output_config.png_dpi)
 
 

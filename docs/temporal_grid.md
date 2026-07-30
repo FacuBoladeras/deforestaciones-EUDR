@@ -70,5 +70,6 @@ años. Cada solicitud usa `crs`, `crs_transform` y `dimensions`; no delega a GEE
 la elección implícita de origen o extensión. Cada GeoTIFF se reabre y se rechaza
 si difieren CRS, dimensiones, transformación o bounds.
 
-El bundle de serie publica el contrato efectivo como `temporal/grid.json`.
-El modo compatible de un año lo publica como `spatial/raster_grid.json`.
+El bundle de serie publica el contrato efectivo como
+`json/temporal/annual/grid.json`. El modo compatible de un año lo publica como
+`json/raster_grid.json`.

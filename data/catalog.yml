@@ -1,4 +1,4 @@
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 sources:
   - source_id: "hls_l30_v2"
@@ -84,3 +84,96 @@ sources:
       water: 5
       aerosol_first_bit: 6
       aerosol_last_bit: 7
+
+  - source_id: "jrc_gfc2020_v3"
+    family: "FOREST_BASELINE"
+    product: "JRC_GFC2020"
+    provider: "European Commission Joint Research Centre"
+    collection_id: "JRC/GFC2020/V3"
+    version: "3"
+    asset_type: "image"
+    spatial_resolution_m: 10
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.2760/9982436"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/JRC_GFC2020_V3"
+    documentation_url: "https://forobs.jrc.ec.europa.eu/GFC"
+    data_terms_summary: >-
+      The dataset may be used by anyone without permission, license, or
+      royalty payment; attribution using the recommended citation is requested.
+    license: "Open use with requested attribution"
+    platform_terms_separate: true
+    evidence_role: "core_forest_map"
+    independence_group: "jrc_gfc2020"
+    eligible_for_core_consensus: true
+    rule:
+      kind: "categorical_values"
+      source_band: "Map"
+      forest_values: [1]
+    limitations:
+      - "A global map is evidence, not ground truth for an individual establishment."
+      - "Known issues and future revisions published by JRC must remain review flags."
+
+  - source_id: "esa_worldcover_2020_v100"
+    family: "FOREST_BASELINE"
+    product: "ESA_WORLDCOVER_2020"
+    provider: "ESA WorldCover Consortium"
+    collection_id: "ESA/WorldCover/v100"
+    version: "1.0.0"
+    asset_type: "image_collection"
+    spatial_resolution_m: 10
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.5281/zenodo.5571936"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/ESA_WorldCover_v100"
+    documentation_url: "https://esa-worldcover.org/en/data-access"
+    data_terms_summary: "ESA WorldCover 2020 is distributed under CC-BY-4.0."
+    license: "CC-BY-4.0"
+    platform_terms_separate: true
+    evidence_role: "core_land_cover"
+    independence_group: "esa_worldcover"
+    eligible_for_core_consensus: true
+    rule:
+      kind: "categorical_values"
+      source_band: "Map"
+      forest_values: [10, 95]
+    limitations:
+      - "Tree cover and mangrove classes are land-cover evidence, not an EUDR conclusion."
+      - "The thematic map does not itself enforce the minimum connected area."
+
+  - source_id: "hansen_gfc_2025_v1_13"
+    family: "FOREST_BASELINE"
+    product: "HANSEN_GLOBAL_FOREST_CHANGE"
+    provider: "University of Maryland"
+    collection_id: "UMD/hansen/global_forest_change_2025_v1_13"
+    version: "1.13"
+    asset_type: "image"
+    spatial_resolution_m: 30.92
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.1126/science.1244693"
+    catalog_url: >-
+      https://developers.google.com/earth-engine/datasets/catalog/UMD_hansen_global_forest_change_2025_v1_13
+    documentation_url: "https://storage.googleapis.com/earthenginepartners-hansen/GFC-2025-v1.13/download.html"
+    data_terms_summary: "Hansen Global Forest Change v1.13 is distributed under CC-BY-4.0."
+    license: "CC-BY-4.0"
+    platform_terms_separate: true
+    evidence_role: "supporting_derived"
+    independence_group: "umd_hansen"
+    eligible_for_core_consensus: false
+    rule:
+      kind: "hansen_2020_reconstruction"
+      tree_cover_band: "treecover2000"
+      loss_year_band: "lossyear"
+      minimum_tree_cover_percent: 10
+      loss_year_cutoff_code: 20
+    limitations:
+      - >-
+        The 2020 reconstruction starts from canopy cover in 2000 and removes
+        recorded stand-replacement loss through 2020.
+      - >-
+        Regeneración posterior y ganancias no actualizadas impiden tratar esta
+        derivación como verdad forestal 2020.

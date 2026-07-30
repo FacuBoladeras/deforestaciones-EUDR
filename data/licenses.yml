@@ -33,3 +33,55 @@ datasets:
       - >-
         Dataset availability in Earth Engine does not establish that every
         future commercial use is covered by the current platform modality.
+
+  - dataset_id: "jrc_gfc2020_v3"
+    provider: "European Commission Joint Research Centre"
+    collection: "JRC/GFC2020/V3"
+    version: "3"
+    license: "Open use with requested attribution"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified EC JRC Global Forest Cover 2020 version 3 data.
+    restrictions:
+      - >-
+        Attribution using the citation recommended by the dataset producer is
+        requested.
+      - >-
+        Known issues and later revisions published by JRC must remain visible
+        in the evidence metadata.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "esa_worldcover_2020_v100"
+    provider: "ESA WorldCover Consortium"
+    collection: "ESA/WorldCover/v100"
+    version: "1.0.0"
+    license: "CC-BY-4.0"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified Copernicus Sentinel data (2020) processed by the ESA
+      WorldCover Consortium.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        Tree-cover classes are thematic land-cover evidence and do not by
+        themselves establish the EUDR forest definition.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "hansen_gfc_2025_v1_13"
+    provider: "University of Maryland"
+    collection: "UMD/hansen/global_forest_change_2025_v1_13"
+    version: "1.13"
+    license: "CC-BY-4.0"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified Hansen Global Forest Change v1.13 data produced by the
+      University of Maryland.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        The derived 2020 evidence starts from tree cover in 2000 and removes
+        loss through 2020; it does not fully represent subsequent regeneration.
+      - >-
+        Earth Engine platform terms and project registration apply separately.

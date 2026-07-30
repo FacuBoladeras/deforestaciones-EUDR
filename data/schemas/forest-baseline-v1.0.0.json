@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "ForestDefinitionConfig": {
+      "additionalProperties": false,
+      "description": "Umbrales de dominio que no pueden calibrarse para mejorar métricas.",
+      "properties": {
+        "exclude_predominantly_agricultural_or_urban": {
+          "const": true,
+          "title": "Exclude Predominantly Agricultural Or Urban",
+          "type": "boolean"
+        },
+        "minimum_area_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Minimum Area Ha",
+          "type": "number"
+        },
+        "minimum_canopy_cover_percent": {
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "title": "Minimum Canopy Cover Percent",
+          "type": "number"
+        },
+        "minimum_tree_height_m": {
+          "exclusiveMinimum": 0,
+          "title": "Minimum Tree Height M",
+          "type": "number"
+        }
+      },
+      "required": [
+        "minimum_area_ha",
+        "minimum_tree_height_m",
+        "minimum_canopy_cover_percent",
+        "exclude_predominantly_agricultural_or_urban"
+      ],
+      "title": "ForestDefinitionConfig",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:forest-baseline:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Especificación metodológica previa a consultar o clasificar datos.",
+  "properties": {
+    "benchmark_resolution_m": {
+      "const": 30,
+      "title": "Benchmark Resolution M",
+      "type": "integer"
+    },
+    "feature_end_date_exclusive": {
+      "format": "date",
+      "title": "Feature End Date Exclusive",
+      "type": "string"
+    },
+    "feature_start_date": {
+      "format": "date",
+      "title": "Feature Start Date",
+      "type": "string"
+    },
+    "forest_definition": {
+      "$ref": "#/$defs/ForestDefinitionConfig"
+    },
+    "long_gap_interpolation_allowed": {
+      "const": false,
+      "title": "Long Gap Interpolation Allowed",
+      "type": "boolean"
+    },
+    "minimum_independent_sources": {
+      "minimum": 2,
+      "title": "Minimum Independent Sources",
+      "type": "integer"
+    },
+    "post_cutoff_observations_allowed": {
+      "const": false,
+      "title": "Post Cutoff Observations Allowed",
+      "type": "boolean"
+    },
+    "preserve_disagreement": {
+      "const": true,
+      "title": "Preserve Disagreement",
+      "type": "boolean"
+    },
+    "preserve_source_evidence": {
+      "const": true,
+      "title": "Preserve Source Evidence",
+      "type": "boolean"
+    },
+    "reference_date": {
+      "format": "date",
+      "title": "Reference Date",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "reference_date",
+    "feature_start_date",
+    "feature_end_date_exclusive",
+    "benchmark_resolution_m",
+    "minimum_independent_sources",
+    "forest_definition",
+    "preserve_source_evidence",
+    "preserve_disagreement",
+    "post_cutoff_observations_allowed",
+    "long_gap_interpolation_allowed"
+  ],
+  "title": "ForestBaselineConfig",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

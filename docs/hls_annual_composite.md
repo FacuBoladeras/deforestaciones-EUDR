@@ -1,5 +1,9 @@
 # Primer composite anual HLS
 
+> Compatibilidad: desde el Paso 12.1 el núcleo también admite intervalos
+> explícitos mediante `HlsTemporalCompositeRequest`. Este documento conserva
+> el flujo anual usado por los Pasos 10 y 11.
+
 ## Alcance
 
 Esta etapa comprueba el flujo completo vectorial → GEE → GeoTIFF → PNG. No
@@ -42,6 +46,42 @@ descargado se reabre y verifica:
 - nodata y tipos;
 - presencia de píxeles válidos;
 - mínimos y máximos por banda.
+
+El composite anual es un producto requerido: si cualquiera de sus bandas de
+reflectancia o índices queda completamente en `nodata`, la materialización
+falla y no publica el bundle. Esta política estricta no debe confundirse con
+la serie estacional, donde un período completamente sin observaciones se
+conserva explícitamente como dato faltante.
+
+Los conteos tienen otra semántica: ausencia de una observación válida equivale
+a `0` **dentro del ROI**. Fuera del ROI permanecen enmascarados y se exportan
+como `nodata`; nunca se convierte el exterior en cero.
+
+## Diagnóstico de construcción
+
+La construcción remota se divide en etapas con nombres estables:
+`remote_aoi`, `source_lookup`, `l30_collection`, `l30_inventory`,
+`s30_collection`, `s30_inventory`, `normalize_l30`, `normalize_s30`, `merge`,
+`reflectance`, `total_count`, `l30_count`, `s30_count` e `indices`.
+
+Un fallo inesperado informa período, etapa y categoría sanitizada. Por ejemplo:
+
+```text
+2023_l30_collection_permission_denied
+20221201_20230301_indices_service_unavailable
+2022_djf_s30_inventory_hlss30_inventory_system_time_start_timeout
+```
+
+Los años usan `YYYY`; una ventana estacional usa `YYYY_estacion`; un intervalo
+genérico usa `YYYYMMDD_YYYYMMDD`. Si una operación ya produjo un
+`HlsCompositeError` detallado, ese código se conserva como sufijo dentro del
+contexto de período y etapa. Nunca se incorpora el texto remoto, una URL, un
+token ni un identificador de proyecto.
+
+Estas etapas no agregan reintentos. La única excepción sigue siendo la lectura
+idempotente de campos del inventario mediante `getInfo`, documentada para la
+serie anual. Validaciones locales anteriores a la construcción, como un AOI
+inválido, conservan sus códigos históricos.
 
 ## PNG
 

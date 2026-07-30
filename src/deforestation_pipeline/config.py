@@ -12,6 +12,8 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deforestation_pipeline.change_detection import DisturbanceDetectionConfig
+from deforestation_pipeline.forest_baseline import ForestBaselineConfig
 from deforestation_pipeline.schemas import EUDR_CUTOFF_DATE, LicenseRegistry
 
 AtLeastSix = Annotated[int, Field(ge=6)]
@@ -228,18 +230,31 @@ class OutputConfig(StrictConfigModel):
 class PipelineConfig(StrictConfigModel):
     """Configuración raíz del pipeline."""
 
-    schema_version: Literal["1.2.0"]
+    schema_version: Literal["1.8.0"]
     analysis: AnalysisConfig
     spatial: SpatialConfig
     data: DataConfig
+    forest_baseline: ForestBaselineConfig
+    disturbance_detection: DisturbanceDetectionConfig
     output: OutputConfig
 
     @model_validator(mode="after")
-    def every_requested_index_has_a_visualization_range(self) -> PipelineConfig:
+    def scientific_contracts_are_compatible(self) -> PipelineConfig:
         configured = tuple(item.index for item in self.output.index_visualization_ranges)
         if set(configured) != set(self.data.indices):
             raise ValueError(
                 "index_visualization_ranges debe cubrir exactamente los índices solicitados"
+            )
+        detection_indices = {item.value for item in self.disturbance_detection.detection_indices}
+        configured_indices = {item.value for item in self.data.indices}
+        if not detection_indices <= configured_indices:
+            raise ValueError("detection_indices debe ser un subconjunto de los índices calculados")
+        if (
+            self.disturbance_detection.minimum_baseline_source_count
+            != self.forest_baseline.minimum_independent_sources
+        ):
+            raise ValueError(
+                "minimum_baseline_source_count debe coincidir con minimum_independent_sources"
             )
         return self
 
@@ -314,7 +329,15 @@ def scientific_parameters_hash(config: ResolvedPipelineConfig) -> str:
     """Identifica los parámetros metodológicos de una corrida ya resuelta."""
     payload = config.model_dump(mode="json")
     scientific_payload = {
-        field: payload[field] for field in ("schema_version", "analysis", "spatial", "data")
+        field: payload[field]
+        for field in (
+            "schema_version",
+            "analysis",
+            "spatial",
+            "data",
+            "forest_baseline",
+            "disturbance_detection",
+        )
     }
     return _canonical_hash(scientific_payload)
 

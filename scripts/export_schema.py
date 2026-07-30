@@ -7,6 +7,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from deforestation_pipeline.change_detection import (
+    disturbance_detection_json_schema,
+)
+from deforestation_pipeline.forest_baseline import forest_baseline_json_schema
+from deforestation_pipeline.hls_seasonal import (
+    hls_seasonal_metadata_json_schema,
+    temporal_cube_index_json_schema,
+)
 from deforestation_pipeline.hls_series import (
     hls_series_coverage_json_schema,
     hls_series_metadata_json_schema,
@@ -14,6 +22,11 @@ from deforestation_pipeline.hls_series import (
 from deforestation_pipeline.schemas import (
     analysis_summary_json_schema,
     raster_grid_json_schema,
+)
+from deforestation_pipeline.seasonal_qa import seasonal_coverage_json_schema
+from deforestation_pipeline.temporal_cube import (
+    temporal_cube_spec_json_schema,
+    temporal_window_plan_json_schema,
 )
 
 SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
@@ -26,12 +39,40 @@ SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
         raster_grid_json_schema,
     ),
     (
-        Path("data/schemas/hls-series-metadata-v1.0.0.json"),
+        Path("data/schemas/forest-baseline-v1.0.0.json"),
+        forest_baseline_json_schema,
+    ),
+    (
+        Path("data/schemas/disturbance-detection-v1.4.0.json"),
+        disturbance_detection_json_schema,
+    ),
+    (
+        Path("data/schemas/hls-series-metadata-v3.0.0.json"),
         hls_series_metadata_json_schema,
     ),
     (
         Path("data/schemas/hls-series-coverage-v1.0.0.json"),
         hls_series_coverage_json_schema,
+    ),
+    (
+        Path("data/schemas/temporal-window-plan-v1.0.0.json"),
+        temporal_window_plan_json_schema,
+    ),
+    (
+        Path("data/schemas/temporal-cube-spec-v1.0.0.json"),
+        temporal_cube_spec_json_schema,
+    ),
+    (
+        Path("data/schemas/hls-seasonal-metadata-v2.0.0.json"),
+        hls_seasonal_metadata_json_schema,
+    ),
+    (
+        Path("data/schemas/temporal-cube-index-v2.0.0.json"),
+        temporal_cube_index_json_schema,
+    ),
+    (
+        Path("data/schemas/hls-seasonal-coverage-v1.0.0.json"),
+        seasonal_coverage_json_schema,
     ),
 )
 

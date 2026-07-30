@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import geopandas as gpd
@@ -14,6 +15,7 @@ from shapely.geometry import box
 
 import deforestation_pipeline.local_runner as local_runner_module
 from deforestation_pipeline.config import SpectralIndex
+from deforestation_pipeline.forest_baseline import forest_baseline_output_paths
 from deforestation_pipeline.gee import (
     CollectionMetadataResult,
     GeeMetadataQuery,
@@ -28,6 +30,7 @@ from deforestation_pipeline.hls_composite import (
     HlsCompositeSourceInventory,
     HlsIndexFormulaRecord,
 )
+from deforestation_pipeline.hls_seasonal import HlsSeasonalRequest
 from deforestation_pipeline.hls_series import (
     HlsSeriesMaterialization,
     HlsSeriesMetadata,
@@ -46,6 +49,54 @@ from deforestation_pipeline.vector_ingestion import VectorIngestionError
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "default.yml"
 FIXED_NOW = datetime(2026, 7, 23, 18, 30, tzinfo=UTC)
+
+
+def _windows_access_denied() -> PermissionError:
+    error = PermissionError(13, "directorio bloqueado temporalmente")
+    error.winerror = 5
+    return error
+
+
+def test_atomic_publish_retries_transient_windows_access_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / ".temporary-run"
+    target = tmp_path / "published-run"
+    attempts: list[tuple[Path, Path]] = []
+    delays: list[float] = []
+
+    def fake_rename(path: Path, destination: Path) -> Path:
+        attempts.append((path, destination))
+        if len(attempts) < 3:
+            raise _windows_access_denied()
+        return destination
+
+    monkeypatch.setattr(Path, "rename", fake_rename)
+
+    local_runner_module._rename_directory_with_retry(source, target, sleep=delays.append)
+
+    assert attempts == [(source, target), (source, target), (source, target)]
+    assert delays == [0.1, 0.2]
+
+
+def test_atomic_publish_does_not_retry_unrelated_rename_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / ".temporary-run"
+    target = tmp_path / "published-run"
+    delays: list[float] = []
+
+    def fail_immediately(path: Path, destination: Path) -> Path:
+        raise FileExistsError("destination already exists")
+
+    monkeypatch.setattr(Path, "rename", fail_immediately)
+
+    with pytest.raises(FileExistsError, match="destination already exists"):
+        local_runner_module._rename_directory_with_retry(source, target, sleep=delays.append)
+
+    assert delays == []
 
 
 def _write_feature(path: Path) -> bytes:
@@ -85,19 +136,19 @@ def test_local_run_writes_complete_auditable_bundle(tmp_path: Path) -> None:
     )
 
     expected_files = {
-        "catalog/source_plan.json",
-        "config/resolved_config.json",
-        "environment.json",
-        "geometry/analysis_geometry.geojson",
-        "geometry/normalized_wgs84.geojson",
-        "geometry/original_interpreted.json",
-        "geometry/validation.json",
-        "input/converted.geojson",
-        "input/ingestion.json",
-        "input/original/establecimiento.geojson",
-        "manifest.json",
-        "measurements/area.json",
-        "run_summary.json",
+        "json/geometry/analysis.geojson",
+        "json/geometry/area.json",
+        "json/run/environment.json",
+        "json/geometry/normalized_wgs84.geojson",
+        "json/geometry/original_interpreted.json",
+        "json/geometry/validation.json",
+        "json/input/converted.geojson",
+        "json/input/ingestion.json",
+        "json/run/manifest.json",
+        "json/configuration/resolved.json",
+        "json/run/summary.json",
+        "json/configuration/source_plan.json",
+        "source/establecimiento.geojson",
     }
     actual_files = {
         path.relative_to(run_directory).as_posix()
@@ -105,12 +156,14 @@ def test_local_run_writes_complete_auditable_bundle(tmp_path: Path) -> None:
         if path.is_file()
     }
     assert actual_files == expected_files
-    assert (run_directory / "input/original/establecimiento.geojson").read_bytes() == original_bytes
-    converted = json.loads((run_directory / "input/converted.geojson").read_text(encoding="utf-8"))
+    assert (run_directory / "source/establecimiento.geojson").read_bytes() == original_bytes
+    converted = json.loads(
+        (run_directory / "json/input/converted.geojson").read_text(encoding="utf-8")
+    )
     assert converted["type"] == "Feature"
     assert converted["geometry"]["type"] == "Polygon"
 
-    summary = json.loads((run_directory / "run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["establishment_id"] == "test-establishment"
     assert summary["stage"] == "spatial_preparation"
     assert summary["final_assessment_generated"] is False
@@ -120,11 +173,11 @@ def test_local_run_writes_complete_auditable_bundle(tmp_path: Path) -> None:
     assert summary["catalog"]["remote_data_accessed"] is False
     assert summary["input"]["format"] == "GeoJSON"
     assert summary["input"]["feature_count"] == 1
-    assert summary["input"]["converted_path"] == "input/converted.geojson"
+    assert summary["input"]["converted_path"] == "json/input/converted.geojson"
     assert summary["limitations"]
 
     source_plan = json.loads(
-        (run_directory / "catalog/source_plan.json").read_text(encoding="utf-8")
+        (run_directory / "json/configuration/source_plan.json").read_text(encoding="utf-8")
     )
     assert source_plan["sensor_family"] == "HLS"
     assert [source["collection_id"] for source in source_plan["sources"]] == [
@@ -133,12 +186,12 @@ def test_local_run_writes_complete_auditable_bundle(tmp_path: Path) -> None:
     ]
     assert source_plan["remote_data_accessed"] is False
 
-    manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_directory / "json/run/manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_self_excluded"] is True
     assert manifest["remote_data_accessed"] is False
     assert manifest["datasets"] == []
     manifested_paths = {artifact["path"] for artifact in manifest["artifacts"]}
-    assert manifested_paths == expected_files - {"manifest.json"}
+    assert manifested_paths == expected_files - {"json/run/manifest.json"}
     for artifact in manifest["artifacts"]:
         artifact_path = run_directory / artifact["path"]
         assert artifact["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
@@ -165,15 +218,15 @@ def test_runner_converts_a_shapefile_and_preserves_its_sidecars(
         created_at=FIXED_NOW,
     )
 
-    original_names = {path.name for path in (run_directory / "input/original").iterdir()}
+    original_names = {path.name for path in (run_directory / "source").iterdir()}
     assert {"territorio.shp", "territorio.shx", "territorio.dbf", "territorio.prj"} <= (
         original_names
     )
-    summary = json.loads((run_directory / "run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["input"]["format"] == "ESRI Shapefile"
     assert summary["input"]["source_crs"] == "EPSG:4326"
     assert summary["input"]["source_crs_origin"] == "embedded"
-    assert (run_directory / "input/converted.geojson").is_file()
+    assert (run_directory / "json/input/converted.geojson").is_file()
 
 
 def test_runner_requires_explicit_dissolve_for_multiple_features(tmp_path: Path) -> None:
@@ -279,7 +332,7 @@ def test_cli_runs_sample_and_prints_created_directory(
     run_directory = Path(capsys.readouterr().out.strip())
     assert result == 0
     assert run_directory.parent == tmp_path.resolve()
-    assert (run_directory / "manifest.json").is_file()
+    assert (run_directory / "json/run/manifest.json").is_file()
 
 
 def test_cli_can_list_the_vector_drivers_available_in_its_runtime(
@@ -327,7 +380,10 @@ def test_full_pipeline_single_year_remains_backward_compatible(
     assert query.start_date == date(2023, 1, 1)
     assert query.end_date == date(2024, 1, 1)
     assert captured["generate_hls_composite"] is True
+    assert captured["generate_forest_baseline"] is True
+    assert captured["generate_disturbance_detection"] is False
     assert captured["hls_series_request"] is None
+    assert captured["hls_seasonal_request"] is None
     assert captured["vector_layer"] == "parcelas"
     assert captured["dissolve_all"] is True
     assert Path(capsys.readouterr().out.strip()) == expected_directory
@@ -360,11 +416,53 @@ def test_full_pipeline_accepts_an_inclusive_closed_year_range(
         ]
     )
 
-    request = cast(HlsSeriesRequest, captured["hls_series_request"])
+    request = cast(HlsSeasonalRequest, captured["hls_seasonal_request"])
     assert result == 0
-    assert request.years == (2019, 2020, 2021, 2022, 2023, 2024)
+    assert request.start_year == 2019
+    assert request.end_year == 2024
+    assert captured["hls_series_request"] is None
+    assert captured["generate_disturbance_detection"] is True
     assert captured["gee_query"] is None
     assert captured["generate_hls_composite"] is False
+    assert captured["generate_forest_baseline"] is True
+    assert Path(capsys.readouterr().out.strip()) == expected_directory
+
+
+def test_full_pipeline_accepts_seasonal_mode_for_a_closed_year_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_path = tmp_path / "territorio.gpkg"
+    input_path.write_bytes(b"not-read-because-runner-is-mocked")
+    captured: dict[str, object] = {}
+    expected_directory = tmp_path / "run"
+
+    def fake_run(**kwargs: object) -> Path:
+        captured.update(kwargs)
+        return expected_directory
+
+    monkeypatch.setattr(local_runner_module, "run_local_vector_pipeline", fake_run)
+
+    result = main(
+        [
+            str(input_path),
+            "--full-pipeline",
+            "--seasonal",
+            "--hls-start-year",
+            "2021",
+            "--hls-end-year",
+            "2022",
+        ]
+    )
+
+    request = cast(HlsSeasonalRequest, captured["hls_seasonal_request"])
+    assert result == 0
+    assert request.start_year == 2021
+    assert request.end_year == 2022
+    assert captured["hls_series_request"] is None
+    assert captured["gee_query"] is None
+    assert captured["generate_forest_baseline"] is True
     assert Path(capsys.readouterr().out.strip()) == expected_directory
 
 
@@ -448,14 +546,14 @@ def test_opt_in_gee_query_is_added_to_bundle_without_downloading_pixels(
     )
 
     query_result = json.loads(
-        (run_directory / "gee/scene_metadata.json").read_text(encoding="utf-8")
+        (run_directory / "json/gee/scene_metadata.json").read_text(encoding="utf-8")
     )
     assert query_result["metadata_only"] is True
     assert "pixels" not in query_result
-    summary = json.loads((run_directory / "run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["remote_data_accessed"] is True
     assert summary["gee"]["metadata_only"] is True
-    manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_directory / "json/run/manifest.json").read_text(encoding="utf-8"))
     assert manifest["remote_data_accessed"] is True
     assert len(manifest["datasets"]) == 2
     assert {dataset["collection"] for dataset in manifest["datasets"]} == {
@@ -566,13 +664,13 @@ def test_annual_hls_composite_adds_rasters_pngs_and_non_final_metadata(
         metadata=composite_metadata,
     )
     raster_files = {
-        "rasters/hls_annual_reflectance.tif": b"TIFF-reflectance",
-        "rasters/hls_annual_indices.tif": b"TIFF-indices",
-        "rasters/hls_valid_observation_count.tif": b"TIFF-count",
-        "rasters/hls_valid_observation_count_l30.tif": b"TIFF-count-l30",
-        "rasters/hls_valid_observation_count_s30.tif": b"TIFF-count-s30",
+        "tiffs/hls_annual_reflectance.tif": b"TIFF-reflectance",
+        "tiffs/hls_annual_indices.tif": b"TIFF-indices",
+        "tiffs/hls_valid_observation_count.tif": b"TIFF-count",
+        "tiffs/hls_valid_observation_count_l30.tif": b"TIFF-count-l30",
+        "tiffs/hls_valid_observation_count_s30.tif": b"TIFF-count-s30",
         "figures/rgb.png": b"\x89PNG-rgb",
-        "figures/indices/NDVI.png": b"\x89PNG-ndvi",
+        "figures/index_NDVI.png": b"\x89PNG-ndvi",
         "figures/indices_panel.png": b"\x89PNG-panel",
         "figures/valid_observations.png": b"\x89PNG-count",
     }
@@ -642,12 +740,25 @@ def test_annual_hls_composite_adds_rasters_pngs_and_non_final_metadata(
     assert cast(HlsCompositeRequest, captured_build["request"]).target_crs == "EPSG:32720"
     grid_spec = captured_materialization["grid_spec"]
     assert grid_spec == materialization.grid_spec
-    for relative_path, expected_content in raster_files.items():
+    published_rasters = {
+        "tiffs/annual/2023/reflectance.tif": b"TIFF-reflectance",
+        "tiffs/annual/2023/indices.tif": b"TIFF-indices",
+        "tiffs/annual/2023/observation_count_total.tif": b"TIFF-count",
+        "tiffs/annual/2023/observation_count_l30.tif": b"TIFF-count-l30",
+        "tiffs/annual/2023/observation_count_s30.tif": b"TIFF-count-s30",
+        "figures/annual/2023/rgb.png": b"\x89PNG-rgb",
+        "figures/annual/2023/index_NDVI.png": b"\x89PNG-ndvi",
+        "figures/annual/2023/indices_panel.png": b"\x89PNG-panel",
+        "figures/annual/2023/observation_count.png": b"\x89PNG-count",
+    }
+    for relative_path, expected_content in published_rasters.items():
         assert (run_directory / relative_path).read_bytes() == expected_content
-    assert (run_directory / "gee/composite_input_inventory.json").is_file()
-    assert (run_directory / "gee/composite_metadata.json").is_file()
+    top_level_directories = {path.name for path in run_directory.iterdir() if path.is_dir()}
+    assert top_level_directories == {"source", "json", "figures", "tiffs"}
+    assert (run_directory / "json/temporal/annual/2023/input_inventory.json").is_file()
+    assert (run_directory / "json/temporal/annual/2023/composite_metadata.json").is_file()
 
-    summary = json.loads((run_directory / "run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["stage"] == "annual_hls_composite"
     assert summary["remote_data_accessed"] is True
     assert summary["pixel_data_accessed"] is True
@@ -655,10 +766,10 @@ def test_annual_hls_composite_adds_rasters_pngs_and_non_final_metadata(
     assert summary["gee"]["metadata_only"] is False
     assert "deforestación" in " ".join(summary["limitations"]).lower()
 
-    manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_directory / "json/run/manifest.json").read_text(encoding="utf-8"))
     media_types = {artifact["path"]: artifact["media_type"] for artifact in manifest["artifacts"]}
-    assert media_types["rasters/hls_annual_indices.tif"] == "image/tiff"
-    assert media_types["figures/rgb.png"] == "image/png"
+    assert media_types["tiffs/annual/2023/indices.tif"] == "image/tiff"
+    assert media_types["figures/annual/2023/rgb.png"] == "image/png"
     assert all(
         "metadata only" not in " ".join(dataset["restrictions"]).lower()
         for dataset in manifest["datasets"]
@@ -688,22 +799,20 @@ def test_annual_hls_series_is_published_with_fixed_grid_and_no_final_assessment(
         records = tuple(
             HlsSeriesYearProductRecord(
                 year=year,
-                composite_metadata_path=f"temporal/years/{year}/composite_metadata.json",
+                composite_metadata_path=(f"json/temporal/annual/{year}/composite_metadata.json"),
                 composite_input_inventory_path=(
-                    f"temporal/years/{year}/composite_input_inventory.json"
+                    f"json/temporal/annual/{year}/input_inventory.json"
                 ),
-                reflectance_raster_path=(
-                    f"temporal/years/{year}/rasters/hls_annual_reflectance.tif"
-                ),
-                indices_raster_path=(f"temporal/years/{year}/rasters/hls_annual_indices.tif"),
+                reflectance_raster_path=f"tiffs/annual/{year}/reflectance.tif",
+                indices_raster_path=f"tiffs/annual/{year}/indices.tif",
                 valid_observation_count_raster_path=(
-                    f"temporal/years/{year}/rasters/hls_valid_observation_count.tif"
+                    f"tiffs/annual/{year}/observation_count_total.tif"
                 ),
                 l30_observation_count_raster_path=(
-                    f"temporal/years/{year}/rasters/hls_valid_observation_count_l30.tif"
+                    f"tiffs/annual/{year}/observation_count_l30.tif"
                 ),
                 s30_observation_count_raster_path=(
-                    f"temporal/years/{year}/rasters/hls_valid_observation_count_s30.tif"
+                    f"tiffs/annual/{year}/observation_count_s30.tif"
                 ),
             )
             for year in request.years
@@ -720,15 +829,15 @@ def test_annual_hls_series_is_published_with_fixed_grid_and_no_final_assessment(
             year_products=records,
         )
         files = {
-            "temporal/grid.json": b'{"schema_version":"1.0.0"}\n',
-            "temporal/coverage.json": b'{"years":[]}\n',
-            "temporal/series_metadata.json": (
+            "json/temporal/annual/grid.json": b'{"schema_version":"1.0.0"}\n',
+            "json/temporal/annual/coverage.json": b'{"years":[]}\n',
+            "json/temporal/annual/series_metadata.json": (
                 json.dumps(metadata.model_dump(mode="json")).encode()
             ),
-            "tables/hls_annual_summary.csv": b"year,variable\n2020,NDVI\n",
-            "figures/temporal/annual_rgb_panel.png": b"\x89PNG-rgb",
-            "figures/temporal/index_timeseries.png": b"\x89PNG-index",
-            "figures/temporal/observation_coverage.png": b"\x89PNG-coverage",
+            "tables/annual/summary.csv": b"year,variable\n2020,NDVI\n",
+            "figures/annual/qa/rgb_panel.png": b"\x89PNG-rgb",
+            "figures/annual/qa/index_timeseries.png": b"\x89PNG-index",
+            "figures/annual/qa/observation_coverage.png": b"\x89PNG-coverage",
         }
         return HlsSeriesMaterialization(
             files=files,
@@ -760,9 +869,9 @@ def test_annual_hls_series_is_published_with_fixed_grid_and_no_final_assessment(
 
     request = cast(HlsSeriesRequest, captured["request"])
     assert request.years == (2020, 2021)
-    assert (run_directory / "temporal/grid.json").is_file()
-    assert (run_directory / "tables/hls_annual_summary.csv").is_file()
-    summary = json.loads((run_directory / "run_summary.json").read_text(encoding="utf-8"))
+    assert (run_directory / "json/temporal/annual/grid.json").is_file()
+    assert (run_directory / "tables/annual/summary.csv").is_file()
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["stage"] == "annual_hls_time_series"
     assert summary["remote_data_accessed"] is True
     assert summary["pixel_data_accessed"] is True
@@ -770,6 +879,156 @@ def test_annual_hls_series_is_published_with_fixed_grid_and_no_final_assessment(
     assert summary["gee"]["years"] == [2020, 2021]
     captured_grid = cast(RasterGridSpec, captured["grid_spec"])
     assert summary["gee"]["grid_sha256"] == captured_grid.grid_sha256
-    manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_directory / "json/run/manifest.json").read_text(encoding="utf-8"))
     media_types = {item["path"]: item["media_type"] for item in manifest["artifacts"]}
-    assert media_types["tables/hls_annual_summary.csv"] == "text/csv"
+    assert media_types["tables/annual/summary.csv"] == "text/csv"
+
+
+def test_local_runner_publishes_seasonal_cube_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "establecimiento.geojson"
+    _write_feature(input_path)
+    credentials_path = tmp_path / "credentials.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        local_runner_module,
+        "authenticate_earth_engine",
+        lambda path: SimpleNamespace(module=object()),
+    )
+
+    def fake_seasonal(**kwargs: object) -> object:
+        grid = cast(RasterGridSpec, kwargs["grid_spec"])
+        request = cast(HlsSeasonalRequest, kwargs["request"])
+        return SimpleNamespace(
+            files={
+                "json/temporal/seasonal/window_plan.json": b"{}\n",
+                "json/temporal/seasonal/cube_spec.json": b"{}\n",
+                "json/temporal/seasonal/cube_index.json": b"{}\n",
+                "json/temporal/seasonal/series_metadata.json": b"{}\n",
+                "json/temporal/seasonal/coverage.json": b"{}\n",
+                "tables/seasonal/summary.csv": b"period_id\n",
+                "figures/seasonal/qa/index_timeseries.png": b"PNG",
+                "figures/seasonal/qa/observation_coverage.png": b"PNG",
+                "figures/seasonal/qa/rgb_timeline.png": b"PNG",
+                "tiffs/seasonal/2022-DJF/reflectance.tif": b"TIFF",
+                "figures/seasonal/2022-DJF/rgb.png": b"PNG",
+            },
+            metadata=SimpleNamespace(
+                start_year=request.start_year,
+                end_year=request.end_year,
+                period_ids=("2022-DJF", "2022-MAM", "2022-JJA", "2022-SON"),
+                grid_sha256=grid.grid_sha256,
+                window_plan_sha256="a" * 64,
+            ),
+            cube_index=SimpleNamespace(cube_index_sha256="b" * 64),
+        )
+
+    monkeypatch.setattr(
+        local_runner_module,
+        "materialize_hls_seasonal_series",
+        fake_seasonal,
+    )
+
+    run_directory = run_local_vector_pipeline(
+        input_path=input_path,
+        output_root=tmp_path / "outputs",
+        config_path=DEFAULT_CONFIG,
+        source_crs="EPSG:4326",
+        establishment_id="seasonal-test",
+        analysis_end_date=date(2026, 7, 28),
+        created_at=datetime(2026, 7, 28, 18, tzinfo=UTC),
+        gee_credentials_path=credentials_path,
+        hls_seasonal_request=HlsSeasonalRequest(start_year=2022, end_year=2022),
+    )
+
+    assert (run_directory / "json/temporal/seasonal/cube_index.json").is_file()
+    assert (run_directory / "tiffs/seasonal/2022-DJF/reflectance.tif").is_file()
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
+    assert summary["stage"] == "seasonal_temporal_cube"
+    assert summary["remote_data_accessed"] is True
+    assert summary["pixel_data_accessed"] is True
+    assert summary["gee"]["period_count"] == 4
+    assert summary["gee"]["cube_index_sha256"] == "b" * 64
+    assert summary["gee"]["rgb_timeline_path"] == "figures/seasonal/qa/rgb_timeline.png"
+
+
+def test_local_runner_publishes_compact_forest_baseline_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "establecimiento.geojson"
+    _write_feature(input_path)
+    credentials_path = tmp_path / "credentials.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        local_runner_module,
+        "authenticate_earth_engine",
+        lambda path: SimpleNamespace(module=object()),
+    )
+    feature_metadata = SimpleNamespace(
+        input_scene_count=50,
+        model_dump=lambda mode: {"input_scene_count": 50},
+    )
+    monkeypatch.setattr(
+        local_runner_module,
+        "build_forest_baseline_features",
+        lambda **kwargs: SimpleNamespace(image=object(), metadata=feature_metadata),
+    )
+    product_metadata = SimpleNamespace(
+        model_dump=lambda mode: {
+            "score_semantics": "uncalibrated_core_evidence_fraction",
+            "calibrated_probability": False,
+            "final_assessment_generated": False,
+        }
+    )
+    monkeypatch.setattr(
+        local_runner_module,
+        "build_forest_baseline_images",
+        lambda **kwargs: SimpleNamespace(metadata=product_metadata),
+    )
+    paths = forest_baseline_output_paths()
+
+    def fake_materialize(**kwargs: object) -> object:
+        grid = cast(RasterGridSpec, kwargs["grid_spec"])
+        return SimpleNamespace(
+            files={
+                path: (
+                    b"\x89PNG"
+                    if path.endswith(".png")
+                    else b"TIFF"
+                    if path.endswith(".tif")
+                    else b"{}\n"
+                )
+                for path in paths.values()
+            },
+            grid_spec=grid,
+        )
+
+    monkeypatch.setattr(
+        local_runner_module,
+        "materialize_forest_baseline",
+        fake_materialize,
+    )
+
+    run_directory = run_local_vector_pipeline(
+        input_path=input_path,
+        output_root=tmp_path / "outputs",
+        config_path=DEFAULT_CONFIG,
+        source_crs="EPSG:4326",
+        establishment_id="baseline-test",
+        analysis_end_date=date(2026, 7, 29),
+        created_at=datetime(2026, 7, 29, 18, tzinfo=UTC),
+        gee_credentials_path=credentials_path,
+        generate_forest_baseline=True,
+    )
+
+    assert all((run_directory / path).is_file() for path in paths.values())
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
+    assert summary["stage"] == "forest_baseline_2020"
+    assert summary["forest_baseline"]["score_semantics"] == ("uncalibrated_core_evidence_fraction")
+    assert summary["forest_baseline"]["metadata_path"] == paths["metadata"]
+    assert summary["final_assessment_generated"] is False
+    assert any(dataset["dataset_id"] == "jrc_gfc2020_v3" for dataset in summary["datasets"])

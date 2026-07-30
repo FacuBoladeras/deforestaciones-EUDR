@@ -16,6 +16,7 @@ from shapely import union_all
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
+from deforestation_pipeline.artifact_layout import input_json
 from deforestation_pipeline.schemas import GeoJSONGeometry
 
 SUPPORTED_TERRITORY_GEOMETRY_TYPES = frozenset({"Polygon", "MultiPolygon"})
@@ -59,16 +60,14 @@ class VectorIngestion:
             "available_layers": self.available_layers,
             "feature_count": self.feature_count,
             "dissolved": self.dissolved,
-            "converted_path": "input/converted.geojson",
+            "converted_path": input_json("converted.geojson"),
             "source_files": source_records,
             "input_sha256": self.input_sha256,
         }
 
     def bundle_source_files(self) -> dict[str, bytes]:
         """Ubica la fuente original dentro del namespace seguro del bundle."""
-        return {
-            f"input/original/{name}": content for name, content in sorted(self.source_files.items())
-        }
+        return {f"source/{name}": content for name, content in sorted(self.source_files.items())}
 
 
 def ingest_local_vector(

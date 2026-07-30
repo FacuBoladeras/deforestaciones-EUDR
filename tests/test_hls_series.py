@@ -159,22 +159,22 @@ def _annual_materialization(
     )
     total_count = 10 if year == 2020 else 0
     files = {
-        "rasters/hls_annual_reflectance.tif": _geotiff(
+        "tiffs/hls_annual_reflectance.tif": _geotiff(
             reflectance,
             band_names=("blue", "green", "red", "nir", "swir1", "swir2"),
             dtype="float32",
         ),
-        "rasters/hls_annual_indices.tif": _geotiff(
+        "tiffs/hls_annual_indices.tif": _geotiff(
             index_values,
             band_names=tuple(index.value for index in indices),
             dtype="float32",
         ),
-        "rasters/hls_valid_observation_count.tif": _geotiff(
+        "tiffs/hls_valid_observation_count.tif": _geotiff(
             np.full((1, GRID.height, GRID.width), total_count, dtype=np.int16),
             band_names=("valid_observation_count",),
             dtype="int16",
         ),
-        "rasters/hls_valid_observation_count_l30.tif": _geotiff(
+        "tiffs/hls_valid_observation_count_l30.tif": _geotiff(
             np.full(
                 (1, GRID.height, GRID.width),
                 6 if year == 2020 else 0,
@@ -183,7 +183,7 @@ def _annual_materialization(
             band_names=("valid_observation_count_l30",),
             dtype="int16",
         ),
-        "rasters/hls_valid_observation_count_s30.tif": _geotiff(
+        "tiffs/hls_valid_observation_count_s30.tif": _geotiff(
             np.full(
                 (1, GRID.height, GRID.width),
                 4 if year == 2020 else 0,
@@ -262,44 +262,42 @@ def test_series_materialization_prefixes_years_and_generates_qa_products(
     assert "no_total_valid_observations" in result.coverage[1].quality_flags
 
     expected_paths = {
-        "temporal/grid.json",
-        "temporal/series_metadata.json",
-        "temporal/coverage.json",
-        "tables/hls_annual_summary.csv",
-        "figures/temporal/annual_rgb_panel.png",
-        "figures/temporal/index_timeseries.png",
-        "figures/temporal/observation_coverage.png",
+        "json/temporal/annual/grid.json",
+        "json/temporal/annual/series_metadata.json",
+        "json/temporal/annual/coverage.json",
+        "tables/annual/summary.csv",
+        "figures/annual/qa/rgb_panel.png",
+        "figures/annual/qa/index_timeseries.png",
+        "figures/annual/qa/observation_coverage.png",
     }
     for year in (2020, 2021):
         expected_paths.update(
             {
-                f"temporal/years/{year}/composite_metadata.json",
-                f"temporal/years/{year}/composite_input_inventory.json",
-                f"temporal/years/{year}/rasters/hls_annual_reflectance.tif",
-                f"temporal/years/{year}/rasters/hls_annual_indices.tif",
-                (f"temporal/years/{year}/rasters/hls_valid_observation_count.tif"),
-                (f"temporal/years/{year}/rasters/hls_valid_observation_count_l30.tif"),
-                (f"temporal/years/{year}/rasters/hls_valid_observation_count_s30.tif"),
-                f"temporal/years/{year}/figures/rgb.png",
+                f"json/temporal/annual/{year}/composite_metadata.json",
+                f"json/temporal/annual/{year}/input_inventory.json",
+                f"tiffs/annual/{year}/reflectance.tif",
+                f"tiffs/annual/{year}/indices.tif",
+                f"tiffs/annual/{year}/observation_count_total.tif",
+                f"tiffs/annual/{year}/observation_count_l30.tif",
+                f"tiffs/annual/{year}/observation_count_s30.tif",
+                f"figures/annual/{year}/rgb.png",
             }
         )
     assert set(result.files) == expected_paths
     assert all(
         result.files[path].startswith(b"\x89PNG")
         for path in (
-            "figures/temporal/annual_rgb_panel.png",
-            "figures/temporal/index_timeseries.png",
-            "figures/temporal/observation_coverage.png",
+            "figures/annual/qa/rgb_panel.png",
+            "figures/annual/qa/index_timeseries.png",
+            "figures/annual/qa/observation_coverage.png",
         )
     )
 
-    grid_payload = json.loads(result.files["temporal/grid.json"])
+    grid_payload = json.loads(result.files["json/temporal/annual/grid.json"])
     assert grid_payload["grid_sha256"] == GRID.grid_sha256
-    coverage_payload = json.loads(result.files["temporal/coverage.json"])
+    coverage_payload = json.loads(result.files["json/temporal/annual/coverage.json"])
     assert [item["year"] for item in coverage_payload["years"]] == [2020, 2021]
-    rows = list(
-        csv.DictReader(StringIO(result.files["tables/hls_annual_summary.csv"].decode("utf-8")))
-    )
+    rows = list(csv.DictReader(StringIO(result.files["tables/annual/summary.csv"].decode("utf-8"))))
     assert len(rows) == 2 * (6 + len(config.data.indices))
     assert {row["variable_kind"] for row in rows} == {"reflectance", "index"}
 
@@ -365,7 +363,7 @@ def test_series_rejects_an_open_calendar_year_before_remote_build(
     ("relative_path", "schema_factory"),
     (
         (
-            "data/schemas/hls-series-metadata-v1.0.0.json",
+            "data/schemas/hls-series-metadata-v3.0.0.json",
             hls_series_metadata_json_schema,
         ),
         (

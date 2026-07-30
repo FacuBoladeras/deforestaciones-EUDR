@@ -34,8 +34,9 @@ nunca se muta.
 
 Las identidades de una corrida resuelta son deliberadamente distintas:
 
-- `scientific_parameters_hash` incluye `schema_version`, `analysis`, `spatial`
-  y `data`; excluye las opciones de salida.
+- `scientific_parameters_hash` incluye `schema_version`, `analysis`, `spatial`,
+  `data`, `forest_baseline` y `disturbance_detection`; excluye las opciones de
+  salida.
 - `execution_config_hash` incluye la configuración resuelta completa, incluidos
   `output.directory` y `output.formats`.
 
@@ -62,7 +63,7 @@ también los eventos menores como evidencia intermedia.
 
 ## Parámetros del benchmark
 
-La configuración 1.2.0 declara HLS a 30 m y un composite anual por mediana para
+La configuración 1.8.0 declara HLS a 30 m y un composite anual por mediana para
 la primera prueba real. También fija explícitamente:
 
 - separación entre el CRS equivalente de medición y la grilla UTM local del
@@ -95,6 +96,63 @@ resuelto, `data.target_resolution_m` y `output.raster_nodata`. La misma
 transformación y dimensiones se envían a GEE para cada año y se validan al
 reabrir los GeoTIFF. El presupuesto `maximum_series_download_bytes` se evalúa
 antes de construir el primer composite remoto.
+
+## Contrato de línea base forestal 2020
+
+`forest_baseline` incorpora en la identidad científica las reglas previas a
+consultar o clasificar bosque. El contrato 1.0.0 fija:
+
+- fecha de referencia `2020-12-31`;
+- atributos espectrales desde `2019-01-01` hasta `2021-01-01` exclusivo;
+- benchmark HLS a 30 m;
+- al menos dos fuentes independientes de evidencia;
+- definición de bosque de 0,5 ha, 5 m de altura y 10 % de cobertura de copa;
+- exclusión de tierras predominantemente agrícolas o urbanas;
+- conservación de evidencia por fuente y desacuerdo;
+- prohibición de observaciones posteriores al corte y de interpolaciones
+  largas.
+
+`feature_end_date_exclusive` es deliberadamente `2021-01-01`: incluye el día
+de corte pero impide que información futura contamine la línea base. Los
+datasets concretos y sus roles se documentan en `data/catalog.yml`.
+
+## Contrato de detección de perturbaciones
+
+`disturbance_detection` incorpora al hash científico la frontera del Paso
+14.0, la regla robusta 14.3, el benchmark CCDC 14.4 y su convergencia
+conservadora 14.5. Define:
+
+- historia de referencia desde `2017-01-01`;
+- análisis post-corte desde `2021-01-01`;
+- exclusión de períodos que cruzan la fecha de corte;
+- evaluación con bandera cuando la línea base forestal discrepa;
+- comparación exclusivamente contra la misma estación;
+- mínimo de tres referencias válidas, mediana y escala `1.4826 × MAD`;
+- caída de vegetación positiva y escala cero no estandarizable;
+- preservación de `NaN`, umbral robusto y persistencia explícitos;
+- NDVI, NBR, NDMI y NIRv como variables detectoras iniciales;
+- detector robusto y CCDC como evidencias independientes;
+- CCDC sobre observaciones HLSL30 densas, ya enmascaradas por Fmask, sin
+  fusionar HLSS30;
+- parámetros CCDC oficiales declarados: bandas de ruptura,
+  `minObservations`, `chiSquareProbability`, `minNumOfYearsScaler`,
+  `dateFormat`, `lambda`, `maxIterations` y política TMask;
+- Earth Engine Python API `1.7.36`, referencia oficial actualizada el
+  `2026-04-20` y consultada el `2026-07-29`;
+- preservación de los arrays CCDC crudos y de `changeProb` únicamente como
+  pseudoprobabilidad algorítmica de la ruptura;
+- compatibilidad temporal únicamente cuando `tBreak` cae dentro de un intervalo
+  robusto real bajo límites `[inicio, fin)`, sin margen temporal;
+- preservación del resultado disponible cuando el otro detector falla, sin
+  fingir convergencia;
+- conservación explícita del desacuerdo y prohibición de fusionar las escalas
+  de evidencia robusta y CCDC;
+- score explícitamente no calibrado;
+- prohibición de atribución, umbral espacial y evaluación final.
+
+El perfil comparativo HLSL30+HLSS30 permanece deshabilitado hasta validar
+explícitamente la mezcla de sensores. Los parámetros y esa decisión participan
+del hash científico.
 
 ## Uso desde Python
 

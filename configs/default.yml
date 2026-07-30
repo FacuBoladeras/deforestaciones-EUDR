@@ -1,4 +1,4 @@
-schema_version: "1.2.0"
+schema_version: "1.8.0"
 
 analysis:
   cutoff_date: 2020-12-31
@@ -34,6 +34,92 @@ data:
     - "LSWI"
     - "NIRv"
     - "kNDVI"
+
+forest_baseline:
+  schema_version: "1.0.0"
+  reference_date: 2020-12-31
+  feature_start_date: 2019-01-01
+  feature_end_date_exclusive: 2021-01-01
+  benchmark_resolution_m: 30
+  minimum_independent_sources: 2
+  forest_definition:
+    minimum_area_ha: 0.5
+    minimum_tree_height_m: 5.0
+    minimum_canopy_cover_percent: 10.0
+    exclude_predominantly_agricultural_or_urban: true
+  preserve_source_evidence: true
+  preserve_disagreement: true
+  post_cutoff_observations_allowed: false
+  long_gap_interpolation_allowed: false
+
+disturbance_detection:
+  schema_version: "1.4.0"
+  reference_history_start_date: 2017-01-01
+  analysis_start_date: 2021-01-01
+  minimum_baseline_source_count: 2
+  detection_indices: [NDVI, NBR, NDMI, NIRv]
+  planned_detectors: [robust_seasonal_pre_post, ccdc_benchmark]
+  robust_seasonal:
+    schema_version: "1.1.0"
+    minimum_reference_observations: 3
+    mad_scale_constant: 1.4826
+    vegetation_loss_direction: "decrease_is_positive"
+    reference_comparison_policy: "same_season_only"
+    zero_scale_policy: "not_standardizable"
+    missing_data_policy: "preserve_nan_without_interpolation"
+    standardized_magnitude_threshold: 3.0
+    minimum_index_support_count: 2
+    minimum_consecutive_signal_periods: 2
+    minimum_valid_post_cutoff_periods: 2
+    missing_period_streak_policy: "break_without_recovery_inference"
+    long_gap_minimum_consecutive_missing_periods: 2
+    threshold_calibration_status: "conservative_benchmark_requires_independent_validation"
+    score_aggregation: "maximum_positive_standardized_magnitude"
+    anomaly_threshold_applied: true
+    persistence_rule_applied: true
+  ccdc_benchmark:
+    schema_version: "1.0.0"
+    earth_engine_python_api_version: "1.7.36"
+    api_reference_url: "https://developers.google.com/earth-engine/apidocs/ee-algorithms-temporalsegmentation-ccdc"
+    api_reference_last_updated: 2026-04-20
+    api_reference_accessed_at: 2026-07-29
+    output_semantics_reference_url: "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_GLOBAL_CCDC_V1"
+    source_profile: "hlsl30_only"
+    source_product: "HLSL30"
+    input_temporal_granularity: "dense_masked_observations"
+    breakpoint_bands: [NDVI, NBR, NDMI, NIRv]
+    min_observations: 6
+    chi_square_probability: 0.99
+    min_num_of_years_scaler: 1.33
+    date_format: 1
+    lambda: 20.0
+    max_iterations: 25000
+    tmask_policy: "disabled_hls_fmask_preapplied"
+    tmask_bands: []
+    magnitude_direction: "decrease_is_positive"
+    change_probability_semantics: "algorithmic_breakpoint_pseudo_probability_not_deforestation_probability"
+    comparative_sensor_profile: "hlsl30_hlss30_deferred"
+    comparative_sensor_profile_enabled: false
+    raw_array_output_preserved: true
+    post_cutoff_break_threshold_applied: false
+  convergence:
+    schema_version: "1.0.0"
+    temporal_compatibility_policy: "ccdc_break_within_robust_signal_interval"
+    interval_boundary_policy: "closed_start_open_end"
+    temporal_compatibility_margin_days: 0
+    unavailable_detector_policy: "preserve_available_evidence_without_convergence"
+    isolated_ccdc_break_policy: "transient_signal_requires_review"
+    detector_disagreement_resolution_policy: "preserve"
+    score_fusion_allowed: false
+  score_semantics: "uncalibrated_disturbance_evidence_score"
+  baseline_disagreement_policy: "evaluate_and_flag"
+  cutoff_straddling_period_policy: "exclude"
+  preserve_detector_evidence: true
+  preserve_detector_disagreement: true
+  long_gap_interpolation_allowed: false
+  attribution_allowed: false
+  spatial_area_threshold_applied: false
+  automatic_final_assessment_allowed: false
 
 output:
   directory: "outputs"

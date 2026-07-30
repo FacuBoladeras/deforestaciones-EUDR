@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from deforestation_pipeline.catalog import BandRole, load_source_catalog
+from deforestation_pipeline.catalog import BandRole, CatalogSource, load_source_catalog
 from deforestation_pipeline.config import OutputFormat, load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_default_config_declares_the_annual_hls_raster_experiment() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.2.0"
+    assert config.schema_version == "1.8.0"
     assert config.data.composition_interval == "annual"
     assert config.data.composition_reducer == "median"
     assert config.data.source_native_reflectance_scale_factor == 0.0001
@@ -31,7 +31,9 @@ def test_default_config_declares_the_annual_hls_raster_experiment() -> None:
 
 def test_hls_catalog_exposes_every_band_needed_for_rgb_and_indices() -> None:
     catalog = load_source_catalog(PROJECT_ROOT / "data" / "catalog.yml")
-    by_product = {source.product: source for source in catalog.sources}
+    by_product = {
+        source.product: source for source in catalog.sources if isinstance(source, CatalogSource)
+    }
 
     assert by_product["HLSL30"].band_map == {
         BandRole.BLUE: "B2",

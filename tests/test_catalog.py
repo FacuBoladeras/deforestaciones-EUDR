@@ -25,26 +25,26 @@ CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yml"
 
 def test_hls_v2_catalog_records_both_constituent_products() -> None:
     catalog = load_source_catalog(CATALOG_PATH)
+    hls_sources = tuple(source for source in catalog.sources if source.family == "HLS")
 
-    assert catalog.schema_version == "1.0.0"
-    assert tuple(source.product for source in catalog.sources) == ("HLSL30", "HLSS30")
-    assert tuple(source.collection_id for source in catalog.sources) == (
+    assert catalog.schema_version == "2.0.0"
+    assert tuple(source.product for source in hls_sources) == ("HLSL30", "HLSS30")
+    assert tuple(source.collection_id for source in hls_sources) == (
         "NASA/HLS/HLSL30/v002",
         "NASA/HLS/HLSS30/v002",
     )
-    assert all(source.family == "HLS" for source in catalog.sources)
-    assert all(source.version == "2.0" for source in catalog.sources)
-    assert all(source.spatial_resolution_m == 30 for source in catalog.sources)
+    assert all(source.version == "2.0" for source in hls_sources)
+    assert all(source.spatial_resolution_m == 30 for source in hls_sources)
     assert all(
-        source.access_status is SourceAccessStatus.CATALOGED_NOT_ACCESSED
-        for source in catalog.sources
+        source.access_status is SourceAccessStatus.CATALOGED_NOT_ACCESSED for source in hls_sources
     )
-    assert all(source.catalog_checked_at == date(2026, 7, 24) for source in catalog.sources)
+    assert all(source.catalog_checked_at == date(2026, 7, 24) for source in hls_sources)
 
 
 def test_hls_common_band_roles_are_mapped_per_product() -> None:
     catalog = load_source_catalog(CATALOG_PATH)
-    by_product = {source.product: source for source in catalog.sources}
+    hls_sources = tuple(source for source in catalog.sources if source.family == "HLS")
+    by_product = {source.product: source for source in hls_sources}
 
     assert by_product["HLSL30"].band_map == {
         BandRole.BLUE: "B2",
@@ -64,9 +64,9 @@ def test_hls_common_band_roles_are_mapped_per_product() -> None:
         BandRole.SWIR2: "B12",
         BandRole.QA: "Fmask",
     }
-    assert all(source.qa_mask_bits.cloud == 1 for source in catalog.sources)
-    assert all(source.qa_mask_bits.cloud_shadow == 3 for source in catalog.sources)
-    assert all(source.qa_mask_bits.snow_or_ice == 4 for source in catalog.sources)
+    assert all(source.qa_mask_bits.cloud == 1 for source in hls_sources)
+    assert all(source.qa_mask_bits.cloud_shadow == 3 for source in hls_sources)
+    assert all(source.qa_mask_bits.snow_or_ice == 4 for source in hls_sources)
 
 
 def test_benchmark_plan_matches_resolved_configuration_without_remote_access() -> None:

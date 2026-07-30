@@ -63,8 +63,8 @@ en los metadatos espaciales de S30.
 Cuando la consulta termina correctamente, el bundle agrega:
 
 ```text
-gee/
-└── scene_metadata.json
+json/
+└── gee_scene_metadata.json
 ```
 
 El archivo registra:

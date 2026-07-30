@@ -74,15 +74,39 @@ rechaza:
 - estados que impliquen un acceso no representado por este paso.
 
 El plan conserva `remote_data_accessed: false`. `pruebas.py` lo exporta como
-`catalog/source_plan.json` para que la siguiente etapa sepa exactamente qué
+`json/configuration/source_plan.json` para que la siguiente etapa sepa exactamente qué
 colecciones y bandas pretende consultar.
 
 ## Catálogo no equivale a uso
 
-`data/catalog.yml` contiene fuentes verificadas. `data/licenses.yml` ya
-registra HLSL30 y HLSS30 porque el Paso 10 utiliza sus píxeles; cada corrida
-también incorpora los registros efectivos en su manifiesto.
+`data/catalog.yml` contiene fuentes verificadas. `data/licenses.yml` registra
+las fuentes cuyos píxeles ya puede utilizar el pipeline; cada corrida incorpora
+los registros efectivos en su manifiesto.
 
 Los términos abiertos de los datos NASA no sustituyen las condiciones de la
 plataforma usada para accederlos. En particular, las condiciones operativas y
 comerciales de Earth Engine deben evaluarse por separado antes de producción.
+
+## Familia de línea base forestal 2020
+
+El Paso 13 agrega tres fuentes con roles explícitos:
+
+| Fuente | Asset GEE | Rol |
+| --- | --- | --- |
+| JRC GFC2020 V3 | `JRC/GFC2020/V3` | núcleo, mapa forestal |
+| ESA WorldCover 2020 v100 | `ESA/WorldCover/v100` | núcleo, cobertura del suelo |
+| Hansen GFC v1.13 | `UMD/hansen/global_forest_change_2025_v1_13` | apoyo derivado |
+
+El catálogo conserva versión, resolución, licencia, URLs documentales,
+limitaciones, grupo de independencia y la regla exacta que transforma cada
+producto en evidencia binaria.
+
+JRC y ESA son las dos fuentes independientes exigidas para la convergencia
+núcleo. Hansen no participa en ese voto: reconstruye evidencia 2020 desde copa
+arbórea de 2000 y pérdida acumulada, por lo que no representa correctamente
+regeneración o ganancias.
+
+MapBiomas Chaco queda registrado como fuente diferida en el plan, no como
+evidencia silenciosa. Su incorporación requiere verificar un asset oficial
+estable y auditar que el producto no use información posterior al corte de una
+forma incompatible con el propósito de línea base.

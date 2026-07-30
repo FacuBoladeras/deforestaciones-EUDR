@@ -1,0 +1,228 @@
+{
+  "$defs": {
+    "SeasonalCountStatistics": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum": {
+          "minimum": 0,
+          "title": "Maximum",
+          "type": "number"
+        },
+        "median": {
+          "minimum": 0,
+          "title": "Median",
+          "type": "number"
+        },
+        "minimum": {
+          "minimum": 0,
+          "title": "Minimum",
+          "type": "number"
+        },
+        "p05": {
+          "minimum": 0,
+          "title": "P05",
+          "type": "number"
+        },
+        "p95": {
+          "minimum": 0,
+          "title": "P95",
+          "type": "number"
+        }
+      },
+      "required": [
+        "minimum",
+        "p05",
+        "median",
+        "p95",
+        "maximum"
+      ],
+      "title": "SeasonalCountStatistics",
+      "type": "object"
+    },
+    "SeasonalCoverageState": {
+      "enum": [
+        "complete_observed_coverage",
+        "partial_observed_coverage",
+        "no_observed_coverage"
+      ],
+      "title": "SeasonalCoverageState",
+      "type": "string"
+    },
+    "SeasonalPeriodCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage_state": {
+          "$ref": "#/$defs/SeasonalCoverageState"
+        },
+        "end_date_exclusive": {
+          "title": "End Date Exclusive",
+          "type": "string"
+        },
+        "expected_days": {
+          "exclusiveMinimum": 0,
+          "title": "Expected Days",
+          "type": "integer"
+        },
+        "input_scene_count": {
+          "minimum": 1,
+          "title": "Input Scene Count",
+          "type": "integer"
+        },
+        "l30_count": {
+          "$ref": "#/$defs/SeasonalCountStatistics"
+        },
+        "l30_scene_count": {
+          "minimum": 0,
+          "title": "L30 Scene Count",
+          "type": "integer"
+        },
+        "observed_pixel_count_l30": {
+          "minimum": 0,
+          "title": "Observed Pixel Count L30",
+          "type": "integer"
+        },
+        "observed_pixel_count_s30": {
+          "minimum": 0,
+          "title": "Observed Pixel Count S30",
+          "type": "integer"
+        },
+        "observed_pixel_count_total": {
+          "minimum": 0,
+          "title": "Observed Pixel Count Total",
+          "type": "integer"
+        },
+        "period_id": {
+          "pattern": "^\\d{4}-(DJF|MAM|JJA|SON)$",
+          "title": "Period Id",
+          "type": "string"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "roi_pixel_count": {
+          "exclusiveMinimum": 0,
+          "title": "Roi Pixel Count",
+          "type": "integer"
+        },
+        "s30_count": {
+          "$ref": "#/$defs/SeasonalCountStatistics"
+        },
+        "s30_scene_count": {
+          "minimum": 0,
+          "title": "S30 Scene Count",
+          "type": "integer"
+        },
+        "season": {
+          "title": "Season",
+          "type": "string"
+        },
+        "season_year": {
+          "title": "Season Year",
+          "type": "integer"
+        },
+        "start_date": {
+          "title": "Start Date",
+          "type": "string"
+        },
+        "total_count": {
+          "$ref": "#/$defs/SeasonalCountStatistics"
+        },
+        "valid_pixel_fraction_l30": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Valid Pixel Fraction L30",
+          "type": "number"
+        },
+        "valid_pixel_fraction_s30": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Valid Pixel Fraction S30",
+          "type": "number"
+        },
+        "valid_pixel_fraction_total": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Valid Pixel Fraction Total",
+          "type": "number"
+        }
+      },
+      "required": [
+        "period_id",
+        "season_year",
+        "season",
+        "start_date",
+        "end_date_exclusive",
+        "expected_days",
+        "input_scene_count",
+        "l30_scene_count",
+        "s30_scene_count",
+        "roi_pixel_count",
+        "observed_pixel_count_total",
+        "observed_pixel_count_l30",
+        "observed_pixel_count_s30",
+        "valid_pixel_fraction_total",
+        "valid_pixel_fraction_l30",
+        "valid_pixel_fraction_s30",
+        "total_count",
+        "l30_count",
+        "s30_count",
+        "coverage_state",
+        "quality_flags"
+      ],
+      "title": "SeasonalPeriodCoverage",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:hls-seasonal-coverage:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "grid_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Grid Sha256",
+      "type": "string"
+    },
+    "interpolation_applied": {
+      "const": false,
+      "default": false,
+      "title": "Interpolation Applied",
+      "type": "boolean"
+    },
+    "periods": {
+      "items": {
+        "$ref": "#/$defs/SeasonalPeriodCoverage"
+      },
+      "title": "Periods",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "window_plan_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Window Plan Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "generated_at",
+    "grid_sha256",
+    "window_plan_sha256",
+    "periods"
+  ],
+  "title": "SeasonalCoverageDocument",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

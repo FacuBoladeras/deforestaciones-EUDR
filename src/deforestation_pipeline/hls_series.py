@@ -26,6 +26,13 @@ from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 
+from deforestation_pipeline.artifact_layout import (
+    annual_figure,
+    annual_json,
+    annual_table,
+    annual_tiff,
+    published_raster_path,
+)
 from deforestation_pipeline.catalog import BenchmarkSourcePlan
 from deforestation_pipeline.config import DataConfig, OutputConfig
 from deforestation_pipeline.gee import GeeSession
@@ -48,8 +55,9 @@ from deforestation_pipeline.schemas import RasterGridSpec
 matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
-HLS_SERIES_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
-HLS_SERIES_METADATA_SCHEMA_ID = "urn:deforestation-pipeline:hls-series-metadata:1.0.0"
+HLS_SERIES_METADATA_SCHEMA_VERSION: Literal["3.0.0"] = "3.0.0"
+HLS_SERIES_COVERAGE_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
+HLS_SERIES_METADATA_SCHEMA_ID = "urn:deforestation-pipeline:hls-series-metadata:3.0.0"
 HLS_SERIES_COVERAGE_SCHEMA_ID = "urn:deforestation-pipeline:hls-series-coverage:1.0.0"
 HLS_SERIES_MINIMUM_YEAR = 2015
 
@@ -117,7 +125,7 @@ class HlsYearCoverage(StrictSeriesModel):
 
 
 class HlsSeriesCoverageDocument(StrictSeriesModel):
-    schema_version: Literal["1.0.0"] = HLS_SERIES_SCHEMA_VERSION
+    schema_version: Literal["1.0.0"] = HLS_SERIES_COVERAGE_SCHEMA_VERSION
     grid_sha256: str
     years: tuple[HlsYearCoverage, ...]
 
@@ -146,15 +154,17 @@ class HlsSeriesYearProductRecord(StrictSeriesModel):
 
 
 class HlsSeriesMetadata(StrictSeriesModel):
-    schema_version: Literal["1.0.0"] = HLS_SERIES_SCHEMA_VERSION
+    schema_version: Literal["3.0.0"] = HLS_SERIES_METADATA_SCHEMA_VERSION
     generated_at: datetime
     start_year: int
     end_year: int
     years: tuple[int, ...]
     grid_sha256: str
-    grid_path: Literal["temporal/grid.json"] = "temporal/grid.json"
-    coverage_path: Literal["temporal/coverage.json"] = "temporal/coverage.json"
-    summary_table_path: Literal["tables/hls_annual_summary.csv"] = "tables/hls_annual_summary.csv"
+    grid_path: Literal["json/temporal/annual/grid.json"] = "json/temporal/annual/grid.json"
+    coverage_path: Literal["json/temporal/annual/coverage.json"] = (
+        "json/temporal/annual/coverage.json"
+    )
+    summary_table_path: Literal["tables/annual/summary.csv"] = "tables/annual/summary.csv"
     source_products: tuple[Literal["HLSL30"], Literal["HLSS30"]]
     annual_composite_method: Literal["median_reflectance_then_indices"]
     total_estimated_uncompressed_bytes: int = Field(gt=0)
@@ -173,11 +183,11 @@ class HlsSeriesMetadata(StrictSeriesModel):
 
 
 def hls_series_metadata_json_schema() -> dict[str, Any]:
-    """Devuelve el JSON Schema canónico de metadatos temporales 1.0.0."""
+    """Devuelve el JSON Schema canónico de metadatos temporales 3.0.0."""
     schema = HlsSeriesMetadata.model_json_schema(mode="serialization")
     schema["$id"] = HLS_SERIES_METADATA_SCHEMA_ID
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
-    schema["x-schema-version"] = HLS_SERIES_SCHEMA_VERSION
+    schema["x-schema-version"] = HLS_SERIES_METADATA_SCHEMA_VERSION
     return schema
 
 
@@ -186,7 +196,7 @@ def hls_series_coverage_json_schema() -> dict[str, Any]:
     schema = HlsSeriesCoverageDocument.model_json_schema(mode="serialization")
     schema["$id"] = HLS_SERIES_COVERAGE_SCHEMA_ID
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
-    schema["x-schema-version"] = HLS_SERIES_SCHEMA_VERSION
+    schema["x-schema-version"] = HLS_SERIES_COVERAGE_SCHEMA_VERSION
     return schema
 
 
@@ -364,32 +374,36 @@ def _assemble_series_materialization(
     year_records: list[HlsSeriesYearProductRecord] = []
     rgb_inputs: list[tuple[int, _LoadedRaster, NDArray[np.bool_]]] = []
     for item in annual_items:
-        prefix = f"temporal/years/{item.year}"
         files.update(
-            {f"{prefix}/{path}": content for path, content in item.materialization.files.items()}
+            {
+                _year_artifact_path(path, item.year): content
+                for path, content in item.materialization.files.items()
+            }
         )
-        composite_metadata, inventory = _annual_metadata_payload(item, prefix)
-        files[f"{prefix}/composite_metadata.json"] = _json_bytes(composite_metadata)
-        files[f"{prefix}/composite_input_inventory.json"] = _json_bytes(inventory)
+        composite_metadata, inventory = _annual_metadata_payload(item)
+        files[annual_json("composite_metadata.json", year=item.year)] = _json_bytes(
+            composite_metadata
+        )
+        files[annual_json("input_inventory.json", year=item.year)] = _json_bytes(inventory)
 
         reflectance = _load_expected_raster(
-            item.materialization.files["rasters/hls_annual_reflectance.tif"],
+            item.materialization.files["tiffs/hls_annual_reflectance.tif"],
             grid_spec,
         )
         indices = _load_expected_raster(
-            item.materialization.files["rasters/hls_annual_indices.tif"],
+            item.materialization.files["tiffs/hls_annual_indices.tif"],
             grid_spec,
         )
         total = _load_expected_raster(
-            item.materialization.files["rasters/hls_valid_observation_count.tif"],
+            item.materialization.files["tiffs/hls_valid_observation_count.tif"],
             grid_spec,
         )
         l30 = _load_expected_raster(
-            item.materialization.files["rasters/hls_valid_observation_count_l30.tif"],
+            item.materialization.files["tiffs/hls_valid_observation_count_l30.tif"],
             grid_spec,
         )
         s30 = _load_expected_raster(
-            item.materialization.files["rasters/hls_valid_observation_count_s30.tif"],
+            item.materialization.files["tiffs/hls_valid_observation_count_s30.tif"],
             grid_spec,
         )
         year_coverage, observed_mask = _year_coverage(
@@ -419,7 +433,7 @@ def _assemble_series_materialization(
             )
         )
         rgb_inputs.append((item.year, reflectance, observed_mask))
-        year_records.append(_year_product_record(item.year, prefix))
+        year_records.append(_year_product_record(item.year))
 
     coverage_document = HlsSeriesCoverageDocument(
         grid_sha256=grid_spec.grid_sha256,
@@ -436,19 +450,19 @@ def _assemble_series_materialization(
         total_estimated_uncompressed_bytes=total_estimated_bytes,
         year_products=tuple(year_records),
     )
-    files["temporal/grid.json"] = _json_bytes(grid_spec.model_dump(mode="json"))
-    files["temporal/coverage.json"] = _json_bytes(coverage_document.model_dump(mode="json"))
-    files["temporal/series_metadata.json"] = _json_bytes(metadata.model_dump(mode="json"))
-    files["tables/hls_annual_summary.csv"] = _summary_csv(tuple(summaries))
-    files["figures/temporal/annual_rgb_panel.png"] = _render_annual_rgb_panel(
+    files[annual_json("grid.json")] = _json_bytes(grid_spec.model_dump(mode="json"))
+    files[annual_json("coverage.json")] = _json_bytes(coverage_document.model_dump(mode="json"))
+    files[annual_json("series_metadata.json")] = _json_bytes(metadata.model_dump(mode="json"))
+    files[annual_table("summary.csv")] = _summary_csv(tuple(summaries))
+    files[annual_figure(None, "rgb_panel.png")] = _render_annual_rgb_panel(
         tuple(rgb_inputs),
         output_config,
     )
-    files["figures/temporal/index_timeseries.png"] = _render_index_timeseries(
+    files[annual_figure(None, "index_timeseries.png")] = _render_index_timeseries(
         tuple(summaries),
         output_config,
     )
-    files["figures/temporal/observation_coverage.png"] = _render_observation_coverage(
+    files[annual_figure(None, "observation_coverage.png")] = _render_observation_coverage(
         tuple(coverage), output_config.png_dpi
     )
     return HlsSeriesMaterialization(
@@ -464,11 +478,10 @@ def _assemble_series_materialization(
 
 def _annual_metadata_payload(
     item: HlsAnnualSeriesItem,
-    prefix: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
     metadata = item.composite.metadata.model_dump(mode="json")
     sources = metadata.pop("sources")
-    inventory_path = f"{prefix}/composite_input_inventory.json"
+    inventory_path = annual_json("input_inventory.json", year=item.year)
     inventory = {
         "complete_scene_inventory": True,
         "input_scene_count": item.composite.metadata.input_scene_count,
@@ -478,15 +491,15 @@ def _annual_metadata_payload(
     materialization["raster_validations"] = [
         {
             **record.model_dump(mode="json"),
-            "artifact_path": f"{prefix}/{record.artifact_path}",
+            "artifact_path": _year_artifact_path(record.artifact_path, item.year),
         }
         for record in item.materialization.validations
     ]
     materialization["visualizations"] = [
         {
             **record.model_dump(mode="json"),
-            "path": f"{prefix}/{record.path}",
-            "source_raster": f"{prefix}/{record.source_raster}",
+            "path": _year_artifact_path(record.path, item.year),
+            "source_raster": _year_artifact_path(record.source_raster, item.year),
         }
         for record in item.materialization.visualizations
     ]
@@ -500,18 +513,24 @@ def _annual_metadata_payload(
     )
 
 
-def _year_product_record(year: int, prefix: str) -> HlsSeriesYearProductRecord:
-    raster_root = f"{prefix}/rasters"
+def _year_product_record(year: int) -> HlsSeriesYearProductRecord:
     return HlsSeriesYearProductRecord(
         year=year,
-        composite_metadata_path=f"{prefix}/composite_metadata.json",
-        composite_input_inventory_path=f"{prefix}/composite_input_inventory.json",
-        reflectance_raster_path=f"{raster_root}/hls_annual_reflectance.tif",
-        indices_raster_path=f"{raster_root}/hls_annual_indices.tif",
-        valid_observation_count_raster_path=(f"{raster_root}/hls_valid_observation_count.tif"),
-        l30_observation_count_raster_path=(f"{raster_root}/hls_valid_observation_count_l30.tif"),
-        s30_observation_count_raster_path=(f"{raster_root}/hls_valid_observation_count_s30.tif"),
+        composite_metadata_path=annual_json("composite_metadata.json", year=year),
+        composite_input_inventory_path=annual_json("input_inventory.json", year=year),
+        reflectance_raster_path=annual_tiff(year, "reflectance.tif"),
+        indices_raster_path=annual_tiff(year, "indices.tif"),
+        valid_observation_count_raster_path=annual_tiff(year, "observation_count_total.tif"),
+        l30_observation_count_raster_path=annual_tiff(year, "observation_count_l30.tif"),
+        s30_observation_count_raster_path=annual_tiff(year, "observation_count_s30.tif"),
     )
+
+
+def _year_artifact_path(path: str, year: int) -> str:
+    try:
+        return published_raster_path(path, cadence="annual", period_id=str(year))
+    except ValueError:
+        raise HlsSeriesError("annual_artifact_path_not_flat_by_type") from None
 
 
 def _rasterize_aoi_mask(

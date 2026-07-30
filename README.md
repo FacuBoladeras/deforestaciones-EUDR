@@ -18,6 +18,15 @@ ya permite materializar un rango de años completos sobre una única grilla fija
 medir cobertura total y por sensor, resumir variables en CSV y generar paneles
 temporales locales.
 
+El Paso 12 agrega el contrato científico del cubo estacional: ventanas
+meteorológicas del hemisferio sur, dimensiones explícitas, identidad por hash
+y una política de faltantes sin interpolación. El pipeline permite
+construir y descargar composites DJF/MAM/JJA/SON sobre una grilla fija y
+publicar un cubo virtual auditable que referencia los GeoTIFF planos. También
+genera QA por período y sensor, tablas espectrales y figuras temporales.
+El flujo completo fue validado con GEE real sobre un ROI sintético pequeño.
+Todavía no ejecuta detección de cambios.
+
 ## Requisitos de desarrollo
 
 - Python 3.12
@@ -86,7 +95,10 @@ uv run python pruebas.py data/samples/local_test_polygon.geojson `
 ```
 
 Cada ejecución crea una carpeta independiente bajo `outputs/local_tests/`.
-El paquete incluye todos los archivos de la fuente original, el GeoJSON
+El bundle `3.0.0` organiza sus artefactos por tipo físico y luego por dominio,
+cadencia y período dentro de `json/`, `figures/`, `tiffs/`, `tables/` y
+`source/`. El paquete incluye todos
+los archivos de la fuente original, el GeoJSON
 convertido, procedencia de la ingesta, geometrías interpretada, normalizada y
 de análisis, validación, medición de área, configuración resuelta, plan local
 de fuentes HLS, entorno, resumen y un manifiesto con SHA-256 de cada artefacto.
@@ -103,7 +115,7 @@ uv run python pruebas.py C:/datos/territorio.gpkg `
   --establishment-id campo-prueba
 ```
 
-Para ejecutar la serie anual del Paso 11 sobre una única grilla:
+Para ejecutar el pipeline completo hasta la detección de perturbaciones:
 
 ```powershell
 uv run python pruebas.py C:/datos/territorio.gpkg `
@@ -114,11 +126,20 @@ uv run python pruebas.py C:/datos/territorio.gpkg `
   --establishment-id campo-prueba
 ```
 
+Los rangos ya ejecutan composiciones estacionales y el cubo virtual. El flag
+`--seasonal` se conserva por compatibilidad, pero no es necesario:
+
+```powershell
+uv run python pruebas.py C:/datos/territorio.gpkg `
+  --full-pipeline `
+  --hls-start-year 2022 `
+  --hls-end-year 2022
+```
+
 El rango es inclusivo y sólo admite años calendario cerrados. El runner
-autentica GEE una vez, descarga cinco GeoTIFF por año —reflectancia, índices y
-conteos válidos total/L30/S30—, verifica que todas las grillas sean idénticas y
-publica JSON de cobertura, CSV y PNG temporales. No incluye lógica futura de
-deforestación.
+autentica GEE una vez, verifica que todas las grillas sean idénticas y publica
+el cubo temporal más cinco productos compactos de perturbación. Estos no
+atribuyen uso posterior ni constituyen una conclusión EUDR.
 
 Para consultar únicamente metadatos reales de HLS en Earth Engine:
 
@@ -159,5 +180,6 @@ Documentación relacionada:
 - `docs/local_testing.md`: uso, estructura y límites del runner local;
 - `docs/source_catalog.md`: HLS v2, bandas, QA y diferencia entre catálogo y uso;
 - `docs/hls_annual_series.md`: contrato, QA y artefactos temporales del Paso 11;
+- `docs/temporal_cube.md`: contratos y semántica estacional del Paso 12.0;
 - `docs/gee_access.md`: autenticación sanitizada y consultas remotas acotadas.
 - `docs/hls_annual_composite.md`: QA, fórmulas, descarga raster y productos PNG.
