@@ -1,4 +1,4 @@
-schema_version: "1.8.0"
+schema_version: "1.11.0"
 
 analysis:
   cutoff_date: 2020-12-31
@@ -51,6 +51,36 @@ forest_baseline:
   preserve_disagreement: true
   post_cutoff_observations_allowed: false
   long_gap_interpolation_allowed: false
+
+forest_model:
+  schema_version: "1.0.0"
+  asset_id: "projects/ee-facuboladerasgee/assets/models/rf_forest_2020"
+  asset_type: "geemap_tree_feature_collection"
+  tree_property: "tree"
+  expected_tree_count: 500
+  reference_year: 2020
+  jurisdiction: "entre_rios"
+  non_forest_class_code: 0
+  forest_class_code: 1
+  training_label_semantics: "multisource_unanimity_proxy_v1"
+  score_semantics: "uncalibrated_binary_tree_vote_fraction"
+  evidence_role: "learned_supporting_evidence"
+  independent_evidence: false
+  temporal_transfer_validated: false
+  calibrated_probability: false
+
+forest_screening:
+  schema_version: "1.1.0"
+  minimum_core_source_count: 2
+  expected_tree_count: 500
+  forest_vote_fraction_minimum: 0.80
+  nonforest_vote_fraction_maximum: 0.20
+  core_nonforest_max_evidence_fraction: 0.0
+  forest_rule: "rf_complete_and_core_sufficient_and_unanimous_forest_and_vote_gte_threshold"
+  nonforest_rule: "rf_complete_and_core_sufficient_and_unanimous_nonforest_and_vote_lte_threshold"
+  temporal_signal_scope: "entire_aoi_primary_interpretation_automated_forest_only"
+  score_semantics: "uncalibrated_binary_tree_vote_fraction"
+  automatic_final_assessment_allowed: false
 
 disturbance_detection:
   schema_version: "1.4.0"
@@ -120,6 +150,22 @@ disturbance_detection:
   attribution_allowed: false
   spatial_area_threshold_applied: false
   automatic_final_assessment_allowed: false
+
+disturbance_events:
+  schema_version: "1.0.0"
+  connectivity: 8
+  area_threshold_ha: 0.5
+  area_method: "projected_grid_affine_determinant"
+  area_threshold_policy: "flag_without_filtering"
+  event_id_strategy: "grid_and_pixels_sha256_v1"
+  ordering_policy: "area_descending_then_event_id"
+  detail_figure_limit: 5
+  detail_selection_policy: "largest_area_then_event_id"
+  comparison_policy: "latest_pre_cutoff_same_season_vs_earliest_event_onset_window"
+  geometry_crs: "EPSG:4326"
+  primary_interpretation_domain: "automated_forest"
+  automatic_final_assessment_allowed: false
+  attribution_allowed: false
 
 output:
   directory: "outputs"

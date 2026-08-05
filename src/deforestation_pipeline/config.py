@@ -13,7 +13,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deforestation_pipeline.change_detection import DisturbanceDetectionConfig
+from deforestation_pipeline.disturbance_events import DisturbanceEventConfig
 from deforestation_pipeline.forest_baseline import ForestBaselineConfig
+from deforestation_pipeline.forest_screening import ForestScreeningConfig
 from deforestation_pipeline.schemas import EUDR_CUTOFF_DATE, LicenseRegistry
 
 AtLeastSix = Annotated[int, Field(ge=6)]
@@ -227,15 +229,45 @@ class OutputConfig(StrictConfigModel):
         }
 
 
+class ForestRandomForestConfig(StrictConfigModel):
+    """Contrato versionado del RF P0 usado sólo como evidencia forestal 2020."""
+
+    schema_version: Literal["1.0.0"]
+    asset_id: str = Field(min_length=1)
+    asset_type: Literal["geemap_tree_feature_collection"]
+    tree_property: Literal["tree"]
+    expected_tree_count: Literal[500]
+    reference_year: Literal[2020]
+    jurisdiction: Literal["entre_rios"]
+    non_forest_class_code: Literal[0]
+    forest_class_code: Literal[1]
+    training_label_semantics: Literal["multisource_unanimity_proxy_v1"]
+    score_semantics: Literal["uncalibrated_binary_tree_vote_fraction"]
+    evidence_role: Literal["learned_supporting_evidence"]
+    independent_evidence: Literal[False]
+    temporal_transfer_validated: Literal[False]
+    calibrated_probability: Literal[False]
+
+    @field_validator("asset_id")
+    @classmethod
+    def asset_is_a_gee_project_asset(cls, value: str) -> str:
+        if not value.startswith("projects/") or "/assets/" not in value:
+            raise ValueError("asset_id debe identificar un asset de proyecto GEE")
+        return value
+
+
 class PipelineConfig(StrictConfigModel):
     """Configuración raíz del pipeline."""
 
-    schema_version: Literal["1.8.0"]
+    schema_version: Literal["1.11.0"]
     analysis: AnalysisConfig
     spatial: SpatialConfig
     data: DataConfig
     forest_baseline: ForestBaselineConfig
+    forest_model: ForestRandomForestConfig
+    forest_screening: ForestScreeningConfig
     disturbance_detection: DisturbanceDetectionConfig
+    disturbance_events: DisturbanceEventConfig
     output: OutputConfig
 
     @model_validator(mode="after")
@@ -255,6 +287,24 @@ class PipelineConfig(StrictConfigModel):
         ):
             raise ValueError(
                 "minimum_baseline_source_count debe coincidir con minimum_independent_sources"
+            )
+        if (
+            self.forest_screening.minimum_core_source_count
+            != self.forest_baseline.minimum_independent_sources
+        ):
+            raise ValueError(
+                "forest_screening.minimum_core_source_count debe coincidir con "
+                "forest_baseline.minimum_independent_sources"
+            )
+        if self.forest_screening.expected_tree_count != self.forest_model.expected_tree_count:
+            raise ValueError(
+                "forest_screening.expected_tree_count debe coincidir con "
+                "forest_model.expected_tree_count"
+            )
+        if self.disturbance_events.area_threshold_ha != self.spatial.forest_definition_min_area_ha:
+            raise ValueError(
+                "disturbance_events.area_threshold_ha debe coincidir con "
+                "spatial.forest_definition_min_area_ha"
             )
         return self
 
@@ -320,11 +370,6 @@ def _canonical_hash(payload: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def parameters_hash(config: PipelineConfig) -> str:
-    """Calcula SHA-256 sobre la representación JSON canónica de la configuración."""
-    return _canonical_hash(config.model_dump(mode="json"))
-
-
 def scientific_parameters_hash(config: ResolvedPipelineConfig) -> str:
     """Identifica los parámetros metodológicos de una corrida ya resuelta."""
     payload = config.model_dump(mode="json")
@@ -336,7 +381,10 @@ def scientific_parameters_hash(config: ResolvedPipelineConfig) -> str:
             "spatial",
             "data",
             "forest_baseline",
+            "forest_model",
+            "forest_screening",
             "disturbance_detection",
+            "disturbance_events",
         )
     }
     return _canonical_hash(scientific_payload)

@@ -31,13 +31,9 @@ from deforestation_pipeline.hls_composite import (
     HlsIndexFormulaRecord,
 )
 from deforestation_pipeline.hls_seasonal import HlsSeasonalRequest
-from deforestation_pipeline.hls_series import (
-    HlsSeriesMaterialization,
-    HlsSeriesMetadata,
-    HlsSeriesRequest,
-    HlsSeriesYearProductRecord,
-)
 from deforestation_pipeline.local_runner import (
+    _inclusive_period_end_date,
+    _seasonal_request_analysis_end_date,
     main,
     run_local_vector_pipeline,
 )
@@ -49,6 +45,14 @@ from deforestation_pipeline.vector_ingestion import VectorIngestionError
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "default.yml"
 FIXED_NOW = datetime(2026, 7, 23, 18, 30, tzinfo=UTC)
+
+
+def test_seasonal_authoritative_end_uses_closed_djf_and_son_boundaries() -> None:
+    assert _inclusive_period_end_date(date(2025, 3, 1)) == date(2025, 2, 28)
+    assert _inclusive_period_end_date(date(2025, 12, 1)) == date(2025, 11, 30)
+    assert _seasonal_request_analysis_end_date(
+        HlsSeasonalRequest(start_year=2020, end_year=2025)
+    ) == date(2025, 11, 30)
 
 
 def _windows_access_denied() -> PermissionError:
@@ -382,7 +386,6 @@ def test_full_pipeline_single_year_remains_backward_compatible(
     assert captured["generate_hls_composite"] is True
     assert captured["generate_forest_baseline"] is True
     assert captured["generate_disturbance_detection"] is False
-    assert captured["hls_series_request"] is None
     assert captured["hls_seasonal_request"] is None
     assert captured["vector_layer"] == "parcelas"
     assert captured["dissolve_all"] is True
@@ -420,7 +423,6 @@ def test_full_pipeline_accepts_an_inclusive_closed_year_range(
     assert result == 0
     assert request.start_year == 2019
     assert request.end_year == 2024
-    assert captured["hls_series_request"] is None
     assert captured["generate_disturbance_detection"] is True
     assert captured["gee_query"] is None
     assert captured["generate_hls_composite"] is False
@@ -460,7 +462,6 @@ def test_full_pipeline_accepts_seasonal_mode_for_a_closed_year_range(
     assert result == 0
     assert request.start_year == 2021
     assert request.end_year == 2022
-    assert captured["hls_series_request"] is None
     assert captured["gee_query"] is None
     assert captured["generate_forest_baseline"] is True
     assert Path(capsys.readouterr().out.strip()) == expected_directory
@@ -776,114 +777,6 @@ def test_annual_hls_composite_adds_rasters_pngs_and_non_final_metadata(
     )
 
 
-def test_annual_hls_series_is_published_with_fixed_grid_and_no_final_assessment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    input_path = tmp_path / "establecimiento.geojson"
-    _write_feature(input_path)
-    credentials_path = tmp_path / "credentials.json"
-    credentials_path.write_text("{}", encoding="utf-8")
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        local_runner_module,
-        "authenticate_earth_engine",
-        lambda path: object(),
-    )
-
-    def fake_series(**kwargs: object) -> HlsSeriesMaterialization:
-        captured.update(kwargs)
-        grid = cast(RasterGridSpec, kwargs["grid_spec"])
-        request = cast(HlsSeriesRequest, kwargs["request"])
-        records = tuple(
-            HlsSeriesYearProductRecord(
-                year=year,
-                composite_metadata_path=(f"json/temporal/annual/{year}/composite_metadata.json"),
-                composite_input_inventory_path=(
-                    f"json/temporal/annual/{year}/input_inventory.json"
-                ),
-                reflectance_raster_path=f"tiffs/annual/{year}/reflectance.tif",
-                indices_raster_path=f"tiffs/annual/{year}/indices.tif",
-                valid_observation_count_raster_path=(
-                    f"tiffs/annual/{year}/observation_count_total.tif"
-                ),
-                l30_observation_count_raster_path=(
-                    f"tiffs/annual/{year}/observation_count_l30.tif"
-                ),
-                s30_observation_count_raster_path=(
-                    f"tiffs/annual/{year}/observation_count_s30.tif"
-                ),
-            )
-            for year in request.years
-        )
-        metadata = HlsSeriesMetadata(
-            generated_at=FIXED_NOW,
-            start_year=request.start_year,
-            end_year=request.end_year,
-            years=request.years,
-            grid_sha256=grid.grid_sha256,
-            source_products=("HLSL30", "HLSS30"),
-            annual_composite_method="median_reflectance_then_indices",
-            total_estimated_uncompressed_bytes=1,
-            year_products=records,
-        )
-        files = {
-            "json/temporal/annual/grid.json": b'{"schema_version":"1.0.0"}\n',
-            "json/temporal/annual/coverage.json": b'{"years":[]}\n',
-            "json/temporal/annual/series_metadata.json": (
-                json.dumps(metadata.model_dump(mode="json")).encode()
-            ),
-            "tables/annual/summary.csv": b"year,variable\n2020,NDVI\n",
-            "figures/annual/qa/rgb_panel.png": b"\x89PNG-rgb",
-            "figures/annual/qa/index_timeseries.png": b"\x89PNG-index",
-            "figures/annual/qa/observation_coverage.png": b"\x89PNG-coverage",
-        }
-        return HlsSeriesMaterialization(
-            files=files,
-            metadata=metadata,
-            coverage=(),
-            summaries=(),
-            annual_items=(),
-            grid_spec=grid,
-            estimates=(),
-        )
-
-    monkeypatch.setattr(
-        local_runner_module,
-        "materialize_hls_annual_series",
-        fake_series,
-    )
-
-    run_directory = run_local_vector_pipeline(
-        input_path=input_path,
-        output_root=tmp_path / "outputs",
-        config_path=DEFAULT_CONFIG,
-        source_crs="EPSG:4326",
-        establishment_id="hls-series-test",
-        analysis_end_date=date(2026, 7, 24),
-        created_at=FIXED_NOW,
-        gee_credentials_path=credentials_path,
-        hls_series_request=HlsSeriesRequest(start_year=2020, end_year=2021),
-    )
-
-    request = cast(HlsSeriesRequest, captured["request"])
-    assert request.years == (2020, 2021)
-    assert (run_directory / "json/temporal/annual/grid.json").is_file()
-    assert (run_directory / "tables/annual/summary.csv").is_file()
-    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
-    assert summary["stage"] == "annual_hls_time_series"
-    assert summary["remote_data_accessed"] is True
-    assert summary["pixel_data_accessed"] is True
-    assert summary["final_assessment_generated"] is False
-    assert summary["gee"]["years"] == [2020, 2021]
-    captured_grid = cast(RasterGridSpec, captured["grid_spec"])
-    assert summary["gee"]["grid_sha256"] == captured_grid.grid_sha256
-    manifest = json.loads((run_directory / "json/run/manifest.json").read_text(encoding="utf-8"))
-    media_types = {item["path"]: item["media_type"] for item in manifest["artifacts"]}
-    assert media_types["tables/annual/summary.csv"] == "text/csv"
-
-
 def test_local_runner_publishes_seasonal_cube_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -977,6 +870,12 @@ def test_local_runner_publishes_compact_forest_baseline_bundle(
         "build_forest_baseline_features",
         lambda **kwargs: SimpleNamespace(image=object(), metadata=feature_metadata),
     )
+    rf_stack = SimpleNamespace(image=object(), feature_columns=("p0",))
+    monkeypatch.setattr(
+        local_runner_module,
+        "build_yearly_seasonal_feature_stack",
+        lambda **kwargs: rf_stack,
+    )
     product_metadata = SimpleNamespace(
         model_dump=lambda mode: {
             "score_semantics": "uncalibrated_core_evidence_fraction",
@@ -989,9 +888,25 @@ def test_local_runner_publishes_compact_forest_baseline_bundle(
         "build_forest_baseline_images",
         lambda **kwargs: SimpleNamespace(metadata=product_metadata),
     )
+    rf_metadata = SimpleNamespace(
+        model_dump=lambda mode: {
+            "asset_id": "projects/example/assets/models/rf_forest_2020",
+            "score_semantics": "uncalibrated_binary_tree_vote_fraction",
+            "calibrated_probability": False,
+            "independent_evidence": False,
+        }
+    )
+    rf_images = SimpleNamespace(metadata=rf_metadata)
+    monkeypatch.setattr(
+        local_runner_module,
+        "build_forest_rf_images",
+        lambda **kwargs: rf_images,
+    )
     paths = forest_baseline_output_paths()
+    captured_materialization: dict[str, object] = {}
 
     def fake_materialize(**kwargs: object) -> object:
+        captured_materialization.update(kwargs)
         grid = cast(RasterGridSpec, kwargs["grid_spec"])
         return SimpleNamespace(
             files={
@@ -1005,6 +920,16 @@ def test_local_runner_publishes_compact_forest_baseline_bundle(
                 for path in paths.values()
             },
             grid_spec=grid,
+            screening_domain=SimpleNamespace(
+                metrics=SimpleNamespace(
+                    model_dump=lambda mode: {
+                        "automated_evaluable_area_ha": 1.0,
+                        "automated_forest_area_ha": 1.0,
+                        "review_required_area_ha": 0.0,
+                        "insufficient_data_area_ha": 0.0,
+                    }
+                )
+            ),
         )
 
     monkeypatch.setattr(
@@ -1029,6 +954,10 @@ def test_local_runner_publishes_compact_forest_baseline_bundle(
     summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
     assert summary["stage"] == "forest_baseline_2020"
     assert summary["forest_baseline"]["score_semantics"] == ("uncalibrated_core_evidence_fraction")
+    assert summary["forest_baseline"]["random_forest"]["score_semantics"] == (
+        "uncalibrated_binary_tree_vote_fraction"
+    )
+    assert captured_materialization["rf_images"] is rf_images
     assert summary["forest_baseline"]["metadata_path"] == paths["metadata"]
     assert summary["final_assessment_generated"] is False
     assert any(dataset["dataset_id"] == "jrc_gfc2020_v3" for dataset in summary["datasets"])

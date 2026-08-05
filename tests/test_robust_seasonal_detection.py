@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import date
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from deforestation_pipeline.change_detection import (
     DisturbanceQualityBit,
     ForestEvaluationDomain,
     RobustSeasonalDiagnostics,
+    _safe_temporal_nanmedian,
     compute_robust_seasonal_diagnostics,
 )
 from deforestation_pipeline.config import load_config
@@ -146,6 +148,25 @@ def test_nan_reference_marks_insufficient_history_without_interpolation() -> Non
     assert result.reference_valid_count[0, 0, 0, 0] == 2
     insufficient_bit = np.uint16(1 << DisturbanceQualityBit.INSUFFICIENT_REFERENCE_HISTORY)
     assert result.quality_flags_bitmask[0, 0, 0, 0] & insufficient_bit
+
+
+def test_safe_temporal_median_preserves_all_nan_slices_without_warning() -> None:
+    values = np.array(
+        [
+            [[[np.nan, 1.0], [np.nan, 2.0]]],
+            [[[np.nan, 3.0], [np.nan, np.nan]]],
+            [[[np.nan, 5.0], [np.nan, 4.0]]],
+        ],
+        dtype=np.float64,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = _safe_temporal_nanmedian(values)
+
+    assert np.isnan(result[0, 0, 0])
+    assert np.isnan(result[0, 1, 0])
+    np.testing.assert_allclose(result[0, :, 1], [3.0, 3.0])
 
 
 def test_zero_mad_keeps_raw_delta_but_not_standardized_magnitude() -> None:

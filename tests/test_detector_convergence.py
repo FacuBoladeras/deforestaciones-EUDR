@@ -16,7 +16,11 @@ from deforestation_pipeline.change_detection import (
     RobustSeasonalSignalResult,
     converge_disturbance_detectors,
 )
-from deforestation_pipeline.config import load_config, parameters_hash
+from deforestation_pipeline.config import (
+    load_config,
+    resolve_run_config,
+    scientific_parameters_hash,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PERIOD_STARTS = (
@@ -148,7 +152,7 @@ def test_default_convergence_contract_is_versioned_and_forbids_score_fusion() ->
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
     convergence = config.disturbance_detection.convergence
 
-    assert config.schema_version == "1.8.0"
+    assert config.schema_version == "1.11.0"
     assert config.disturbance_detection.schema_version == "1.4.0"
     assert convergence.schema_version == "1.0.0"
     assert convergence.temporal_compatibility_policy == "ccdc_break_within_robust_signal_interval"
@@ -422,13 +426,14 @@ def test_convergence_contract_has_no_combined_probability_or_attribution_fields(
 
 def test_convergence_config_participates_in_scientific_hash() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
-    baseline_hash = parameters_hash(config)
-    changed_convergence = config.disturbance_detection.convergence.model_copy(
+    baseline = resolve_run_config(config, date(2026, 7, 30))
+    baseline_hash = scientific_parameters_hash(baseline)
+    changed_convergence = baseline.disturbance_detection.convergence.model_copy(
         update={"schema_version": "9.9.9"}
     )
-    changed_detection = config.disturbance_detection.model_copy(
+    changed_detection = baseline.disturbance_detection.model_copy(
         update={"convergence": changed_convergence}
     )
-    changed_config = config.model_copy(update={"disturbance_detection": changed_detection})
+    changed = baseline.model_copy(update={"disturbance_detection": changed_detection})
 
-    assert parameters_hash(changed_config) != baseline_hash
+    assert scientific_parameters_hash(changed) != baseline_hash

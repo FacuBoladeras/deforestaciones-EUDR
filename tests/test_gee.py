@@ -21,6 +21,7 @@ from deforestation_pipeline.gee import (
     GeeQueryError,
     GeeSession,
     authenticate_earth_engine,
+    authenticate_earth_engine_user_oauth,
     query_hls_scene_metadata,
 )
 from deforestation_pipeline.geometry import validate_geometry
@@ -220,6 +221,26 @@ def test_service_account_authentication_never_exposes_identity(tmp_path: Path) -
     assert session.initialized is True
     assert "dummy-project" not in repr(session)
     assert "dummy@example.invalid" not in repr(session)
+
+
+def test_user_oauth_initializes_with_only_the_versioned_project() -> None:
+    class FakeUserOAuthEarthEngine:
+        def __init__(self) -> None:
+            self.project: str | None = None
+
+        def Initialize(self, *, project: str) -> None:
+            self.project = project
+
+    fake_ee = FakeUserOAuthEarthEngine()
+
+    session = authenticate_earth_engine_user_oauth(
+        project="ee-facuboladerasgee",
+        ee_module=fake_ee,
+    )
+
+    assert fake_ee.project == "ee-facuboladerasgee"
+    assert session.initialized is True
+    assert "ee-facuboladerasgee" not in repr(session)
 
 
 def test_authentication_failure_is_sanitized(tmp_path: Path) -> None:

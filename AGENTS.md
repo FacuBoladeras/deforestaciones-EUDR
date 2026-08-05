@@ -497,51 +497,33 @@ justificación medible.
 - JSON para manifiestos.
 - PostGIS en una etapa posterior, no como dependencia del primer prototipo.
 
-## 12. Estructura recomendada
+## 12. Estructura vigente
 
 ```text
 .
 ├── AGENTS.md
-├── README.md
+├── README.md                  # referencia canónica del estado actual
+├── NEXT_STEPS.md              # único roadmap
 ├── pyproject.toml
 ├── configs/
-│   ├── default.yml
-│   ├── regions/
-│   └── models/
+│   └── default.yml
 ├── data/
+│   ├── catalog.yml
 │   ├── licenses.yml
 │   ├── schemas/
 │   └── samples/
-├── docs/
-│   ├── methodology.md
-│   ├── data_dictionary.md
-│   └── validation.md
-├── notebooks/
 ├── scripts/
 ├── src/
 │   └── deforestation_pipeline/
-│       ├── cli.py
-│       ├── config.py
-│       ├── geometry.py
-│       ├── catalog.py
-│       ├── baseline.py
-│       ├── composites.py
-│       ├── features.py
-│       ├── change_detection.py
-│       ├── attribution.py
-│       ├── events.py
-│       ├── evidence.py
-│       ├── provenance.py
-│       └── schemas.py
 ├── tests/
-│   ├── fixtures/
-│   ├── unit/
-│   └── integration/
+├── pruebas.py
 └── outputs/
 ```
 
-No crear directorios vacíos por anticipado. Incorporarlos cuando una tarea los
-necesite.
+No fragmentar el estado del proyecto en documentos por pasos históricos.
+Actualizar `README.md` cuando cambie la capacidad implementada y
+`NEXT_STEPS.md` cuando cambie el orden de trabajo. No crear directorios vacíos
+por anticipado; incorporarlos cuando una tarea los necesite.
 
 ## 13. Configuración y reproducibilidad
 

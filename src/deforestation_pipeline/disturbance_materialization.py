@@ -10,12 +10,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO, StringIO
-from typing import Any
+from typing import Any, Literal
 
 import matplotlib
 import numpy as np
 import rasterio
-from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.colors import BoundaryNorm, ListedColormap, PowerNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from numpy.typing import NDArray
@@ -37,10 +37,23 @@ from deforestation_pipeline.change_detection import (
     converge_disturbance_detectors,
     disturbance_detection_output_paths,
 )
+from deforestation_pipeline.disturbance_events import (
+    DisturbanceEventCollection,
+    DisturbanceEventConfig,
+    materialize_persistent_disturbance_events,
+)
+from deforestation_pipeline.disturbance_evidence import (
+    DISTURBANCE_EVIDENCE_SCHEMA_VERSION,
+    validate_disturbance_evidence_payload,
+)
+from deforestation_pipeline.forest_screening import ForestScreeningDomain
 from deforestation_pipeline.schemas import RasterGridSpec
 
 matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
+
+ROBUST_ANOMALY_VISUALIZATION_LABEL = "escala raíz cuadrada; recorte superior p99"
+ROBUST_ANOMALY_VISUALIZATION_PERCENTILE = 99.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,11 +70,27 @@ class DisturbancePeriodRaster:
 
 
 @dataclass(frozen=True, slots=True)
+class DisturbanceCcdcProvenance:
+    """Disponibilidad del resumen escalar CCDC conocida por quien materializa."""
+
+    status: Literal["scalar_summary_materialized", "unavailable_global_failure"]
+    failure_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status == "scalar_summary_materialized":
+            if self.failure_code is not None:
+                raise ValueError("ccdc_materialized_rejects_failure_code")
+        elif self.failure_code is None or not self.failure_code.strip():
+            raise ValueError("ccdc_unavailable_requires_failure_code")
+
+
+@dataclass(frozen=True, slots=True)
 class DisturbanceMaterialization:
-    """Los cinco artefactos y su resumen, todavía sin atribución."""
+    """Evidencia raster, tabular y por eventos, todavía sin atribución."""
 
     files: Mapping[str, bytes]
     metadata: Mapping[str, Any]
+    events: DisturbanceEventCollection
     analysis_end_date: date
 
 
@@ -69,11 +98,14 @@ def materialize_disturbance_detection(
     *,
     periods: Sequence[DisturbancePeriodRaster],
     domain: ForestEvaluationDomain,
+    screening_domain: ForestScreeningDomain,
     baseline_evidence_fraction: NDArray[Any],
     spatial_footprint: NDArray[Any],
     ccdc_result: CcdcBenchmarkResult,
+    ccdc_provenance: DisturbanceCcdcProvenance,
     grid_spec: RasterGridSpec,
     config: DisturbanceDetectionConfig,
+    event_config: DisturbanceEventConfig,
     scientific_parameters_hash: str,
     requested_start_year: int,
     requested_end_year: int,
@@ -92,6 +124,8 @@ def materialize_disturbance_detection(
         raise ValueError("spatial_footprint_dtype_invalid")
     if not np.any(footprint):
         raise ValueError("spatial_footprint_empty")
+    if not np.array_equal(footprint, screening_domain.aoi_footprint):
+        raise ValueError("screening_footprint_mismatch")
     ordered = tuple(sorted(periods, key=lambda item: (item.start_date, item.period_id)))
     if not ordered:
         raise ValueError("disturbance_periods_empty")
@@ -249,25 +283,60 @@ def materialize_disturbance_detection(
         post_counts=post_counts,
         period_signal=robust.period_signal_mask,
         excluded_flags=diagnostics.quality_flags_bitmask,
+        spatial_footprint=footprint,
         config=config,
     )
     actual_analysis_end = max(item.end_date_exclusive for item in post_items)
     actual_analysis_end = actual_analysis_end.fromordinal(actual_analysis_end.toordinal() - 1)
-    metadata = _metadata_payload(
-        config=config,
-        scientific_parameters_hash=scientific_parameters_hash,
-        requested_start_year=requested_start_year,
-        requested_end_year=requested_end_year,
-        reference_items=reference_items,
-        post_items=post_items,
-        convergence_state=convergence.state_code,
-        convergence_reason=convergence.reason_code,
-        quality_flags=convergence.quality_flags_bitmask,
-        spatial_footprint=footprint,
+    metadata = validate_disturbance_evidence_payload(
+        _metadata_payload(
+            config=config,
+            scientific_parameters_hash=scientific_parameters_hash,
+            requested_start_year=requested_start_year,
+            requested_end_year=requested_end_year,
+            reference_items=reference_items,
+            post_items=post_items,
+            convergence_state=convergence.state_code,
+            convergence_reason=convergence.reason_code,
+            quality_flags=convergence.quality_flags_bitmask,
+            robust_any_signal=np.any(robust.period_signal_mask, axis=0),
+            ccdc_supports_break=convergence.ccdc_supports_break,
+            screening_domain=screening_domain,
+            spatial_footprint=footprint,
+            grid_spec=grid_spec,
+            paths=paths,
+            ccdc_provenance=ccdc_provenance,
+            generated_at=generated_at,
+            actual_analysis_end=actual_analysis_end,
+        )
+    )
+    event_materialization = materialize_persistent_disturbance_events(
+        persistent_mask=(
+            convergence.state_code == np.uint8(DisturbanceStateCode.PERSISTENT_CANDIDATE)
+        ),
+        automated_forest_mask=screening_domain.automated_forest,
+        first_anomalous_period_index=convergence.first_robust_signal_period_index,
+        maximum_disturbance_magnitude=convergence.robust_maximum_disturbance_magnitude,
+        disturbance_score=convergence.robust_uncalibrated_disturbance_evidence_score,
+        convergence_reason_code=convergence.reason_code,
+        available_detector_count=convergence.available_detector_count,
+        agreeing_detector_count=convergence.agreeing_detector_count,
+        ccdc_break_day_offset=ccdc_day_offset,
+        quality_flags_bitmask=convergence.quality_flags_bitmask,
+        post_period_ids=tuple(item.period_id for item in post_items),
+        post_period_start_dates=tuple(item.start_date for item in post_items),
+        post_period_end_dates_exclusive=tuple(item.end_date_exclusive for item in post_items),
+        all_period_ids=tuple(item.period_id for item in ordered),
+        all_period_seasons=tuple(item.season for item in ordered),
+        all_period_start_dates=tuple(item.start_date for item in ordered),
+        all_period_end_dates_exclusive=tuple(item.end_date_exclusive for item in ordered),
+        index_names=expected_indices,
+        index_cube=cube,
         grid_spec=grid_spec,
-        paths=paths,
+        config=event_config,
         generated_at=generated_at,
-        actual_analysis_end=actual_analysis_end,
+        scientific_parameters_hash=scientific_parameters_hash,
+        png_dpi=png_dpi,
     )
     files = {
         paths["metadata"]: _json_bytes(metadata),
@@ -283,12 +352,14 @@ def materialize_disturbance_detection(
             dpi=png_dpi,
         ),
         paths["period_summary_table"]: _csv_bytes(period_rows),
+        **event_materialization.files,
     }
-    if len(files) != 5 or set(files) != set(paths.values()):
+    if not set(paths.values()).issubset(files):
         raise RuntimeError("disturbance_artifact_contract_violation")
     return DisturbanceMaterialization(
         files=files,
         metadata=metadata,
+        events=event_materialization.collection,
         analysis_end_date=actual_analysis_end,
     )
 
@@ -565,13 +636,15 @@ def _period_rows(
     post_counts: NDArray[np.float64],
     period_signal: NDArray[np.bool_],
     excluded_flags: NDArray[np.uint16],
+    spatial_footprint: NDArray[np.bool_],
     config: DisturbanceDetectionConfig,
 ) -> tuple[dict[str, object], ...]:
     excluded_mask = 1 << 4
     rows: list[dict[str, object]] = []
     for period_index, item in enumerate(items):
-        finite_pixels = np.isfinite(post_values[period_index]).any(axis=0)
-        valid_counts = post_counts[period_index][np.isfinite(post_counts[period_index])]
+        finite_pixels = np.isfinite(post_values[period_index]).any(axis=0) & spatial_footprint
+        valid_count_mask = np.isfinite(post_counts[period_index]) & spatial_footprint
+        valid_counts = post_counts[period_index][valid_count_mask]
         rows.append(
             {
                 "period_index": period_index,
@@ -582,9 +655,11 @@ def _period_rows(
                 "mean_valid_observation_count": (
                     round(float(valid_counts.mean()), 6) if valid_counts.size else ""
                 ),
-                "signal_pixel_count": int(period_signal[period_index].sum()),
+                "signal_pixel_count": int(
+                    np.count_nonzero(period_signal[period_index] & spatial_footprint)
+                ),
                 "cutoff_straddling_excluded": bool(
-                    np.any(excluded_flags[period_index] & excluded_mask)
+                    np.any(excluded_flags[period_index][..., spatial_footprint] & excluded_mask)
                 ),
                 "signal_threshold": config.robust_seasonal.standardized_magnitude_threshold,
                 "minimum_index_support_count": (config.robust_seasonal.minimum_index_support_count),
@@ -604,9 +679,13 @@ def _metadata_payload(
     convergence_state: NDArray[np.uint8],
     convergence_reason: NDArray[np.uint8],
     quality_flags: NDArray[np.uint16],
+    robust_any_signal: NDArray[np.bool_],
+    ccdc_supports_break: NDArray[np.bool_],
+    screening_domain: ForestScreeningDomain,
     spatial_footprint: NDArray[np.bool_],
     grid_spec: RasterGridSpec,
     paths: Mapping[str, str],
+    ccdc_provenance: DisturbanceCcdcProvenance,
     generated_at: datetime,
     actual_analysis_end: date,
 ) -> dict[str, Any]:
@@ -618,8 +697,19 @@ def _metadata_payload(
         for item in post_items
         if item.start_date < config.analysis_start_date < item.end_date_exclusive
     )
+    signal_counts = _temporal_signal_counts_by_domain(
+        robust_any_signal=robust_any_signal,
+        ccdc_supports_break=ccdc_supports_break,
+        convergence_state=convergence_state,
+        screening_domain=screening_domain,
+    )
+    statement_fields = _screening_statement_fields(
+        signal_counts=signal_counts,
+        period_start_date=min(item.start_date for item in evaluable_items),
+        period_end_date=actual_analysis_end,
+    )
     return {
-        "schema_version": DISTURBANCE_DETECTION_SCHEMA_VERSION,
+        "schema_version": DISTURBANCE_EVIDENCE_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
         "scientific_parameters_hash": scientific_parameters_hash,
         "requested_range": {
@@ -667,9 +757,15 @@ def _metadata_payload(
         },
         "ccdc": {
             "raw_array_downloaded": False,
-            "scalar_summary_downloaded": True,
+            "scalar_summary_downloaded": (ccdc_provenance.status == "scalar_summary_materialized"),
             "source_product": config.ccdc_benchmark.source_product,
             "change_metric_semantics": "algorithmic_breakpoint_score_not_calibrated",
+            "status": ccdc_provenance.status,
+            **(
+                {"failure_code": ccdc_provenance.failure_code}
+                if ccdc_provenance.failure_code is not None
+                else {}
+            ),
         },
         "statistics": {
             "state_code": _code_counts(
@@ -686,6 +782,14 @@ def _metadata_payload(
                 quality_flags,
                 spatial_footprint,
             ),
+        },
+        "screening": {
+            "primary_interpretation_domain": "automated_forest",
+            "temporal_signal_scope": "entire_aoi",
+            "baseline_metrics": screening_domain.metrics.model_dump(mode="json"),
+            "temporal_signals_by_domain": signal_counts,
+            **statement_fields,
+            "final_assessment_generated": False,
         },
         "rasters": {
             "dtype": "float32",
@@ -706,7 +810,75 @@ def _metadata_payload(
             "El indicador de recuperación está reservado y permanece sin datos.",
             "No se aplicó agregación espacial ni umbral de superficie.",
             "El resultado requiere revisión humana antes de cualquier conclusión.",
+            (
+                "La interpretación automática primaria se limita al bosque 2020 de alta "
+                "confianza; las señales de los demás estratos se conservan para revisión."
+            ),
         ],
+    }
+
+
+def _screening_statement_fields(
+    *,
+    signal_counts: Mapping[str, Mapping[str, int]],
+    period_start_date: date,
+    period_end_date: date,
+) -> dict[str, object]:
+    automated_forest_has_signal = any(
+        count > 0 for count in signal_counts["automated_forest"].values()
+    )
+    return {
+        "automatic_statement_policy": "only_when_no_signal_in_automated_forest",
+        "automatic_statement_scope": "automated_forest_high_confidence",
+        "automatic_statement_period": {
+            "start_date": period_start_date.isoformat(),
+            "end_date": period_end_date.isoformat(),
+        },
+        "automatic_statement_generated": not automated_forest_has_signal,
+        **(
+            {
+                "automatic_statement": (
+                    "sin cambio detectado en el bosque automático de alta confianza "
+                    f"entre {period_start_date.isoformat()} y {period_end_date.isoformat()}"
+                )
+            }
+            if not automated_forest_has_signal
+            else {}
+        ),
+    }
+
+
+def _temporal_signal_counts_by_domain(
+    *,
+    robust_any_signal: NDArray[np.bool_],
+    ccdc_supports_break: NDArray[np.bool_],
+    convergence_state: NDArray[np.uint8],
+    screening_domain: ForestScreeningDomain,
+) -> dict[str, dict[str, int]]:
+    masks = {
+        "automated_forest": screening_domain.automated_forest,
+        "automated_nonforest": screening_domain.automated_nonforest,
+        "review_required": screening_domain.review_required,
+        "insufficient_data": screening_domain.insufficient_data,
+    }
+    state = np.asarray(convergence_state)
+    robust = np.asarray(robust_any_signal, dtype=np.bool_)
+    ccdc = np.asarray(ccdc_supports_break, dtype=np.bool_)
+    return {
+        name: {
+            "any_robust_signal_pixel_count": int(np.count_nonzero(robust & mask)),
+            "ccdc_break_pixel_count": int(np.count_nonzero(ccdc & mask)),
+            "persistent_candidate_pixel_count": int(
+                np.count_nonzero((state == DisturbanceStateCode.PERSISTENT_CANDIDATE) & mask)
+            ),
+            "transient_signal_pixel_count": int(
+                np.count_nonzero((state == DisturbanceStateCode.TRANSIENT_SIGNAL) & mask)
+            ),
+            "detector_disagreement_pixel_count": int(
+                np.count_nonzero((state == DisturbanceStateCode.DETECTOR_DISAGREEMENT) & mask)
+            ),
+        }
+        for name, mask in masks.items()
     }
 
 
@@ -729,6 +901,36 @@ def _quality_bit_counts(
         for member in DisturbanceQualityBit
         if np.any(inside & (1 << int(member)))
     }
+
+
+def _robust_anomaly_visualization(
+    values: NDArray[Any],
+    *,
+    spatial_footprint: NDArray[np.bool_],
+) -> tuple[np.ma.MaskedArray, float]:
+    """Prepara sólo la visualización robusta sin alterar la evidencia científica."""
+    anomaly = np.asarray(values, dtype=np.float64)
+    if anomaly.shape != spatial_footprint.shape:
+        raise ValueError("robust_visualization_footprint_shape_mismatch")
+    panel = np.ma.masked_where(
+        ~spatial_footprint,
+        np.ma.masked_invalid(anomaly),
+    )
+    visible = anomaly[spatial_footprint & np.isfinite(anomaly) & (anomaly > 0)]
+    upper_limit = (
+        float(
+            np.percentile(
+                visible,
+                ROBUST_ANOMALY_VISUALIZATION_PERCENTILE,
+                method="lower",
+            )
+        )
+        if visible.size
+        else 1.0
+    )
+    if upper_limit <= 0:
+        upper_limit = 1.0
+    return panel, upper_limit
 
 
 def _render_qa(
@@ -775,13 +977,31 @@ def _render_qa(
     reason_image = axes[0, 1].imshow(reason_panel, cmap="tab20", interpolation="nearest")
     axes[0, 1].set_title("Motivo de convergencia/desacuerdo")
     figure.colorbar(reason_image, ax=axes[0, 1], shrink=0.75, label="Código de motivo")
-    robust_panel = np.ma.masked_where(
-        ~spatial_footprint,
-        np.ma.masked_invalid(np.asarray(robust_z, dtype=np.float64)),
+    robust_panel, robust_upper_limit = _robust_anomaly_visualization(
+        robust_z,
+        spatial_footprint=spatial_footprint,
     )
-    robust_image = axes[1, 0].imshow(robust_panel, cmap="magma", interpolation="nearest")
-    axes[1, 0].set_title("Máxima anomalía robusta estandarizada")
-    figure.colorbar(robust_image, ax=axes[1, 0], shrink=0.75)
+    robust_image = axes[1, 0].imshow(
+        robust_panel,
+        cmap="magma",
+        interpolation="nearest",
+        norm=PowerNorm(
+            gamma=0.5,
+            vmin=0.0,
+            vmax=robust_upper_limit,
+            clip=True,
+        ),
+    )
+    axes[1, 0].set_title(
+        f"Máxima anomalía robusta estandarizada\n({ROBUST_ANOMALY_VISUALIZATION_LABEL})"
+    )
+    figure.colorbar(
+        robust_image,
+        ax=axes[1, 0],
+        shrink=0.75,
+        extend="max",
+        label="Anomalía visualizada",
+    )
     ccdc_panel = np.ma.masked_where(
         ~spatial_footprint,
         np.ma.masked_invalid(np.asarray(ccdc_magnitude, dtype=np.float64)),

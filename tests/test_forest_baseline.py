@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_default_config_declares_auditable_forest_baseline_contract() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.8.0"
+    assert config.schema_version == "1.11.0"
     assert config.forest_baseline.reference_date == date(2020, 12, 31)
     assert config.forest_baseline.feature_end_date_exclusive == date(2021, 1, 1)
     assert config.forest_baseline.benchmark_resolution_m == 30
@@ -113,6 +113,13 @@ def test_forest_baseline_outputs_reuse_one_flat_evidence_domain_per_type() -> No
         "source_count": "tiffs/evidence/forest_source_count_2020.tif",
         "source_evidence": "tiffs/evidence/forest_source_evidence_2020.tif",
         "features": "tiffs/evidence/forest_features_2020.tif",
+        "rf_class": "tiffs/evidence/rf_forest_class_2020.tif",
+        "rf_vote_fraction": "tiffs/evidence/rf_forest_vote_fraction_2020.tif",
+        "rf_input_complete": "tiffs/evidence/rf_forest_input_complete_2020.tif",
+        "automated_evaluable": "tiffs/evidence/automated_evaluable_2020.tif",
+        "review_required": "tiffs/evidence/review_required_2020.tif",
+        "insufficient_data": "tiffs/evidence/insufficient_data_2020.tif",
+        "screening_figure": "figures/evidence/forest_screening_2020.png",
     }
     assert evidence_json("forest_baseline_2020.json") == paths["metadata"]
     assert evidence_figure("forest_baseline_2020.png") == paths["qa_figure"]

@@ -85,3 +85,31 @@ datasets:
         loss through 2020; it does not fully represent subsequent regeneration.
       - >-
         Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "mapbiomas_argentina_collection2"
+    provider: "MapBiomas Argentina"
+    collection: >-
+      projects/mapbiomas-public/assets/argentina/lulc/collection2/mapbiomas_argentina_collection2_integration_v3
+    version: "Collection 2 integration v3"
+    license: "Creative Commons attribution required; exact variant unresolved"
+    access_date: 2026-07-30
+    attribution: >-
+      MapBiomas - Colección 2 de la Serie Anual de Mapas de Cobertura y Uso
+      del Suelo de Argentina, consultada el 2026-07-30 a través de
+      https://argentina.mapbiomas.org/
+    restrictions:
+      - >-
+        The official terms page states CC-BY, while the official FAQ states
+        CC-BY-SA; neither identifies a Creative Commons license version.
+        Resolve this discrepancy before redistributing derived training data.
+      - >-
+        Attribution must identify the collection version, access date, and
+        source link.
+      - >-
+        MapBiomas classes are land-cover pseudolabels and do not independently
+        establish the EUDR forest definition.
+      - >-
+        The producer recommends use at scales up to 1:100,000 and does not
+        recommend use at 1:50,000.
+      - >-
+        Earth Engine platform terms and project registration apply separately.

@@ -119,6 +119,22 @@ def authenticate_earth_engine(
     return GeeSession(module=module)
 
 
+def authenticate_earth_engine_user_oauth(
+    *,
+    project: str,
+    ee_module: Any | None = None,
+) -> GeeSession:
+    """Inicializa con la credencial persistente del usuario sin leer identidad ni tokens."""
+    if not project:
+        raise GeeAuthenticationError("project_required")
+    module = ee_module if ee_module is not None else _import_earth_engine()
+    try:
+        module.Initialize(project=project)
+    except Exception as error:
+        raise GeeAuthenticationError(_authentication_error_code(error)) from None
+    return GeeSession(module=module)
+
+
 def query_hls_scene_metadata(
     *,
     session: GeeSession,

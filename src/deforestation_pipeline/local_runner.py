@@ -27,7 +27,6 @@ from deforestation_pipeline.area import AreaMeasurement, measure_area, select_pr
 from deforestation_pipeline.artifact_layout import (
     annual_figure,
     annual_json,
-    annual_table,
     annual_tiff,
     configuration_json,
     gee_json,
@@ -52,10 +51,7 @@ from deforestation_pipeline.ccdc_benchmark import (
     build_ccdc_remote_benchmark,
     build_ccdc_scalar_summary_image,
 )
-from deforestation_pipeline.change_detection import (
-    build_forest_evaluation_domain,
-    disturbance_detection_output_paths,
-)
+from deforestation_pipeline.change_detection import disturbance_detection_output_paths
 from deforestation_pipeline.config import (
     execution_config_hash,
     load_config,
@@ -63,6 +59,7 @@ from deforestation_pipeline.config import (
     scientific_parameters_hash,
 )
 from deforestation_pipeline.disturbance_materialization import (
+    DisturbanceCcdcProvenance,
     DisturbanceMaterialization,
     DisturbancePeriodRaster,
     ccdc_result_from_scalar_raster,
@@ -83,6 +80,8 @@ from deforestation_pipeline.forest_baseline_products import (
     ForestBaselineImages,
     build_forest_baseline_images,
 )
+from deforestation_pipeline.forest_rf import ForestRfImages, build_forest_rf_images
+from deforestation_pipeline.forest_screening import build_screening_temporal_domain
 from deforestation_pipeline.gee import (
     GeeMetadataQuery,
     GeeMetadataQueryResult,
@@ -101,11 +100,6 @@ from deforestation_pipeline.hls_seasonal import (
     HlsSeasonalRequest,
     materialize_hls_seasonal_series,
 )
-from deforestation_pipeline.hls_series import (
-    HlsSeriesMaterialization,
-    HlsSeriesRequest,
-    materialize_hls_annual_series,
-)
 from deforestation_pipeline.raster_grid import derive_raster_grid_spec
 from deforestation_pipeline.raster_products import (
     HlsRasterMaterialization,
@@ -114,12 +108,16 @@ from deforestation_pipeline.raster_products import (
     materialize_hls_raster_products,
 )
 from deforestation_pipeline.schemas import DatasetRecord, RasterGridSpec
+from deforestation_pipeline.seasonal_feature_stack import (
+    build_yearly_seasonal_feature_stack,
+)
+from deforestation_pipeline.temporal_cube import build_meteorological_south_window_plan
 from deforestation_pipeline.vector_ingestion import (
     ingest_local_vector,
     readable_vector_drivers,
 )
 
-LOCAL_BUNDLE_SCHEMA_VERSION = "3.0.0"
+LOCAL_BUNDLE_SCHEMA_VERSION = "3.1.0"
 ATOMIC_PUBLISH_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.4, 0.8, 1.6)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yml"
@@ -146,7 +144,6 @@ def run_local_vector_pipeline(
     gee_credentials_path: Path | None = None,
     generate_hls_composite: bool = False,
     generate_forest_baseline: bool = False,
-    hls_series_request: HlsSeriesRequest | None = None,
     hls_seasonal_request: HlsSeasonalRequest | None = None,
     generate_disturbance_detection: bool = False,
     vector_layer: str | None = None,
@@ -165,6 +162,13 @@ def run_local_vector_pipeline(
         layer=vector_layer,
         dissolve_all=dissolve_all,
     )
+    requested_analysis_end_date = analysis_end_date
+    if hls_seasonal_request is not None:
+        analysis_end_date = _seasonal_request_analysis_end_date(hls_seasonal_request)
+        if requested_analysis_end_date < analysis_end_date:
+            raise LocalVectorInputError(
+                "requested_analysis_end_date_precedes_published_seasonal_range"
+            )
     config = load_config(config_path)
     resolved_config = resolve_run_config(config, analysis_end_date)
     catalog = load_source_catalog(catalog_path)
@@ -178,17 +182,15 @@ def run_local_vector_pipeline(
     gee_result: GeeMetadataQueryResult | None = None
     composite_product: HlsCompositeImages | None = None
     raster_materialization: HlsRasterMaterialization | None = None
-    series_materialization: HlsSeriesMaterialization | None = None
     seasonal_materialization: HlsSeasonalMaterialization | None = None
     baseline_feature_product: ForestBaselineFeatureProduct | None = None
     baseline_images: ForestBaselineImages | None = None
+    forest_rf_images: ForestRfImages | None = None
     baseline_materialization: ForestBaselineMaterialization | None = None
     disturbance_materialization: DisturbanceMaterialization | None = None
     disturbance_skip_reason: str | None = None
     support_materialization: HlsSeasonalMaterialization | None = None
     raster_grid: RasterGridSpec | None = None
-    if hls_series_request is not None and hls_seasonal_request is not None:
-        raise LocalVectorInputError("la serie anual y la serie estacional son excluyentes")
     if generate_disturbance_detection and hls_seasonal_request is None:
         raise LocalVectorInputError(
             "la detección de perturbaciones requiere un rango estacional HLS"
@@ -197,7 +199,7 @@ def run_local_vector_pipeline(
         raise LocalVectorInputError(
             "la detección de perturbaciones requiere la línea base forestal 2020"
         )
-    temporal_request = hls_series_request is not None or hls_seasonal_request is not None
+    temporal_request = hls_seasonal_request is not None
     if temporal_request and (gee_query is not None or generate_hls_composite):
         raise LocalVectorInputError(
             "las series HLS no se combinan con la consulta o composite anual individual"
@@ -252,27 +254,6 @@ def run_local_vector_pipeline(
                 output_config=resolved_config.output,
                 grid_spec=raster_grid,
             )
-    if hls_series_request is not None:
-        raster_target_crs = select_projected_crs(
-            validated,
-            resolved_config.spatial.raster_crs_strategy,
-        )
-        raster_grid = derive_raster_grid_spec(
-            aoi_wgs84=validated.analysis_geometry,
-            target_crs=raster_target_crs,
-            resolution_m=resolved_config.data.target_resolution_m,
-            nodata=resolved_config.output.raster_nodata,
-        )
-        series_materialization = materialize_hls_annual_series(
-            session=gee_session,
-            plan=source_plan,
-            data_config=resolved_config.data,
-            output_config=resolved_config.output,
-            aoi_wgs84=validated.analysis_geometry,
-            grid_spec=raster_grid,
-            request=hls_series_request,
-            generated_at=run_created_at,
-        )
     if hls_seasonal_request is not None:
         raster_target_crs = select_projected_crs(
             validated,
@@ -323,10 +304,28 @@ def run_local_vector_pipeline(
             aoi_wgs84=validated.analysis_geometry,
             generated_at=run_created_at,
         )
+        rf_feature_stack = build_yearly_seasonal_feature_stack(
+            session=gee_session,
+            source_plan=source_plan,
+            data_config=resolved_config.data,
+            aoi_wgs84=validated.analysis_geometry,
+            grid_spec=raster_grid,
+            year=resolved_config.forest_model.reference_year,
+            generated_at=run_created_at,
+        )
+        forest_rf_images = build_forest_rf_images(
+            module=gee_session.module,
+            config=resolved_config.forest_model,
+            feature_stack=rf_feature_stack,
+            aoi_wgs84=validated.analysis_geometry,
+            generated_at=run_created_at,
+        )
         baseline_materialization = materialize_forest_baseline(
             images=baseline_images,
+            rf_images=forest_rf_images,
             feature_metadata=baseline_feature_product.metadata,
             source_plan=forest_source_plan,
+            screening_config=resolved_config.forest_screening,
             output_config=resolved_config.output,
             grid_spec=raster_grid,
         )
@@ -367,23 +366,22 @@ def run_local_vector_pipeline(
                 support=support_materialization,
             )
             baseline_paths = forest_baseline_output_paths()
-            source_count, consensus, disagreement, evidence_fraction = read_baseline_domain_inputs(
+            source_count, _, _, evidence_fraction = read_baseline_domain_inputs(
                 files=baseline_materialization.files,
                 paths=baseline_paths,
                 grid_spec=raster_grid,
             )
-            domain = build_forest_evaluation_domain(
-                source_count=np.nan_to_num(source_count, nan=0).astype(np.int16),
-                consensus_forest=np.nan_to_num(consensus, nan=0).astype(np.uint8),
-                disagreement=np.nan_to_num(disagreement, nan=0).astype(np.uint8),
-                config=resolved_config.disturbance_detection,
+            screening_domain = baseline_materialization.screening_domain
+            domain = build_screening_temporal_domain(
+                screening_domain,
             )
             last_closed_day = max(
                 period.end_date_exclusive for period in periods if period.published
             )
             last_closed_day = date.fromordinal(last_closed_day.toordinal() - 1)
-            ccdc_status = "scalar_summary_materialized"
-            ccdc_failure_code: str | None = None
+            ccdc_provenance = DisturbanceCcdcProvenance(
+                status="scalar_summary_materialized",
+            )
             try:
                 ccdc_remote = build_ccdc_remote_benchmark(
                     session=gee_session,
@@ -417,8 +415,10 @@ def run_local_vector_pipeline(
                 HlsCompositeError,
                 RasterDownloadError,
             ) as error:
-                ccdc_status = "unavailable_global_failure"
-                ccdc_failure_code = _sanitized_failure_code(error)
+                ccdc_provenance = DisturbanceCcdcProvenance(
+                    status="unavailable_global_failure",
+                    failure_code=_sanitized_failure_code(error),
+                )
                 ccdc_result = unavailable_ccdc_result(
                     domain=domain,
                     index_count=len(
@@ -428,34 +428,19 @@ def run_local_vector_pipeline(
             disturbance_materialization = materialize_disturbance_detection(
                 periods=periods,
                 domain=domain,
+                screening_domain=screening_domain,
                 baseline_evidence_fraction=evidence_fraction,
                 spatial_footprint=np.isfinite(source_count),
                 ccdc_result=ccdc_result,
+                ccdc_provenance=ccdc_provenance,
                 grid_spec=raster_grid,
                 config=resolved_config.disturbance_detection,
+                event_config=resolved_config.disturbance_events,
                 scientific_parameters_hash=scientific_parameters_hash(resolved_config),
                 requested_start_year=hls_seasonal_request.start_year,
                 requested_end_year=hls_seasonal_request.end_year,
                 generated_at=run_created_at,
                 png_dpi=resolved_config.output.png_dpi,
-            )
-            disturbance_metadata = dict(disturbance_materialization.metadata)
-            ccdc_metadata = dict(disturbance_metadata["ccdc"])
-            ccdc_metadata["status"] = ccdc_status
-            ccdc_metadata["scalar_summary_downloaded"] = (
-                ccdc_status == "scalar_summary_materialized"
-            )
-            if ccdc_failure_code is not None:
-                ccdc_metadata["failure_code"] = ccdc_failure_code
-            disturbance_metadata["ccdc"] = ccdc_metadata
-            disturbance_files = dict(disturbance_materialization.files)
-            disturbance_files[disturbance_detection_output_paths()["metadata"]] = _json_bytes(
-                disturbance_metadata
-            )
-            disturbance_materialization = DisturbanceMaterialization(
-                files=disturbance_files,
-                metadata=disturbance_metadata,
-                analysis_end_date=disturbance_materialization.analysis_end_date,
             )
 
     input_sha256 = ingestion.input_sha256
@@ -475,7 +460,6 @@ def run_local_vector_pipeline(
                 _gee_query_identity(
                     gee_query,
                     generate_hls_composite,
-                    hls_series_request,
                     hls_seasonal_request,
                     generate_forest_baseline,
                     generate_disturbance_detection,
@@ -494,13 +478,11 @@ def run_local_vector_pipeline(
     validation_payload = _validation_payload(validated)
     remote_data_accessed = (
         gee_result is not None
-        or series_materialization is not None
         or seasonal_materialization is not None
         or baseline_materialization is not None
     )
     pixel_data_accessed = (
         raster_materialization is not None
-        or series_materialization is not None
         or seasonal_materialization is not None
         or baseline_materialization is not None
     )
@@ -522,6 +504,7 @@ def run_local_vector_pipeline(
         "establishment_id": establishment_id,
         "created_at": run_created_at.isoformat(),
         "analysis_end_date": analysis_end_date.isoformat(),
+        "requested_analysis_end_date": requested_analysis_end_date.isoformat(),
         "input_sha256": input_sha256,
         "catalog_sha256": catalog_sha256,
         "scientific_parameters_hash": scientific_hash,
@@ -533,11 +516,6 @@ def run_local_vector_pipeline(
         access_limitation = (
             "El cubo virtual contiene composites estacionales; cada período es una "
             "síntesis temporal y no una fecha de adquisición única."
-        )
-    elif series_materialization is not None:
-        access_limitation = (
-            "La serie contiene composites anuales comparables; cada composite es una "
-            "síntesis temporal y no representa una fecha de adquisición única."
         )
     elif baseline_materialization is not None:
         access_limitation = (
@@ -591,16 +569,12 @@ def run_local_vector_pipeline(
                     "seasonal_temporal_cube"
                     if seasonal_materialization is not None
                     else (
-                        "annual_hls_time_series"
-                        if series_materialization is not None
+                        "annual_hls_composite"
+                        if pixel_data_accessed
                         else (
-                            "annual_hls_composite"
-                            if pixel_data_accessed
-                            else (
-                                "scene_metadata_inventory"
-                                if remote_data_accessed
-                                else "spatial_preparation"
-                            )
+                            "scene_metadata_inventory"
+                            if remote_data_accessed
+                            else "spatial_preparation"
                         )
                     )
                 )
@@ -619,7 +593,11 @@ def run_local_vector_pipeline(
         "datasets": [dataset.model_dump(mode="json") for dataset in datasets],
         "limitations": limitations,
     }
-    if baseline_images is not None and baseline_materialization is not None:
+    if (
+        baseline_images is not None
+        and forest_rf_images is not None
+        and baseline_materialization is not None
+    ):
         baseline_paths = forest_baseline_output_paths()
         run_summary["forest_baseline"] = {
             **baseline_images.metadata.model_dump(mode="json"),
@@ -627,6 +605,15 @@ def run_local_vector_pipeline(
             "qa_figure_path": baseline_paths["qa_figure"],
             "grid_sha256": baseline_materialization.grid_spec.grid_sha256,
             "assets": baseline_paths,
+            "random_forest": forest_rf_images.metadata.model_dump(mode="json"),
+            "screening": {
+                "rules": resolved_config.forest_screening.model_dump(mode="json"),
+                "metrics": (
+                    baseline_materialization.screening_domain.metrics.model_dump(mode="json")
+                ),
+                "primary_interpretation_domain": "automated_forest",
+                "final_assessment_generated": False,
+            },
         }
     disturbance_paths = disturbance_detection_output_paths()
     if disturbance_materialization is not None:
@@ -636,6 +623,23 @@ def run_local_vector_pipeline(
             "analysis_end_date": disturbance_materialization.analysis_end_date.isoformat(),
             "final_assessment_generated": False,
             "attribution_generated": False,
+            "screening": disturbance_materialization.metadata["screening"],
+            "persistent_events": {
+                "metadata_path": "json/evidence/disturbance_events.json",
+                "geojson_path": "json/evidence/disturbance_events.geojson",
+                "table_path": "tables/evidence/disturbance_events.csv",
+                "overview_figure_path": "figures/evidence/disturbance_events.png",
+                "event_count": disturbance_materialization.events.event_count,
+                "total_event_area_ha": (disturbance_materialization.events.total_event_area_ha),
+                "area_threshold_event_count": (
+                    disturbance_materialization.events.area_threshold_event_count
+                ),
+                "below_area_threshold_event_count": (
+                    disturbance_materialization.events.below_area_threshold_event_count
+                ),
+                "automatic_final_assessment_generated": False,
+                "attribution_generated": False,
+            },
         }
     else:
         if disturbance_skip_reason is None and generate_forest_baseline:
@@ -670,22 +674,6 @@ def run_local_vector_pipeline(
             "index_timeseries_path": seasonal_figure(None, "index_timeseries.png"),
             "observation_coverage_path": seasonal_figure(None, "observation_coverage.png"),
             "rgb_timeline_path": seasonal_figure(None, "rgb_timeline.png"),
-        }
-    elif series_materialization is not None:
-        run_summary["gee"] = {
-            "metadata_only": False,
-            "mode": "annual_hls_time_series",
-            "start_year": series_materialization.metadata.start_year,
-            "end_year": series_materialization.metadata.end_year,
-            "years": list(series_materialization.metadata.years),
-            "grid_sha256": series_materialization.grid_spec.grid_sha256,
-            "grid_path": annual_json("grid.json"),
-            "series_metadata_path": annual_json("series_metadata.json"),
-            "coverage_path": annual_json("coverage.json"),
-            "summary_table_path": annual_table("summary.csv"),
-            "annual_rgb_panel_path": annual_figure(None, "rgb_panel.png"),
-            "index_timeseries_path": annual_figure(None, "index_timeseries.png"),
-            "observation_coverage_path": annual_figure(None, "observation_coverage.png"),
         }
     elif gee_result is not None:
         gee_summary: dict[str, object] = {
@@ -786,8 +774,6 @@ def run_local_vector_pipeline(
                 for path, content in raster_materialization.files.items()
             }
         )
-    if series_materialization is not None:
-        files.update(series_materialization.files)
     if seasonal_materialization is not None:
         files.update(seasonal_materialization.files)
     if baseline_materialization is not None:
@@ -802,6 +788,19 @@ def run_local_vector_pipeline(
         datasets=tuple(dataset.model_dump(mode="json") for dataset in datasets),
     )
     return run_directory
+
+
+def _inclusive_period_end_date(end_date_exclusive: date) -> date:
+    return date.fromordinal(end_date_exclusive.toordinal() - 1)
+
+
+def _seasonal_request_analysis_end_date(request: HlsSeasonalRequest) -> date:
+    plan = build_meteorological_south_window_plan(
+        start_year=request.start_year,
+        end_year=request.end_year,
+        generated_at=datetime(request.end_year + 1, 1, 1, tzinfo=UTC),
+    )
+    return max(_inclusive_period_end_date(window.end_date_exclusive) for window in plan.windows)
 
 
 def _area_payload(measurement: AreaMeasurement) -> dict[str, Any]:
@@ -1066,7 +1065,6 @@ def _media_type(path: Path) -> str:
 def _gee_query_identity(
     query: GeeMetadataQuery | None,
     generate_hls_composite: bool,
-    series_request: HlsSeriesRequest | None,
     seasonal_request: HlsSeasonalRequest | None,
     generate_forest_baseline: bool,
     generate_disturbance_detection: bool,
@@ -1078,11 +1076,6 @@ def _gee_query_identity(
             f"gee:seasonal-series:{seasonal_request.start_year}:"
             f"{seasonal_request.end_year}:meteorological_south_v1"
             f"{forest_suffix}{disturbance_suffix}"
-        )
-    if series_request is not None:
-        return (
-            f"gee:annual-series:{series_request.start_year}:"
-            f"{series_request.end_year}{forest_suffix}{disturbance_suffix}"
         )
     if query is None:
         return f"gee:not-requested{forest_suffix}{disturbance_suffix}"
@@ -1286,7 +1279,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     gee_query = None
     generate_hls_composite = arguments.build_hls_composite
     generate_forest_baseline = False
-    hls_series_request = None
     hls_seasonal_request = None
     generate_disturbance_detection = False
     if arguments.full_pipeline:
@@ -1367,7 +1359,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.credentials
                 if (
                     gee_query is not None
-                    or hls_series_request is not None
                     or hls_seasonal_request is not None
                     or generate_forest_baseline
                 )
@@ -1375,7 +1366,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             generate_hls_composite=generate_hls_composite,
             generate_forest_baseline=generate_forest_baseline,
-            hls_series_request=hls_series_request,
             hls_seasonal_request=hls_seasonal_request,
             generate_disturbance_detection=generate_disturbance_detection,
             vector_layer=arguments.layer,

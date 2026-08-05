@@ -10,14 +10,11 @@ from typing import Any
 from deforestation_pipeline.change_detection import (
     disturbance_detection_json_schema,
 )
+from deforestation_pipeline.disturbance_evidence import disturbance_evidence_json_schema
 from deforestation_pipeline.forest_baseline import forest_baseline_json_schema
 from deforestation_pipeline.hls_seasonal import (
     hls_seasonal_metadata_json_schema,
     temporal_cube_index_json_schema,
-)
-from deforestation_pipeline.hls_series import (
-    hls_series_coverage_json_schema,
-    hls_series_metadata_json_schema,
 )
 from deforestation_pipeline.schemas import (
     analysis_summary_json_schema,
@@ -47,12 +44,8 @@ SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
         disturbance_detection_json_schema,
     ),
     (
-        Path("data/schemas/hls-series-metadata-v3.0.0.json"),
-        hls_series_metadata_json_schema,
-    ),
-    (
-        Path("data/schemas/hls-series-coverage-v1.0.0.json"),
-        hls_series_coverage_json_schema,
+        Path("data/schemas/disturbance-evidence-v1.2.0.json"),
+        disturbance_evidence_json_schema,
     ),
     (
         Path("data/schemas/temporal-window-plan-v1.0.0.json"),

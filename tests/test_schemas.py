@@ -11,6 +11,10 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from deforestation_pipeline.disturbance_evidence import (
+    DisturbanceEvidenceMetadata,
+    disturbance_evidence_json_schema,
+)
 from deforestation_pipeline.schemas import (
     AnalysisSummary,
     AssessmentStatus,
@@ -87,3 +91,13 @@ def test_committed_json_schema_matches_pydantic_model() -> None:
     committed_schema = json.loads(path.read_text(encoding="utf-8"))
 
     assert committed_schema == analysis_summary_json_schema()
+
+
+def test_committed_disturbance_evidence_schema_matches_pydantic_model() -> None:
+    """La evidencia publicada no debe confundirse con la configuración metodológica."""
+    path = PROJECT_ROOT / "data" / "schemas" / "disturbance-evidence-v1.2.0.json"
+    committed_schema = json.loads(path.read_text(encoding="utf-8"))
+
+    assert committed_schema == disturbance_evidence_json_schema()
+    assert committed_schema["title"] == DisturbanceEvidenceMetadata.__name__
+    assert committed_schema["$id"] == ("urn:deforestation-pipeline:disturbance-evidence:1.2.0")

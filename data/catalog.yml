@@ -177,3 +177,54 @@ sources:
       - >-
         Regeneración posterior y ganancias no actualizadas impiden tratar esta
         derivación como verdad forestal 2020.
+
+  - source_id: "mapbiomas_argentina_collection2"
+    family: "REFERENCE_LABEL"
+    product: "MAPBIOMAS_ARGENTINA_LULC"
+    provider: "MapBiomas Argentina"
+    collection_id: >-
+      projects/mapbiomas-public/assets/argentina/lulc/collection2/mapbiomas_argentina_collection2_integration_v3
+    version: "Collection 2 integration v3"
+    asset_type: "image"
+    spatial_resolution_m: 30
+    availability_start: 1985
+    availability_end: 2024
+    access_status: "metadata_access_verified"
+    catalog_checked_at: 2026-07-30
+    catalog_url: "https://argentina.mapbiomas.org/herramientas/"
+    documentation_url: "https://argentina.mapbiomas.org/productos/"
+    legend_url: >-
+      https://argentina.mapbiomas.org/wp-content/uploads/sites/12/2025/09/Leyenda_Code.pdf
+    terms_url: "https://argentina.mapbiomas.org/terminos-de-uso/"
+    data_terms_summary: >-
+      MapBiomas Argentina publishes the data as public, open, and free with
+      Creative Commons attribution requirements. Its current terms page states
+      CC-BY, while its FAQ states CC-BY-SA; neither page specifies a version.
+    license: "Creative Commons attribution required; exact variant unresolved"
+    platform_terms_separate: true
+    evidence_role: "land_cover_pseudolabel"
+    independence_group: "mapbiomas_argentina"
+    eligible_for_core_consensus: false
+    bands:
+      pattern: "classification_{year}"
+      verified_start: "classification_1985"
+      verified_end: "classification_2024"
+      p0_reference_band: "classification_2020"
+    rule:
+      kind: "categorical_values"
+      forest_values: [3, 4, 6]
+      forest_classes:
+        3: "closed_forest"
+        4: "open_forest"
+        6: "flooded_forest"
+    limitations:
+      - >-
+        MapBiomas classes are pseudolabels for model development, not ground
+        truth or an EUDR forest determination.
+      - >-
+        The Collection 2 Pampas legend defines open forest using canopy cover
+        above 20 percent, which does not reproduce the EUDR 10 percent canopy
+        threshold.
+      - >-
+        The producer recommends use at scales up to 1:100,000 and does not
+        recommend use at 1:50,000.

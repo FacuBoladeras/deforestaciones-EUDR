@@ -41,6 +41,7 @@ class SourceAccessStatus(StrEnum):
     """Distingue catalogar una fuente de haber accedido efectivamente a ella."""
 
     CATALOGED_NOT_ACCESSED = "cataloged_not_accessed"
+    METADATA_ACCESS_VERIFIED = "metadata_access_verified"
 
 
 class ForestEvidenceRole(StrEnum):
@@ -200,12 +201,75 @@ class ForestCatalogSource(StrictCatalogModel):
         return self
 
 
+class ReferenceLabelBands(StrictCatalogModel):
+    """Bandas anuales verificadas de una fuente usada sólo como pseudoetiqueta."""
+
+    pattern: Literal["classification_{year}"]
+    verified_start: Literal["classification_1985"]
+    verified_end: Literal["classification_2024"]
+    p0_reference_band: Literal["classification_2020"]
+
+
+class ReferenceLabelRule(StrictCatalogModel):
+    """Clases originales que se preservan al derivar la pseudoetiqueta."""
+
+    kind: Literal["categorical_values"]
+    forest_values: tuple[Literal[3, 4, 6], Literal[3, 4, 6], Literal[3, 4, 6]]
+    forest_classes: dict[int, NonEmptyString]
+
+    @model_validator(mode="after")
+    def forest_codes_match_documented_classes(self) -> ReferenceLabelRule:
+        if self.forest_values != (3, 4, 6):
+            raise ValueError("forest_values debe conservar el orden 3, 4, 6")
+        if set(self.forest_classes) != {3, 4, 6}:
+            raise ValueError("forest_classes debe documentar exactamente 3, 4 y 6")
+        return self
+
+
+class ReferenceLabelCatalogSource(StrictCatalogModel):
+    """Fuente multitemporal de referencia que nunca ingresa al consenso EUDR."""
+
+    source_id: Literal["mapbiomas_argentina_collection2"]
+    family: Literal["REFERENCE_LABEL"]
+    product: Literal["MAPBIOMAS_ARGENTINA_LULC"]
+    provider: Literal["MapBiomas Argentina"]
+    collection_id: NonEmptyString
+    version: Literal["Collection 2 integration v3"]
+    asset_type: Literal["image"]
+    spatial_resolution_m: Literal[30]
+    availability_start: Literal[1985]
+    availability_end: Literal[2024]
+    access_status: Literal[SourceAccessStatus.METADATA_ACCESS_VERIFIED]
+    catalog_checked_at: date
+    catalog_url: HttpsUrl
+    documentation_url: HttpsUrl
+    legend_url: HttpsUrl
+    terms_url: HttpsUrl
+    data_terms_summary: NonEmptyString
+    license: NonEmptyString
+    platform_terms_separate: Literal[True]
+    evidence_role: Literal["land_cover_pseudolabel"]
+    independence_group: Literal["mapbiomas_argentina"]
+    eligible_for_core_consensus: Literal[False]
+    bands: ReferenceLabelBands
+    rule: ReferenceLabelRule
+    limitations: Annotated[tuple[NonEmptyString, ...], Field(min_length=1)]
+
+    @property
+    def p0_reference_band(self) -> str:
+        return self.bands.p0_reference_band
+
+    @property
+    def forest_values(self) -> tuple[int, ...]:
+        return self.rule.forest_values
+
+
 class SourceCatalog(StrictCatalogModel):
     """Catálogo versionado de fuentes candidatas todavía no utilizadas."""
 
     schema_version: Literal["2.0.0"]
     sources: Annotated[
-        tuple[CatalogSource | ForestCatalogSource, ...],
+        tuple[CatalogSource | ForestCatalogSource | ReferenceLabelCatalogSource, ...],
         Field(min_length=1),
     ]
 

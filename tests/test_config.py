@@ -9,12 +9,12 @@ from pydantic import ValidationError
 
 from deforestation_pipeline.config import (
     ConfigurationError,
+    OutputFormat,
     PipelineConfig,
     ResolvedPipelineConfig,
     execution_config_hash,
     load_config,
     load_license_registry,
-    parameters_hash,
     resolve_run_config,
     scientific_parameters_hash,
 )
@@ -40,6 +40,46 @@ def _forest_baseline_payload() -> dict[str, Any]:
         "preserve_disagreement": True,
         "post_cutoff_observations_allowed": False,
         "long_gap_interpolation_allowed": False,
+    }
+
+
+def _forest_model_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0.0",
+        "asset_id": "projects/ee-facuboladerasgee/assets/models/rf_forest_2020",
+        "asset_type": "geemap_tree_feature_collection",
+        "tree_property": "tree",
+        "expected_tree_count": 500,
+        "reference_year": 2020,
+        "jurisdiction": "entre_rios",
+        "non_forest_class_code": 0,
+        "forest_class_code": 1,
+        "training_label_semantics": "multisource_unanimity_proxy_v1",
+        "score_semantics": "uncalibrated_binary_tree_vote_fraction",
+        "evidence_role": "learned_supporting_evidence",
+        "independent_evidence": False,
+        "temporal_transfer_validated": False,
+        "calibrated_probability": False,
+    }
+
+
+def _forest_screening_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "1.1.0",
+        "minimum_core_source_count": 2,
+        "expected_tree_count": 500,
+        "forest_vote_fraction_minimum": 0.8,
+        "nonforest_vote_fraction_maximum": 0.2,
+        "core_nonforest_max_evidence_fraction": 0.0,
+        "forest_rule": (
+            "rf_complete_and_core_sufficient_and_unanimous_forest_and_vote_gte_threshold"
+        ),
+        "nonforest_rule": (
+            "rf_complete_and_core_sufficient_and_unanimous_nonforest_and_vote_lte_threshold"
+        ),
+        "temporal_signal_scope": ("entire_aoi_primary_interpretation_automated_forest_only"),
+        "score_semantics": "uncalibrated_binary_tree_vote_fraction",
+        "automatic_final_assessment_allowed": False,
     }
 
 
@@ -132,22 +172,65 @@ def _disturbance_detection_payload(
     }
 
 
+def _disturbance_events_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0.0",
+        "connectivity": 8,
+        "area_threshold_ha": 0.5,
+        "area_method": "projected_grid_affine_determinant",
+        "area_threshold_policy": "flag_without_filtering",
+        "event_id_strategy": "grid_and_pixels_sha256_v1",
+        "ordering_policy": "area_descending_then_event_id",
+        "detail_figure_limit": 5,
+        "detail_selection_policy": "largest_area_then_event_id",
+        "comparison_policy": ("latest_pre_cutoff_same_season_vs_earliest_event_onset_window"),
+        "geometry_crs": "EPSG:4326",
+        "primary_interpretation_domain": "automated_forest",
+        "automatic_final_assessment_allowed": False,
+        "attribution_allowed": False,
+    }
+
+
 def test_default_config_is_valid_and_deterministic() -> None:
     """La configuración versionada debe cargar y producir un SHA-256 estable."""
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    resolved = resolve_run_config(config, date(2026, 7, 30))
 
     assert config.analysis.cutoff_date == date(2020, 12, 31)
     assert config.spatial.forest_definition_min_area_ha == 0.5
     assert config.spatial.preserve_subthreshold_events is True
     assert config.spatial.raster_crs_strategy == "local_utm"
-    assert len(parameters_hash(config)) == 64
+    assert len(scientific_parameters_hash(resolved)) == 64
+    assert len(execution_config_hash(resolved)) == 64
 
 
-def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
+def test_default_config_declares_current_hls_raster_contract() -> None:
+    """Los defaults operativos usados por el flujo HLS permanecen explícitos."""
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+
+    assert config.schema_version == "1.11.0"
+    assert config.data.composition_interval == "annual"
+    assert config.data.composition_reducer == "median"
+    assert config.data.source_native_reflectance_scale_factor == 0.0001
+    assert config.data.source_native_reflectance_offset == 0.0
+    assert config.data.earth_engine_reflectance_multiplier == 1.0
+    assert config.data.earth_engine_reflectance_offset == 0.0
+    assert config.data.mask_high_aerosol is True
+    assert config.data.preserve_water is True
+    assert config.spatial.raster_crs_strategy == "local_utm"
+    assert OutputFormat.GEOTIFF in config.output.formats
+    assert config.output.raster_nodata == -9999.0
+    assert config.output.maximum_direct_download_bytes == 32_000_000
+    assert config.output.maximum_direct_download_dimension == 10_000
+    assert config.output.maximum_series_download_bytes == 256_000_000
+    assert config.output.rgb_min_reflectance < config.output.rgb_max_reflectance
+
+
+def test_execution_hash_matches_golden_for_controlled_configuration() -> None:
     """El digest se calcula sobre el contenido validado, no sobre un YAML dado."""
     config = PipelineConfig.model_validate(
         {
-            "schema_version": "1.8.0",
+            "schema_version": "1.11.0",
             "analysis": {
                 "cutoff_date": "2020-12-31",
                 "benchmark_start_date": "2019-01-01",
@@ -176,7 +259,10 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
                 "indices": ["NDVI", "NBR"],
             },
             "forest_baseline": _forest_baseline_payload(),
+            "forest_model": _forest_model_payload(),
+            "forest_screening": _forest_screening_payload(),
             "disturbance_detection": _disturbance_detection_payload(),
+            "disturbance_events": _disturbance_events_payload(),
             "output": {
                 "directory": "outputs",
                 "formats": ["json", "png", "geotiff"],
@@ -194,13 +280,22 @@ def test_parameters_hash_matches_golden_for_controlled_configuration() -> None:
             },
         }
     )
+    resolved = resolve_run_config(config, date(2021, 1, 1))
 
-    assert parameters_hash(config) == (
-        "103302444ef5a5774bb2ea46583acc0bafe2f0f5eed1cbe00d8370423c6ddf62"
+    assert execution_config_hash(resolved) == (
+        "848f61e4451672a05c66c6856ba6c03baf4b63a10052a5e57ab2fa1a198bc2c7"
     )
 
 
-def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
+def test_event_area_threshold_must_match_spatial_forest_threshold() -> None:
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
+    payload["disturbance_events"]["area_threshold_ha"] = 0.6
+
+    with pytest.raises(ValidationError, match="area_threshold_ha debe coincidir"):
+        PipelineConfig.model_validate(payload)
+
+
+def test_execution_hash_ignores_yaml_key_order_and_surface_format(
     tmp_path: Path,
 ) -> None:
     """YAML equivalente produce el mismo modelo validado y el mismo digest."""
@@ -209,7 +304,7 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
     first.write_text(
         "\n".join(
             [
-                'schema_version: "1.8.0"',
+                'schema_version: "1.11.0"',
                 "analysis:",
                 "  cutoff_date: 2020-12-31",
                 "  benchmark_start_date: 2019-01-01",
@@ -250,6 +345,43 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                 "  preserve_disagreement: true",
                 "  post_cutoff_observations_allowed: false",
                 "  long_gap_interpolation_allowed: false",
+                "forest_model:",
+                '  schema_version: "1.0.0"',
+                ("  asset_id: projects/ee-facuboladerasgee/assets/models/rf_forest_2020"),
+                "  asset_type: geemap_tree_feature_collection",
+                "  tree_property: tree",
+                "  expected_tree_count: 500",
+                "  reference_year: 2020",
+                "  jurisdiction: entre_rios",
+                "  non_forest_class_code: 0",
+                "  forest_class_code: 1",
+                "  training_label_semantics: multisource_unanimity_proxy_v1",
+                "  score_semantics: uncalibrated_binary_tree_vote_fraction",
+                "  evidence_role: learned_supporting_evidence",
+                "  independent_evidence: false",
+                "  temporal_transfer_validated: false",
+                "  calibrated_probability: false",
+                "forest_screening:",
+                '  schema_version: "1.1.0"',
+                "  minimum_core_source_count: 2",
+                "  expected_tree_count: 500",
+                "  forest_vote_fraction_minimum: 0.8",
+                "  nonforest_vote_fraction_maximum: 0.2",
+                "  core_nonforest_max_evidence_fraction: 0.0",
+                (
+                    "  forest_rule: rf_complete_and_core_sufficient_and_"
+                    "unanimous_forest_and_vote_gte_threshold"
+                ),
+                (
+                    "  nonforest_rule: rf_complete_and_core_sufficient_and_"
+                    "unanimous_nonforest_and_vote_lte_threshold"
+                ),
+                (
+                    "  temporal_signal_scope: entire_aoi_primary_interpretation_"
+                    "automated_forest_only"
+                ),
+                "  score_semantics: uncalibrated_binary_tree_vote_fraction",
+                "  automatic_final_assessment_allowed: false",
                 "disturbance_detection:",
                 '  schema_version: "1.4.0"',
                 "  reference_history_start_date: 2017-01-01",
@@ -335,6 +467,24 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                 "  attribution_allowed: false",
                 "  spatial_area_threshold_applied: false",
                 "  automatic_final_assessment_allowed: false",
+                "disturbance_events:",
+                '  schema_version: "1.0.0"',
+                "  connectivity: 8",
+                "  area_threshold_ha: 0.5",
+                "  area_method: projected_grid_affine_determinant",
+                "  area_threshold_policy: flag_without_filtering",
+                "  event_id_strategy: grid_and_pixels_sha256_v1",
+                "  ordering_policy: area_descending_then_event_id",
+                "  detail_figure_limit: 5",
+                "  detail_selection_policy: largest_area_then_event_id",
+                (
+                    "  comparison_policy: latest_pre_cutoff_same_season_vs_"
+                    "earliest_event_onset_window"
+                ),
+                "  geometry_crs: EPSG:4326",
+                "  primary_interpretation_domain: automated_forest",
+                "  automatic_final_assessment_allowed: false",
+                "  attribution_allowed: false",
                 "output:",
                 "  directory: outputs",
                 "  formats: [json, geojson, png, geotiff]",
@@ -391,6 +541,32 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                     "preserve_source_evidence: true, preserve_disagreement: true, "
                     "post_cutoff_observations_allowed: false, "
                     "long_gap_interpolation_allowed: false}"
+                ),
+                (
+                    "forest_model: {schema_version: 1.0.0, asset_id: "
+                    "projects/ee-facuboladerasgee/assets/models/rf_forest_2020, "
+                    "asset_type: geemap_tree_feature_collection, tree_property: tree, "
+                    "expected_tree_count: 500, reference_year: 2020, "
+                    "jurisdiction: entre_rios, non_forest_class_code: 0, "
+                    "forest_class_code: 1, training_label_semantics: "
+                    "multisource_unanimity_proxy_v1, score_semantics: "
+                    "uncalibrated_binary_tree_vote_fraction, evidence_role: "
+                    "learned_supporting_evidence, independent_evidence: false, "
+                    "temporal_transfer_validated: false, calibrated_probability: false}"
+                ),
+                (
+                    "forest_screening: {schema_version: 1.1.0, "
+                    "minimum_core_source_count: 2, expected_tree_count: 500, "
+                    "forest_vote_fraction_minimum: 0.8, "
+                    "nonforest_vote_fraction_maximum: 0.2, "
+                    "core_nonforest_max_evidence_fraction: 0.0, forest_rule: "
+                    "rf_complete_and_core_sufficient_and_unanimous_forest_and_"
+                    "vote_gte_threshold, nonforest_rule: rf_complete_and_core_sufficient_"
+                    "and_unanimous_nonforest_and_vote_lte_threshold, "
+                    "temporal_signal_scope: entire_aoi_primary_interpretation_"
+                    "automated_forest_only, score_semantics: "
+                    "uncalibrated_binary_tree_vote_fraction, "
+                    "automatic_final_assessment_allowed: false}"
                 ),
                 (
                     "disturbance_detection: {schema_version: 1.4.0, "
@@ -459,6 +635,20 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                     "automatic_final_assessment_allowed: false}"
                 ),
                 (
+                    "disturbance_events: {schema_version: 1.0.0, connectivity: 8, "
+                    "area_threshold_ha: 0.5, area_threshold_policy: "
+                    "flag_without_filtering, area_method: "
+                    "projected_grid_affine_determinant, event_id_strategy: "
+                    "grid_and_pixels_sha256_v1, ordering_policy: "
+                    "area_descending_then_event_id, detail_figure_limit: 5, "
+                    "detail_selection_policy: largest_area_then_event_id, "
+                    "comparison_policy: latest_pre_cutoff_same_season_vs_"
+                    "earliest_event_onset_window, geometry_crs: EPSG:4326, "
+                    "primary_interpretation_domain: automated_forest, "
+                    "automatic_final_assessment_allowed: false, "
+                    "attribution_allowed: false}"
+                ),
+                (
                     "spatial: {preserve_subthreshold_events: true, "
                     "minimum_coordinate_decimals: 6, forest_definition_min_area_ha: 0.5, "
                     "raster_crs_strategy: local_utm, area_crs_strategy: auto_equal_area, "
@@ -468,66 +658,58 @@ def test_parameters_hash_ignores_yaml_key_order_and_surface_format(
                     "analysis: {random_seed: 7, analysis_end_date: 2021-01-01, "
                     "benchmark_start_date: 2019-01-01, cutoff_date: 2020-12-31}"
                 ),
-                'schema_version: "1.8.0"',
+                'schema_version: "1.11.0"',
                 "",
             ]
         ),
         encoding="utf-8",
     )
 
-    assert parameters_hash(load_config(first)) == parameters_hash(load_config(second))
+    first_resolved = resolve_run_config(load_config(first), date(2021, 1, 1))
+    second_resolved = resolve_run_config(load_config(second), date(2021, 1, 1))
+    assert execution_config_hash(first_resolved) == execution_config_hash(second_resolved)
 
 
-def test_parameters_hash_changes_when_a_valid_parameter_changes() -> None:
+def test_scientific_hash_changes_when_a_valid_parameter_changes() -> None:
     """Cambiar un parámetro válido modifica la identidad vigente."""
     payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
-    baseline = PipelineConfig.model_validate(payload)
+    baseline = resolve_run_config(PipelineConfig.model_validate(payload), date(2026, 7, 30))
     payload["analysis"]["random_seed"] = 43
-    changed = PipelineConfig.model_validate(payload)
+    changed = resolve_run_config(PipelineConfig.model_validate(payload), date(2026, 7, 30))
 
-    assert parameters_hash(changed) != parameters_hash(baseline)
-
-
-def test_parameters_hash_currently_includes_output_directory() -> None:
-    """Caracteriza que la ruta operativa forma parte del digest actual."""
-    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
-    baseline = PipelineConfig.model_validate(payload)
-    payload["output"]["directory"] = "other-output"
-    changed = PipelineConfig.model_validate(payload)
-
-    assert parameters_hash(changed) != parameters_hash(baseline)
+    assert scientific_parameters_hash(changed) != scientific_parameters_hash(baseline)
 
 
-def test_parameters_hash_currently_treats_list_order_as_significant() -> None:
+def test_scientific_hash_treats_index_order_as_significant() -> None:
     """Caracteriza que el orden de índices y formatos forma parte del digest."""
     payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
-    baseline = PipelineConfig.model_validate(payload)
+    baseline = resolve_run_config(PipelineConfig.model_validate(payload), date(2026, 7, 30))
     payload["data"]["indices"] = list(reversed(payload["data"]["indices"]))
-    changed = PipelineConfig.model_validate(payload)
+    changed = resolve_run_config(PipelineConfig.model_validate(payload), date(2026, 7, 30))
 
-    assert parameters_hash(changed) != parameters_hash(baseline)
+    assert scientific_parameters_hash(changed) != scientific_parameters_hash(baseline)
 
 
 def test_indices_are_deeply_immutable_and_cannot_change_the_hash() -> None:
     """Los índices validados no pueden mutarse luego de calcular su identidad."""
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
-    digest = parameters_hash(config)
+    digest = scientific_parameters_hash(resolve_run_config(config, date(2026, 7, 30)))
 
     with pytest.raises(TypeError):
         cast(Any, config.data.indices)[0] = "EVI2"
 
-    assert parameters_hash(config) == digest
+    assert scientific_parameters_hash(resolve_run_config(config, date(2026, 7, 30))) == digest
 
 
 def test_output_formats_are_deeply_immutable_and_cannot_change_the_hash() -> None:
     """Los formatos validados no pueden mutarse luego de calcular su identidad."""
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
-    digest = parameters_hash(config)
+    digest = execution_config_hash(resolve_run_config(config, date(2026, 7, 30)))
 
     with pytest.raises(TypeError):
         cast(Any, config.output.formats)[0] = "csv"
 
-    assert parameters_hash(config) == digest
+    assert execution_config_hash(resolve_run_config(config, date(2026, 7, 30))) == digest
 
 
 def test_resolve_run_config_replaces_a_missing_analysis_end_date() -> None:
@@ -632,8 +814,21 @@ def test_license_registry_records_operational_pixel_sources() -> None:
         "jrc_gfc2020_v3",
         "esa_worldcover_2020_v100",
         "hansen_gfc_2025_v1_13",
+        "mapbiomas_argentina_collection2",
     )
-    assert all("modified" in dataset.attribution.lower() for dataset in registry.datasets)
+    assert all(dataset.attribution.strip() for dataset in registry.datasets)
+    assert all(
+        "modified" in dataset.attribution.lower()
+        for dataset in registry.datasets
+        if dataset.dataset_id != "mapbiomas_argentina_collection2"
+    )
+    mapbiomas = next(
+        dataset
+        for dataset in registry.datasets
+        if dataset.dataset_id == "mapbiomas_argentina_collection2"
+    )
+    assert "mapbiomas" in mapbiomas.attribution.lower()
+    assert "colección 2" in mapbiomas.attribution.lower()
     assert all(dataset.restrictions for dataset in registry.datasets)
 
 

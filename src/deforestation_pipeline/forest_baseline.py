@@ -88,6 +88,13 @@ def forest_baseline_output_paths() -> dict[str, str]:
         "source_count": evidence_tiff("forest_source_count_2020.tif"),
         "source_evidence": evidence_tiff("forest_source_evidence_2020.tif"),
         "features": evidence_tiff("forest_features_2020.tif"),
+        "rf_class": evidence_tiff("rf_forest_class_2020.tif"),
+        "rf_vote_fraction": evidence_tiff("rf_forest_vote_fraction_2020.tif"),
+        "rf_input_complete": evidence_tiff("rf_forest_input_complete_2020.tif"),
+        "automated_evaluable": evidence_tiff("automated_evaluable_2020.tif"),
+        "review_required": evidence_tiff("review_required_2020.tif"),
+        "insufficient_data": evidence_tiff("insufficient_data_2020.tif"),
+        "screening_figure": evidence_figure("forest_screening_2020.png"),
     }
 
 

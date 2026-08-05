@@ -39,7 +39,7 @@ def test_default_config_declares_the_versioned_step_14_3_rule() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
     detection = config.disturbance_detection
 
-    assert config.schema_version == "1.8.0"
+    assert config.schema_version == "1.11.0"
     assert detection.schema_version == "1.4.0"
     assert detection.reference_history_start_date == date(2017, 1, 1)
     assert detection.analysis_start_date == date(2021, 1, 1)

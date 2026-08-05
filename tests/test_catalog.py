@@ -11,6 +11,7 @@ import yaml
 from deforestation_pipeline.catalog import (
     BandRole,
     CatalogCompatibilityError,
+    ReferenceLabelCatalogSource,
     SourceAccessStatus,
     SourceCatalog,
     build_benchmark_source_plan,
@@ -39,6 +40,18 @@ def test_hls_v2_catalog_records_both_constituent_products() -> None:
         source.access_status is SourceAccessStatus.CATALOGED_NOT_ACCESSED for source in hls_sources
     )
     assert all(source.catalog_checked_at == date(2026, 7, 24) for source in hls_sources)
+
+
+def test_mapbiomas_reference_label_is_parsed_without_entering_baseline_consensus() -> None:
+    catalog = load_source_catalog(CATALOG_PATH)
+    source = next(
+        source for source in catalog.sources if isinstance(source, ReferenceLabelCatalogSource)
+    )
+
+    assert source.source_id == "mapbiomas_argentina_collection2"
+    assert source.p0_reference_band == "classification_2020"
+    assert source.forest_values == (3, 4, 6)
+    assert source.eligible_for_core_consensus is False
 
 
 def test_hls_common_band_roles_are_mapped_per_product() -> None:

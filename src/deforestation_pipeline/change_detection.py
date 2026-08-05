@@ -527,6 +527,20 @@ def summarize_ccdc_segments(
     )
 
 
+def _safe_temporal_nanmedian(values: NDArray[Any]) -> NDArray[np.float64]:
+    """Calcula la mediana sobre tiempo sin invocar nanmedian en slices vacíos."""
+    temporal = np.asarray(values, dtype=np.float64)
+    if temporal.ndim < 1:
+        raise ValueError("temporal_median_requires_at_least_one_dimension")
+    output = np.full(temporal.shape[1:], np.nan, dtype=np.float64)
+    finite_positions = np.isfinite(temporal).any(axis=0)
+    if np.any(finite_positions):
+        flattened = temporal.reshape(temporal.shape[0], -1)
+        selected = finite_positions.reshape(-1)
+        output.reshape(-1)[selected] = np.nanmedian(flattened[:, selected], axis=0)
+    return output
+
+
 def compute_robust_seasonal_diagnostics(
     *,
     reference_values: NDArray[Any],
@@ -603,10 +617,9 @@ def compute_robust_seasonal_diagnostics(
         if not np.any(diagnostic_mask):
             continue
 
-        with np.errstate(invalid="ignore"):
-            center = np.nanmedian(seasonal_reference, axis=0)
-            absolute_deviation = np.abs(seasonal_reference - center[np.newaxis])
-            mad = np.nanmedian(absolute_deviation, axis=0)
+        center = _safe_temporal_nanmedian(seasonal_reference)
+        absolute_deviation = np.abs(seasonal_reference - center[np.newaxis])
+        mad = _safe_temporal_nanmedian(absolute_deviation)
         scale = mad * robust_config.mad_scale_constant
         raw_delta = center - post_float[post_index]
 
