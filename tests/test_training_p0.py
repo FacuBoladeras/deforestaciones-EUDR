@@ -33,16 +33,24 @@ from deforestation_pipeline.training_sampling import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _write_config(path: Path, output_directory: Path) -> None:
+def _write_config(
+    path: Path,
+    output_directory: Path,
+    *,
+    year: int = 2020,
+    schema_version: str = "1.0.0",
+    preflight_count_mode: str = "synchronous",
+) -> None:
     path.write_text(
         yaml.safe_dump(
             {
-                "schema_version": "1.0.0",
+                "schema_version": schema_version,
                 "pipeline_config_path": str(PROJECT_ROOT / "configs" / "default.yml"),
                 "source_catalog_path": str(PROJECT_ROOT / "data" / "catalog.yml"),
                 "manifest_directory": str(output_directory),
                 "earth_engine_project": "ee-facuboladerasgee",
-                "year": 2020,
+                "year": year,
+                "preflight_count_mode": preflight_count_mode,
                 "seed": 42,
                 "scale_m": 30,
                 "block_size_m": 3000,
@@ -75,7 +83,7 @@ def _write_config(path: Path, output_directory: Path) -> None:
                 ],
                 "drive": {
                     "folder": "deforestation-pipeline-training-p0",
-                    "file_name_prefix": "entre_rios_training_2020_p0",
+                    "file_name_prefix": f"entre_rios_training_{year}_p0",
                 },
             },
             sort_keys=False,
@@ -104,6 +112,35 @@ def test_training_p0_config_parses_exact_budget_and_rejects_unaligned_blocks(
     payload["block_size_m"] = 3010
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(ValidationError, match="múltiplo"):
+        load_training_p0_config(path)
+
+
+def test_training_p0_config_accepts_2024_and_rejects_unlabelled_2025(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "training.yml"
+    _write_config(path, tmp_path / "manifests", year=2024, schema_version="1.1.0")
+
+    config = load_training_p0_config(path)
+    assert config.year == 2024
+    assert config.schema_version == "1.1.0"
+
+    _write_config(path, tmp_path / "manifests", year=2024, schema_version="1.0.0")
+    with pytest.raises(ValidationError, match=r"schema_version 1\.1\.0"):
+        load_training_p0_config(path)
+
+    _write_config(
+        path,
+        tmp_path / "manifests",
+        year=2020,
+        schema_version="1.0.0",
+        preflight_count_mode="deferred_to_export_validation",
+    )
+    with pytest.raises(ValidationError, match=r"schema_version 1\.1\.0"):
+        load_training_p0_config(path)
+
+    _write_config(path, tmp_path / "manifests", year=2025, schema_version="1.1.0")
+    with pytest.raises(ValidationError):
         load_training_p0_config(path)
 
 
@@ -227,7 +264,10 @@ def test_dry_run_writes_sanitized_manifest_without_starting_exports(
     assert str(credentials_path) not in content
     payload = json.loads(content)
     assert payload["status"] == "dry_run_completed"
+    assert payload["schema_version"] == "1.0.0"
+    assert "preflight_count_mode" not in payload
     assert len(payload["partitions"]) == 2
+    assert "count_validation_status" not in payload["partitions"][0]
     assert payload["partitions"][0]["actual_counts"]["total"] == 1000
     assert payload["partitions"][0]["grid"]["grid_sha256"]
     assert len(payload["partitions"][0]["grid"]["transform"]) == 6
@@ -319,6 +359,63 @@ def test_start_mode_persists_preflight_before_start_and_then_task_ids(
     assert observed_preflight == ["preflight_ready", "export_starting"]
     assert result.status == "export_started"
     assert [task["task_id"] for task in payload["tasks"]] == ["task-1", "task-2"]
+
+
+def test_deferred_count_mode_starts_exports_without_synchronous_getinfo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deforestation_pipeline import training_p0
+
+    config_path = tmp_path / "training.yml"
+    output = tmp_path / "manifests"
+    _write_config(
+        config_path,
+        output,
+        year=2024,
+        schema_version="1.1.0",
+        preflight_count_mode="deferred_to_export_validation",
+    )
+    _patch_remote_builders(monkeypatch)
+    monkeypatch.setattr(
+        training_p0,
+        "_sample_counts",
+        lambda _samples: pytest.fail("no debe ejecutar getInfo síncrono"),
+    )
+    started: list[str] = []
+
+    def fake_start(**kwargs: Any) -> DriveExportTaskRecord:
+        request = kwargs["request"]
+        started.append(request.description)
+        return DriveExportTaskRecord(
+            task_id=f"task-{len(started)}",
+            state="READY",
+            description=request.description,
+            folder=request.folder,
+            prefix=request.file_name_prefix,
+            started_at=datetime(2026, 8, 5, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(training_p0, "start_training_table_export", fake_start)
+
+    result = run_training_p0(
+        config_path=config_path,
+        credentials_path=None,
+        auth_mode="user_oauth",
+        start_export=True,
+        generated_at=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert result.status == "export_started"
+    assert len(started) == 2
+    assert payload["schema_version"] == "1.1.0"
+    assert payload["preflight_count_mode"] == "deferred_to_export_validation"
+    assert all(
+        partition["actual_counts"] is None
+        and partition["count_validation_status"] == "deferred_to_export_validation"
+        for partition in payload["partitions"]
+    )
 
 
 def test_start_is_blocked_when_drop_nulls_reduces_a_partition_quota(

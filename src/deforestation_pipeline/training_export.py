@@ -18,9 +18,11 @@ from deforestation_pipeline.training_sampling import (
     SOURCE_ASSETS,
     SamplingQuotas,
     TrainingSamplingRequest,
+    TrainingSchemaVersion,
+    TrainingYear,
 )
 
-TRAINING_EXPORT_MANIFEST_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
+TRAINING_EXPORT_MANIFEST_SCHEMA_VERSION: Literal["1.1.0"] = "1.1.0"
 
 
 class StrictExportModel(BaseModel):
@@ -50,9 +52,9 @@ class AoiManifest(StrictExportModel):
 class TrainingExportManifest(StrictExportModel):
     """Contrato serializable exacto del CSV de entrenamiento P0."""
 
-    schema_version: Literal["1.0.0"] = TRAINING_EXPORT_MANIFEST_SCHEMA_VERSION
+    schema_version: TrainingSchemaVersion = TRAINING_EXPORT_MANIFEST_SCHEMA_VERSION
     created_at: datetime
-    year: Literal[2020]
+    year: TrainingYear
     seed: int = Field(ge=0)
     feature_columns: Annotated[tuple[str, ...], Field(min_length=68, max_length=68)]
     label_column: Literal["proxy_label"] = LABEL_COLUMN
@@ -75,7 +77,9 @@ class TrainingExportManifest(StrictExportModel):
 
     @model_validator(mode="after")
     def columns_are_disjoint_and_reconstructible(self) -> TrainingExportManifest:
-        expected = seasonal_feature_columns(year=self.year, indices=tuple(SpectralIndex))
+        if self.schema_version == "1.0.0" and self.year != 2020:
+            raise ValueError("los años posteriores a 2020 requieren schema_version 1.1.0")
+        expected = seasonal_feature_columns(year=2020, indices=tuple(SpectralIndex))
         if self.feature_columns != expected:
             raise ValueError("feature_columns no coincide con el stack estacional reconstruible")
         if set(self.feature_columns) & set(self.metadata_columns):
@@ -100,6 +104,7 @@ class TrainingExportManifest(StrictExportModel):
             for name, source in SOURCE_ASSETS.items()
         }
         return cls(
+            schema_version=request.schema_version,
             created_at=request.generated_at,
             year=request.year,
             seed=request.seed,

@@ -19,9 +19,12 @@ from deforestation_pipeline.schemas import RasterGridSpec
 from deforestation_pipeline.seasonal_feature_stack import (
     SeasonalFeatureStack,
     build_yearly_seasonal_feature_stack,
+    seasonal_feature_columns,
 )
 
-TRAINING_SAMPLING_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
+TRAINING_SAMPLING_SCHEMA_VERSION: Literal["1.1.0"] = "1.1.0"
+type TrainingSchemaVersion = Literal["1.0.0", "1.1.0"]
+type TrainingYear = Literal[2020, 2021, 2022, 2023, 2024]
 AOI_ASSET_ID: Literal["FAO/GAUL/2015/level1"] = "FAO/GAUL/2015/level1"
 AOI_FILTERS = {"ADM0_NAME": "Argentina", "ADM1_NAME": "Entre Rios"}
 PROVINCIAL_GRID_PARTITIONS: tuple[
@@ -124,7 +127,7 @@ SOURCE_ASSETS: dict[str, ProxySourceAsset] = {
         access="image",
         band_template="treecover2000,lossyear",
         masked_pixels_are_non_forest=True,
-        semantics="treecover_2000_gte_10_without_loss_through_2020_proxy",
+        semantics="treecover_2000_gte_10_without_loss_through_sample_year_proxy",
     ),
 }
 
@@ -144,8 +147,8 @@ class SamplingQuotas(StrictTrainingModel):
 class TrainingSamplingRequest(StrictTrainingModel):
     """Contrato completo para reconstruir el mismo universo de muestreo."""
 
-    schema_version: Literal["1.0.0"] = TRAINING_SAMPLING_SCHEMA_VERSION
-    year: Literal[2020]
+    schema_version: TrainingSchemaVersion = TRAINING_SAMPLING_SCHEMA_VERSION
+    year: TrainingYear
     seed: Annotated[int, Field(ge=0)]
     grid_crs: str = Field(min_length=1)
     utm_zone: Literal[20, 21]
@@ -156,6 +159,8 @@ class TrainingSamplingRequest(StrictTrainingModel):
 
     @model_validator(mode="after")
     def request_is_spatially_consistent(self) -> TrainingSamplingRequest:
+        if self.schema_version == "1.0.0" and self.year != 2020:
+            raise ValueError("los años posteriores a 2020 requieren schema_version 1.1.0")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at debe incluir zona horaria")
         try:
@@ -263,15 +268,28 @@ def build_seasonal_feature_stack(
         year=request.year,
         generated_at=request.generated_at,
     )
-    if len(stack.feature_columns) != 68:
+    actual_columns = seasonal_feature_columns(
+        year=request.year,
+        indices=data_config.indices,
+    )
+    if stack.feature_columns != actual_columns or len(stack.feature_columns) != 68:
         raise ValueError("el stack P0 requiere exactamente 68 bandas")
-    return stack
+    canonical_columns = seasonal_feature_columns(
+        year=2020,
+        indices=data_config.indices,
+    )
+    if request.year == 2020:
+        return stack
+    return SeasonalFeatureStack(
+        image=stack.image.rename(list(canonical_columns)),
+        feature_columns=canonical_columns,
+    )
 
 
 def build_multisource_proxy_label(
     *,
     module: Any,
-    year: Literal[2020],
+    year: TrainingYear,
     aoi_wgs84: BaseGeometry,
 ) -> ProxyLabelStack:
     """Construye votos crudos y etiqueta proxy; nunca una conclusión EUDR."""

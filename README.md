@@ -6,8 +6,9 @@ señales de perturbación en establecimientos ganaderos de Argentina.
 El sistema **no certifica** que un establecimiento sea libre de deforestación,
 no determina por sí solo cumplimiento del Reglamento (UE) 2023/1115 y no
 reemplaza la debida diligencia ni la revisión humana. La formulación correcta
-del resultado actual es _evidencia de perturbación detectada o no detectada_;
-la atribución de uso posterior todavía no está implementada.
+del resultado actual es _evidencia de perturbación y atribución conservadora_;
+la v0 separa explicaciones compatibles, pero exige evidencia independiente y
+revisión humana antes de sostener una conversión.
 
 Este archivo es la referencia canónica del estado actual. El orden de trabajo
 pendiente vive únicamente en [`NEXT_STEPS.md`](NEXT_STEPS.md). Las reglas de
@@ -16,7 +17,7 @@ dominio y de desarrollo que deben respetar humanos y agentes viven en
 
 ## Checkpoint actual
 
-**Fecha del checkpoint:** 4 de agosto de 2026.
+**Fecha del checkpoint:** 10 de agosto de 2026.
 
 La etapa de detección de perturbaciones está implementada de extremo a extremo
 para rangos estacionales HLS. El pipeline puede:
@@ -40,12 +41,18 @@ para rangos estacionales HLS. El pipeline puede:
 14. segmentar los candidatos persistentes dentro de `automated_forest` con
     ocho vecinos, asignar IDs determinísticos y medir cada componente;
 15. publicar todos los eventos en CSV, JSON y GeoJSON, más un mapa general y
-    hasta cinco fichas de los eventos de mayor superficie.
+    hasta cinco fichas de los eventos de mayor superficie;
+16. atribuir conservadoramente cada evento mediante su trayectoria RF, evidencia
+    independiente opcional y explicaciones alternativas declaradas;
+17. publicar la atribución v0 por evento en CSV, JSON, GeoJSON y PNG, con hashes
+    de sus bundles fuente y sin emitir confirmación automática.
 
 La frontera actual es deliberada:
 
 - **detección de perturbaciones:** implementada;
-- **atribución del cambio a cultivo, pastura u otro uso:** pendiente;
+- **atribución post-cambio v0:** implementada por evento; distingue agricultura
+  probable, recuperación, cosecha forestal, perturbación temporal y desconocido;
+  todavía requiere ampliar evidencia independiente y causas alternativas;
 - **eventos persistentes de detección:** vectorizados y medidos; el umbral de
   0,5 ha se informa sin descartar eventos menores;
 - **agregación final luego de atribuir uso posterior:** pendiente;
@@ -228,7 +235,7 @@ grilla proyectada. El umbral de `0,5 ha` agrega una bandera: **no elimina**
 componentes menores. La ventana de inicio informada es la primera composición
 estacional robusta del evento y no una fecha exacta.
 
-### 5. Dataset P0 de entrenamiento para Entre Ríos
+### 5. Datasets P0 y multianual de entrenamiento para Entre Ríos
 
 El primer dataset provincial reproducible quedó materializado para **2020**.
 Es un insumo de desarrollo para entrenar y evaluar un clasificador forestal;
@@ -292,6 +299,184 @@ La evidencia de la ejecución vive en:
   `outputs/training_p0/training-p0-20260730T222822Z.json`;
 - validación local:
   `outputs/training_p0/training-p0-20260730T222822Z-validation.json`.
+
+El mismo exportador P0 quedó parametrizado para **2020–2024**. El rango termina
+en 2024 porque el asset verificado de MapBiomas Argentina Collection 2 v3
+publica `classification_2024`, pero no `classification_2025`. No se inventa una
+etiqueta 2025.
+
+Los contratos sampling/export/run multianuales se versionan como **1.1.0**:
+agregan años y el modo de conteo diferido sin remover campos ni cambiar la
+lectura del P0. El config P0 histórico `1.0.0` continúa aceptado, pero esa
+versión queda restringida a 2020 y conteos síncronos; cualquier año posterior o
+payload diferido exige `1.1.0`.
+
+Cada año conserva exactamente el esquema P0 de 84 columnas. Los composites HLS
+se calculan para el `sample_year` real y luego se renombran al contrato canónico
+de slots `2020_<estación>_<variable>`. Ese prefijo es compatibilidad de esquema:
+**no es un predictor temporal**. `sample_year`, IDs, bloque, split, coordenadas,
+zona y procedencia continúan como metadata excluida del RF.
+
+La etiqueta es deliberadamente conservadora: MapBiomas usa la banda del año de
+la fila y Hansen aplica pérdida hasta ese mismo año; JRC GFC2020 y WorldCover
+v100 permanecen como anclajes fijos 2020. Por eso el dataset favorece clases
+estables y **no constituye un LULC anual completo, verdad de terreno ni bosque
+EUDR**.
+
+Los diez CSV anuales/UTM se concatenaron sin transformar filas en:
+
+- `outputs/training_p0/raw/entre_rios_training_2020_2024_multiyear.csv`;
+- 10.000 observaciones, 84 columnas y SHA-256
+  `0701a5f80a44861f5e2fcd0daf19dd4ad75de3dcbeedd99466ef724fead651a2`;
+- 2.000 observaciones por año: 800 `forest`, 800 `non_forest` y 400
+  `ambiguous`.
+
+No son 10.000 sitios independientes: existen 2.102 `sample_id` únicos y 7.898
+repeticiones anuales. Esto forma un panel longitudinal; el split por
+`block_id` permanece constante entre años para impedir que el mismo bloque
+espacial aparezca en train y test. `ambiguous` se conserva para QA, pero no es
+una clase del RF binario. Ningún sitio pasa directamente de `forest` a
+`non_forest`; 38 sitios alternan entre una clase unánime y `ambiguous`. El
+dataset ayuda a aprender invariancia interanual, no a entrenar detección de
+conversión.
+
+La auditoría completa —headers y orden, números finitos, votos, labels,
+conteos, tareas, MD5 Drive/local, hashes, claves `(sample_year, sample_id)` y
+consistencia espacial del split— está en
+`outputs/training_p0/training-multiyear-2020-2024-validation.json`.
+
+### 5.1 Candidato RF multianual 2020–2024
+
+Se entrenó un único candidato de **500 árboles** y 56 predictores para
+clasificar el proxy estable `forest/non_forest` en Entre Ríos. `ambiguous`
+queda fuera del ajuste y de las métricas binarias, pero conserva predicciones
+diagnósticas. La selección comparó, con los mismos hiperparámetros y semilla
+42:
+
+- peso uniforme por observación;
+- peso `1 / cantidad de observaciones binarias del sample_id`.
+
+Ambos candidatos se ajustaron sólo con `train`; la elección usó únicamente
+`validation`. El peso uniforme ganó por peor F1 anual, balanced accuracy y F1
+global. El artefacto final se reajustó con `train + validation` y recién
+entonces se evaluó una vez sobre `test`.
+
+| Evaluación | Balanced accuracy | Precision bosque | Recall bosque | F1 bosque | ROC-AUC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline 2020-only, validation | 0,9504 | 0,9548 | 0,9487 | 0,9518 | 0,9839 |
+| Multianual peso por sitio, validation | 0,9724 | 0,9900 | 0,9551 | 0,9723 | 0,9932 |
+| Multianual uniforme, validation | **0,9756** | **0,9901** | **0,9615** | **0,9756** | 0,9929 |
+| Multianual uniforme final, test | 0,9616 | 0,9648 | 0,9577 | 0,9613 | 0,9912 |
+
+En `test`, el peor F1 anual fue `0,9406` en 2023. La evaluación agrupada por
+los 231 sitios de test obtuvo F1 `0,9664`. El split por bloques de 3 km evita
+que `sample_id` o `block_id` crucen particiones, pero **no constituye un
+holdout regional con buffer** ni verdad de terreno independiente.
+
+El modelo y sus resultados reproducibles viven en
+`outputs/models/rf_forest_multiyear_2020_2024_v1/`. Se exportó, sin reemplazar
+el RF P0, al asset candidato:
+
+`projects/ee-facuboladerasgee/assets/models/rf_forest_multiyear_2020_2024_v1`
+
+El release está registrado en
+`data/models/rf_forest_multiyear_2020_2024_v1.json`. El registro no finge que
+el joblib de 14 MiB ni los CSV sensibles estén en Git: declara sus paths,
+tamaños, hashes, disponibilidad externa y comando de regeneración. Antes de
+consultar GEE, el pipeline verifica el hash del registro, el joblib y la
+metadata interna del bundle. El contenido remoto también se verificó sobre
+los 500 strings `tree`, independientemente de su orden, con fingerprint
+`ebb6752bafc3939f673d0c915e89b29cb5efd3826957e83ae1da3e4e55d139a3`.
+
+La TABLE contiene 500 propiedades `tree` en modo `classification`; el
+pipeline deriva localmente la fracción RAW promediando la predicción binaria
+de cada árbol. No usa `RandomForestClassifier.predict_proba`, que representa
+otra magnitud, y el resultado **no es una probabilidad calibrada**. La paridad
+sobre 24 filas de test conservó 24/24
+clases. En tres filas cambiaron uno o dos votos de 500 porque geemap redondea
+los thresholds serializados a seis decimales; el error máximo de fracción fue
+`0,004` y no alteró ninguna clase.
+
+El exportador respeta el límite real de **10 MiB por request** de GEE: divide
+automáticamente el payload en partes de hasta 8 MiB, usa nombres temporales con
+un UUID propio de cada ejecución, verifica un asset de staging y limpia en un
+`finally` solamente los assets registrados por ese run. `--allow-large-model`
+no evita el límite remoto; queda sólo como opción legacy y siempre usa
+multipart. Todas las descripciones efectivas de tareas, incluso una base
+provista con `--description`, se normalizan a caracteres seguros, respetan un
+máximo conservador de 100 caracteres e incorporan el UUID del run; el lookup
+usa esa descripción exacta y no reutiliza tareas históricas con la misma base.
+`--overwrite` tampoco promete atomicidad: GEE expone `renameAsset`
+y `copyAsset`, pero no una transacción multiasset. Por eso el reemplazo usa
+staging verificado, backup, promoción y rollback best-effort; durante esas
+llamadas puede existir una ventana sin el nombre final.
+
+Este asset sigue siendo **candidato**: no reemplaza el asset activo de
+`configs/default.yml` hasta validar transferencia temporal dentro del pipeline.
+Clasifica cobertura forestal proxy estable; no detecta conversión y no demuestra
+ausencia de deforestación ni cumplimiento EUDR.
+
+### 5.2 Atribución post-cambio v0
+
+`post_change_attribution.py` cruza cada geometría de perturbación persistente
+con las clases y votos RF 2020–2024. Publica CSV, JSON, GeoJSON, metadata y una
+figura con cinco resultados posibles: `agriculture_likely`,
+`forest_recovery`, `managed_harvest`, `temporary_disturbance` y `unknown`.
+
+La regla es deliberadamente conservadora. `agriculture_likely` sólo puede
+alcanzar `conversion_likely` cuando coinciden bosque al corte, pérdida
+poscorte, persistencia, área defendible, evidencia **independiente** de uso
+agrícola/ganadero posterior y ausencia de una explicación alternativa fuerte.
+Una pérdida RF sola queda `unknown/review_required`. Un contexto declarado de
+plantación forestal se registra como explicación alternativa, nunca como
+evidencia independiente. El atribuidor automático siempre conserva
+`conversion_confirmed: false`.
+
+El control costa-uru, declarado por el usuario como plantación forestal con
+ciclos de cosecha, produjo 37 eventos: seis compatibles con
+`managed_harvest` por pérdida seguida de recuperación y 31 `unknown` sin
+recuperación suficiente dentro de 2020–2024. No produjo eventos
+`conversion_likely` ni `conversion_confirmed`.
+
+### 5.3 Deltas experimentales del RF multianual
+
+La CLI incorpora un modo opt-in exclusivo que calcula los stacks HLS anuales
+2020–2024 en GEE, canoniza cada año a los 56 slots del modelo y aplica el
+joblib sellado por SHA-256 sobre el AOI. GEE sí puede construir el
+`decisionTreeEnsemble` candidato y evaluarlo puntualmente con `reduceRegion`.
+La limitación observada es más acotada: `getDownloadURL` falló con
+`Description length exceeds maximum` para el raster de clase 2020 formado por
+el stack HLS anual real más el candidato, mientras el mismo flujo P0 sí pudo
+descargarse. El componente exacto que lleva ese grafo completo al límite no
+está aislado; por eso no se atribuye causalidad solamente al tamaño del TABLE.
+
+El fallback descarga desde GEE los cinco GeoTIFF de 56 predictores y aplica
+localmente el joblib sklearn exacto, sin reducir árboles ni cambiar el modelo.
+Además conserva por año un GeoTIFF QA de 12 bandas: conteo válido per-pixel
+total, L30 y S30 para DJF, MAM, JJA y SON. Cada QA registra nombres de banda,
+semántica, grilla, nodata y SHA-256. La fecha solicitada `2024-12-31` queda como
+`requested_analysis_end_date`; la cobertura efectiva termina en la última
+estación publicada, `analysis_end_date=2024-11-30`.
+
+```powershell
+uv run python pruebas.py C:/Users/Facu/Desktop/costa-uru.geojson `
+  --rf-annual-deltas `
+  --forest-model-config configs/rf-multiyear-candidate-costa-uru.yml `
+  --analysis-end-date 2024-12-31 `
+  --establishment-id costa-uru-rf-deltas-2020-2024
+```
+
+La corrida canónica de `costa-uru`
+`costa-uru-rf-deltas-2020-2024__20260806T213320256834Z__582c56fd-557`
+publicó clases, fracciones no calibradas,
+deltas año–2020, transiciones, comparación P0/candidato, QA espacial, CSV, JSON
+y dos figuras: 56 artefactos manifestados y 38 TIFF sobre una única grilla
+EPSG:32721 de 149×98 píxeles a 30 m, nodata `-9999`. El panel principal usa
+leyendas discretas completas, norte y escala métrica. Las métricas permanecen
+idénticas al control anterior; las pérdidas y ganancias candidatas no pueden
+interpretarse como conversión sin persistencia, atribución y referencia
+independiente. Por eso `temporal_transfer_validated` continúa en `false` y el
+default sigue en P0.
 
 ## Modos de ejecución
 
@@ -392,6 +577,30 @@ La exportación verificada escribió en la carpeta Drive
 
 Las tareas `HWKA35PYKROORPW2RJQC27ED` y
 `PJ4V5D6TUTZA4SCIQJOH3SWW` terminaron en `COMPLETED`.
+
+Para los años adicionales se reutiliza el mismo script, cambiando únicamente
+el archivo de configuración:
+
+```powershell
+2021..2024 | ForEach-Object {
+  uv run python scripts/export_training_p0.py `
+    --config "configs/training-p0-entrerios-$_.yml" `
+    --auth-mode user_oauth `
+    --start-export
+}
+```
+
+El conteo síncrono provincial excedió dos veces el límite de cómputo interactivo
+de GEE para 2021. Los configs 2021–2024 difieren esa comprobación a la validación
+del CSV batch ya exportado; no omiten la validación final. Las ocho tareas
+terminaron en `COMPLETED`:
+
+| Año | UTM 20S | UTM 21S |
+| --- | --- | --- |
+| 2021 | `ZJ65D3BSWRZ6TDFH4NTU3KKU` | `TGS6FSSD2JRONUEU4UIRTUC7` |
+| 2022 | `YVYXRYGBGHR3TS3UVBQHEKUQ` | `GQ44P7NLPDMXKPI7XJOU3V6O` |
+| 2023 | `ZW2HNUCOZVNNILDBWBOYNTFS` | `2JY6QHD64VYUU3TB5XJDHI3L` |
+| 2024 | `QHVAG7L3NEAY3ZMRUTT6I4FC` | `KTEFWYP73BDDMG7NC62PSQPI` |
 
 Earth Engine creó dos carpetas homónimas durante el arranque concurrente de las
 particiones. Al recuperar los resultados no se debe elegir una carpeta por
@@ -556,10 +765,13 @@ Versiones vigentes:
 | configuración del pipeline | `1.11.0` |
 | bundle local | `3.1.0` |
 | bundle derivado con benchmark Hampel | `3.2.0` |
+| bundle experimental de deltas RF multianuales | `3.4.0` |
 | resumen de análisis | `1.0.0` |
 | grilla raster | `1.0.0` |
 | línea base forestal | `1.0.0` |
 | configuración/metadatos RF forestal P0 | `1.0.0` |
+| sampling/export/run de entrenamiento multianual | `1.1.0` |
+| evidencia temporal RF y QA per-pixel | `1.1.0` |
 | screening forestal | `1.1.0` |
 | configuración de detección de perturbaciones | `1.4.0` |
 | evidencia publicada de perturbaciones | `1.2.0` |
@@ -575,10 +787,11 @@ asset/semántica del modelo forestal, detección y segmentación de eventos. La 
 agrega opciones de salida. Una cambia cuando cambia el método; la otra también
 cambia ante diferencias operativas.
 
-En corridas estacionales, `analysis_end_date` es la fecha inclusiva final de la
-última estación efectivamente publicada —por ejemplo, SON 2025 termina el
-`2025-11-30`—. La fecha pedida por el operador se conserva por separado como
-`requested_analysis_end_date`; nunca se presenta como cobertura observada.
+En corridas estacionales y en los deltas RF multianuales, `analysis_end_date`
+es la fecha inclusiva final de la última estación efectivamente publicada —por
+ejemplo, SON 2024 termina el `2024-11-30`—. La fecha pedida por el operador se
+conserva por separado como `requested_analysis_end_date`; nunca se presenta
+como cobertura observada.
 
 ## Verificación alcanzada
 
@@ -669,6 +882,46 @@ finalizaron sin errores.
 El incremento de integración RF del `2026-08-03` aprobó el mismo gate con
 **373 pruebas** y **90,88 % de cobertura total**, sin ejecutar exports remotos.
 
+El cierre de reproducibilidad RF y atribución v0 del `2026-08-10` aprobó el
+gate completo con **520 pruebas** y **90,48 % de cobertura total**. Ruff, el
+control de formato y Mypy también finalizaron sin errores.
+
+## Ejecución completa recomendada
+
+El orquestador fino reutiliza las funciones públicas existentes y ejecuta, en
+orden, el pipeline principal, el benchmark Hampel derivado, los deltas anuales
+del RF multianual candidato y la atribución post-cambio v0:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_complete_analysis.py `
+  "C:\Users\Facu\Desktop\costa-uru.geojson" `
+  --establishment-id costa-uru-completo `
+  --declared-land-use managed_forest_plantation `
+  --declared-context-source user_declared `
+  --credentials .\credentials.json
+```
+
+Cada ejecución se publica bajo `outputs/runs/<run-id>/`. El directorio contiene
+`run_manifest.json` y cuatro bundles hijos intactos bajo `components/`. El
+manifest superior registra hashes, coberturas diferentes, dependencias y
+estado; no mezcla ni reinterpreta los contratos científicos de los hijos.
+Antes de publicar `complete`, el orquestador verifica todos los tamaños y
+SHA-256 declarados por cada manifest hijo, además de impedir rutas absolutas,
+traversal, duplicados y escapes mediante enlaces. El `analysis_id` superior
+correlaciona el expediente; cada bundle hijo conserva y declara su propio ID.
+Los componentes se invocan como funciones Python: `subprocess` se usa solamente
+para registrar revisión y estado Git, nunca para ejecutar el procesamiento.
+
+El flujo es secuencial y *fail-fast*. Un éxito termina como `complete`. Si
+falla el primer componente termina como `failed`; si ya existe al menos un
+bundle hijo completo termina como `partial`. En ambos casos el diagnóstico se
+conserva en un directorio explícito terminado en `.failed`, con error
+sanitizado y sin credenciales. No se realizan reintentos automáticos.
+
+Este comando produce un expediente técnico de detección, atribución
+conservadora y revisión. No emite certificación ni confirma automáticamente
+deforestación.
+
 ## Límites conocidos
 
 Todavía falta:
@@ -681,8 +934,9 @@ Todavía falta:
 - calibrar umbrales y scores por paisaje o ecorregión;
 - ampliar la cobertura espacial sintética a `MultiPolygon`, bordes que cortan
   píxeles y casos que cruzan zonas UTM;
-- atribuir el uso posterior y distinguir conversión de incendio, sequía,
-  inundación, defoliación o recuperación;
+- integrar evidencia independiente de uso agrícola o ganadero posterior y capas
+  de incendio, sequía e inundación para reducir los resultados `unknown` de la
+  atribución v0;
 - validar eventos segmentados contra referencia espacial independiente y
   cuantificar sensibilidad a bordes y resolución;
 - incorporar Sentinel-2 a 10 m como producto óptico principal del MVP;

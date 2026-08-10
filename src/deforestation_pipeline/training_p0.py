@@ -35,6 +35,8 @@ from deforestation_pipeline.training_sampling import (
     LABEL_COLUMN,
     SamplingQuotas,
     TrainingSamplingRequest,
+    TrainingSchemaVersion,
+    TrainingYear,
     build_entre_rios_aoi,
     build_multisource_proxy_label,
     build_seasonal_feature_stack,
@@ -55,6 +57,7 @@ class StrictP0Model(BaseModel):
 
 
 AuthMode = Literal["service_account", "user_oauth"]
+TRAINING_P0_SCHEMA_VERSION: Literal["1.1.0"] = "1.1.0"
 
 
 class TrainingP0PartitionConfig(StrictP0Model):
@@ -75,12 +78,16 @@ class TrainingP0DriveConfig(StrictP0Model):
 
 
 class TrainingP0Config(StrictP0Model):
-    schema_version: Literal["1.0.0"]
+    schema_version: TrainingSchemaVersion
     pipeline_config_path: Path
     source_catalog_path: Path
     manifest_directory: Path
     earth_engine_project: Literal["ee-facuboladerasgee"]
-    year: Literal[2020]
+    year: TrainingYear
+    preflight_count_mode: Literal[
+        "synchronous",
+        "deferred_to_export_validation",
+    ] = "synchronous"
     seed: Annotated[int, Field(ge=0)]
     scale_m: Literal[30]
     block_size_m: Annotated[int, Field(gt=0)]
@@ -95,6 +102,12 @@ class TrainingP0Config(StrictP0Model):
 
     @model_validator(mode="after")
     def provincial_contract_is_consistent(self) -> TrainingP0Config:
+        if self.schema_version == "1.0.0" and (
+            self.year != 2020 or self.preflight_count_mode != "synchronous"
+        ):
+            raise ValueError(
+                "años posteriores a 2020 o conteos diferidos requieren schema_version 1.1.0"
+            )
         if self.block_size_m % self.scale_m:
             raise ValueError("block_size_m debe ser múltiplo de scale_m")
         if self.boundary_longitude != -60.0:
@@ -242,6 +255,7 @@ def run_training_p0(
         strict=True,
     ):
         request = TrainingSamplingRequest(
+            schema_version=config.schema_version,
             year=config.year,
             seed=config.seed,
             grid_crs=partition_config.grid_crs,
@@ -277,14 +291,14 @@ def run_training_p0(
             aoi_wgs84=partition_aoi.sampling_aoi,
             request=request,
         )
-        counts = _sample_counts(samples)
         expected = {
             "forest": partition_config.quotas.forest,
             "non_forest": partition_config.quotas.non_forest,
             "ambiguous": partition_config.quotas.ambiguous,
             "total": partition_config.quotas.total,
         }
-        mismatch = mismatch or counts != expected
+        counts = _sample_counts(samples) if config.preflight_count_mode == "synchronous" else None
+        mismatch = mismatch or (counts is not None and counts != expected)
         export_manifest = TrainingExportManifest.from_sampling_request(
             request=request,
             feature_columns=features.feature_columns,
@@ -295,22 +309,29 @@ def run_training_p0(
             folder=config.drive.folder,
             file_name_prefix=(f"{config.drive.file_name_prefix}_utm{partition_config.utm_zone}"),
         )
-        partition_records.append(
-            {
-                "utm_zone": partition_config.utm_zone,
-                "raw_aoi_bounds": list(partition_aoi.raw_aoi.bounds),
-                "sampling_aoi_bounds": list(partition_aoi.sampling_aoi.bounds),
-                "excluded_boundary_area_ha": partition_aoi.excluded_boundary_area_ha,
-                "expected_counts": expected,
-                "actual_counts": counts,
-                "grid": grid.model_dump(mode="json"),
-                "export_manifest": export_manifest.model_dump(mode="json"),
-            }
-        )
+        partition_record: dict[str, object] = {
+            "utm_zone": partition_config.utm_zone,
+            "raw_aoi_bounds": list(partition_aoi.raw_aoi.bounds),
+            "sampling_aoi_bounds": list(partition_aoi.sampling_aoi.bounds),
+            "excluded_boundary_area_ha": partition_aoi.excluded_boundary_area_ha,
+            "expected_counts": expected,
+            "actual_counts": counts,
+            "grid": grid.model_dump(mode="json"),
+            "export_manifest": export_manifest.model_dump(mode="json"),
+        }
+        if config.schema_version == TRAINING_P0_SCHEMA_VERSION:
+            partition_record["count_validation_status"] = (
+                "passed"
+                if counts == expected
+                else "deferred_to_export_validation"
+                if counts is None
+                else "failed"
+            )
+        partition_records.append(partition_record)
         export_inputs.append((samples, drive_request))
 
     base_payload: dict[str, object] = {
-        "schema_version": "1.0.0",
+        "schema_version": config.schema_version,
         "generated_at": generation_time.isoformat(),
         "year": config.year,
         "seed": config.seed,
@@ -322,6 +343,8 @@ def run_training_p0(
         "partitions": partition_records,
         "tasks": [],
     }
+    if config.schema_version == TRAINING_P0_SCHEMA_VERSION:
+        base_payload["preflight_count_mode"] = config.preflight_count_mode
     if mismatch:
         base_payload["status"] = "preflight_failed"
         _write_manifest(manifest_path, base_payload)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from deforestation_pipeline.config import (
     ForestRandomForestConfig,
     SpectralIndex,
     load_config,
+    load_forest_model_config,
 )
 from deforestation_pipeline.forest_rf import (
     FOREST_RF_CLASS_BAND,
@@ -22,7 +25,10 @@ from deforestation_pipeline.forest_rf import (
     FOREST_RF_VOTE_FRACTION_BAND,
     build_forest_rf_images,
     build_geemap_tree_classifier,
+    canonicalize_forest_rf_feature_stack,
+    forest_rf_output_band_names,
     forest_rf_predictor_band_names,
+    forest_rf_predictor_columns_sha256,
     forest_rf_qa_band_names,
     select_forest_rf_predictors,
 )
@@ -72,12 +78,24 @@ class FakeClassifier:
 
 
 class FakeImage:
-    def __init__(self, bands: tuple[str, ...], expression: str = "features") -> None:
+    def __init__(
+        self,
+        bands: tuple[str, ...],
+        expression: str = "features",
+        values: tuple[int, ...] | None = None,
+    ) -> None:
         self.bands = bands
         self.expression = expression
+        self.values = values or tuple(range(len(bands)))
 
-    def select(self, bands: list[str]) -> FakeImage:
-        return FakeImage(tuple(bands), f"select({','.join(bands)})")
+    def select(self, bands: list[str], renamed: list[str] | None = None) -> FakeImage:
+        positions = tuple(self.bands.index(band) for band in bands)
+        output_bands = tuple(renamed) if renamed is not None else tuple(bands)
+        return FakeImage(
+            output_bands,
+            f"select({','.join(bands)})",
+            tuple(self.values[position] for position in positions),
+        )
 
     def classify(self, classifier: FakeClassifier) -> FakeImage:
         return FakeImage(("classification",), f"classify[{classifier.mode}]({self.expression})")
@@ -111,6 +129,12 @@ class FakeImage:
 
     def eq(self, value: int) -> FakeImage:
         return FakeImage(self.bands, f"eq({self.expression},{value})")
+
+    def gt(self, value: int) -> FakeImage:
+        return FakeImage(self.bands, f"gt({self.expression},{value})")
+
+    def And(self, other: FakeImage) -> FakeImage:
+        return FakeImage(self.bands, f"and({self.expression},{other.expression})")
 
     def clip(self, geometry: object) -> FakeImage:
         return FakeImage(self.bands, f"clip({self.expression},{geometry})")
@@ -148,9 +172,19 @@ class FakeModule:
         return FakeClassifier(trees.values)
 
 
-def _feature_stack() -> SeasonalFeatureStack:
-    columns = seasonal_feature_columns(year=2020, indices=tuple(SpectralIndex))
-    return SeasonalFeatureStack(image=FakeImage(columns), feature_columns=columns)
+def _feature_stack(year: int = 2020) -> SeasonalFeatureStack:
+    columns = seasonal_feature_columns(year=year, indices=tuple(SpectralIndex))
+    return SeasonalFeatureStack(
+        image=FakeImage(columns),
+        feature_columns=columns,
+        observation_year=year,
+    )
+
+
+def _multiyear_config() -> ForestRandomForestConfig:
+    return load_forest_model_config(
+        PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
+    )
 
 
 def test_rf_contract_has_exactly_56_predictors_in_deterministic_order() -> None:
@@ -176,6 +210,80 @@ def test_rf_contract_has_exactly_56_predictors_in_deterministic_order() -> None:
         "2020_SON_NIRv",
         "2020_SON_kNDVI",
     )
+
+
+def test_multiyear_canonicalization_preserves_values_order_and_feature_hash() -> None:
+    config = _multiyear_config()
+    source = _feature_stack(2024)
+
+    canonical = canonicalize_forest_rf_feature_stack(
+        feature_stack=source,
+        observation_year=2024,
+        config=config,
+    )
+
+    assert canonical.feature_columns == seasonal_feature_columns(
+        year=2020, indices=tuple(SpectralIndex)
+    )
+    assert canonical.image.bands == canonical.feature_columns
+    assert canonical.image.values == source.image.values
+    assert canonical.observation_year == 2024
+    assert forest_rf_predictor_columns_sha256() == (
+        "35b5b2ba36bfccb07e798a27e354fb9fae0ba0819975986975b5c20c5fdd6d0f"
+    )
+    expected_payload = json.dumps(
+        list(forest_rf_predictor_band_names()),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert hashlib.sha256(expected_payload.encode()).hexdigest() == (
+        forest_rf_predictor_columns_sha256()
+    )
+
+
+@pytest.mark.parametrize(
+    ("columns", "message"),
+    [
+        (
+            seasonal_feature_columns(year=2024, indices=tuple(SpectralIndex))[:-1],
+            "missing",
+        ),
+        (
+            (
+                *seasonal_feature_columns(year=2024, indices=tuple(SpectralIndex))[:-1],
+                seasonal_feature_columns(year=2024, indices=tuple(SpectralIndex))[0],
+            ),
+            "duplicate",
+        ),
+        (
+            (
+                "2023_DJF_blue",
+                *seasonal_feature_columns(year=2024, indices=tuple(SpectralIndex))[1:],
+            ),
+            "mixed_year",
+        ),
+    ],
+)
+def test_multiyear_canonicalization_rejects_schema_drift(
+    columns: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        canonicalize_forest_rf_feature_stack(
+            feature_stack=SeasonalFeatureStack(
+                image=FakeImage(columns),
+                feature_columns=columns,
+                observation_year=2024,
+            ),
+            observation_year=2024,
+            config=_multiyear_config(),
+        )
+
+    with pytest.raises(ValueError, match="fuera del rango"):
+        canonicalize_forest_rf_feature_stack(
+            feature_stack=_feature_stack(2020),
+            observation_year=2025,
+            config=_multiyear_config(),
+        )
 
 
 def test_rf_excludes_exactly_the_12_p0_qa_count_bands() -> None:
@@ -250,6 +358,29 @@ def test_rf_outputs_class_raw_vote_fraction_and_scope_metadata() -> None:
     assert result.metadata.temporal_transfer_validated is False
     assert result.metadata.predictor_band_names == forest_rf_predictor_band_names()
     assert result.metadata.excluded_qa_band_names == forest_rf_qa_band_names()
+
+
+def test_multiyear_outputs_are_year_named_and_keep_direct_classifier_class() -> None:
+    result = build_forest_rf_images(
+        module=FakeModule(),
+        config=_multiyear_config(),
+        feature_stack=_feature_stack(2024),
+        observation_year=2024,
+        aoi_wgs84=box(-58.24, -31.81, -58.19, -31.78),
+        generated_at=datetime(2026, 8, 6, 15, tzinfo=UTC),
+    )
+
+    names = forest_rf_output_band_names(2024)
+    assert result.forest_class.bands == (names["class"],)
+    assert result.forest_vote_fraction.bands == (names["vote_fraction"],)
+    assert result.input_complete.bands == (names["input_complete"],)
+    assert "CLASSIFICATION" in result.forest_class.expression
+    assert "RAW" not in result.forest_class.expression
+    assert "RAW" in result.forest_vote_fraction.expression
+    assert "valid_observation_count" in result.input_complete.expression
+    assert result.metadata.observation_year == 2024
+    assert result.metadata.predictor_slot_year == 2020
+    assert result.metadata.temporal_transfer_validated is False
 
 
 def test_rf_config_rejects_scope_or_serialization_drift() -> None:

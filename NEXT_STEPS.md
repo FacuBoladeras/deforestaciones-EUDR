@@ -1,10 +1,11 @@
 # Próximos pasos
 
 Este archivo es el único roadmap del proyecto. Parte del checkpoint donde la
-**detección de perturbaciones está implementada** y la **atribución del cambio
-está pendiente**. No autoriza a emitir conclusiones legales, confirmar
-deforestación automáticamente ni ampliar el alcance hacia trazabilidad animal
-o sistemas regulatorios.
+**detección de perturbaciones está implementada** y existe una **atribución
+post-cambio v0 conservadora por evento**. Aún falta integrar evidencia
+independiente de uso posterior y explicaciones alternativas adicionales. No
+autoriza a emitir conclusiones legales, confirmar deforestación automáticamente
+ni ampliar el alcance hacia trazabilidad animal o sistemas regulatorios.
 
 La regla de ejecución es simple: cerrar cada bloque con evidencia verificable
 antes de comenzar el siguiente. No implementar todo el Paso 15 en una sola
@@ -54,6 +55,81 @@ es un AOI operativo reproducible, no cartografía provincial oficial.
 **Criterio de salida alcanzado:** dos CSV reproducibles y un reporte local de
 validación en
 `outputs/training_p0/training-p0-20260730T222822Z-validation.json`.
+
+### 0.2 Dataset multianual 2020–2024 — materializado
+
+- [x] verificar en GEE que MapBiomas Argentina Collection 2 v3 llega hasta
+  `classification_2024` y excluir 2025 por falta de etiqueta anual;
+- [x] reutilizar el exportador P0 y parametrizar sólo el año/configuración;
+- [x] versionar el contrato multianual como `1.1.0`, preservando lectura del P0
+  `1.0.0` y bloqueando extensiones multianuales bajo la versión antigua;
+- [x] mantener un único esquema canónico de 68 features y una allowlist de 56
+  predictores idéntica para todos los años;
+- [x] exportar y completar ocho tareas Drive para 2021–2024, sin duplicar el P0
+  2020 validado;
+- [x] descargar y verificar MD5 contra Drive para los ocho CSV nuevos;
+- [x] concatenar diez archivos en un CSV de 10.000 observaciones y 84 columnas;
+- [x] comprobar labels, votos, tipos, hashes y split espacial constante por
+  `block_id` entre años;
+- [x] entrenar el único RF multianual usando sólo `forest/non_forest` y la
+  allowlist de 56 predictores;
+- [x] evaluar candidatos sobre split espacial agrupado y reportar métricas por
+  fila, año y sitio, sin seleccionar mediante test;
+- [x] comparar peso uniforme contra peso inverso por `sample_id`; ganó el peso
+  uniforme en validation (`F1=0,9756`, peor F1 anual `0,9617`);
+- [x] reajustar el ganador con train+validation y evaluar una vez en test
+  (`F1=0,9613`, balanced accuracy `0,9616`);
+- [x] exportar 500 árboles en modo `classification` al nuevo asset candidato
+  `projects/ee-facuboladerasgee/assets/models/rf_forest_multiyear_2020_2024_v1`;
+- [x] verificar TABLE, 500 propiedades `tree` y paridad GEE↔sklearn: 24/24
+  clases iguales, error máximo de votos `0,004` por redondeo de thresholds;
+- [x] ejecutar el candidato por cada año sobre `costa-uru`, conservando clase,
+  score, soporte común, deltas año–2020 y comparación P0/candidato;
+- [ ] validar la transferencia temporal con referencia independiente antes de
+  cambiar el asset activo del pipeline.
+
+El CSV combinado está en
+`outputs/training_p0/raw/entre_rios_training_2020_2024_multiyear.csv`; su
+contrato y auditoría están en
+`outputs/training_p0/training-multiyear-2020-2024-validation.json`. Los 10.000
+registros corresponden a 2.102 sitios únicos observados en varios años, no a
+10.000 sitios independientes. `sample_year`, IDs, coordenadas, bloque, split,
+zona y pseudolabel no pueden entrar como predictores. No hay transiciones
+directas `forest` ↔ `non_forest` en los pseudolabels: este panel entrena
+clasificación interanual, no detección de conversión.
+
+El bundle reproducible de entrenamiento/export está en
+`outputs/models/rf_forest_multiyear_2020_2024_v1/`. El asset nuevo es sólo un
+candidato: `configs/default.yml` continúa apuntando al RF P0 2020 y
+`temporal_transfer_validated` permanece `false`.
+
+**Control temporal `2026-08-06`:** la comparación 2020 usa el mismo stack y
+soporte para ambos modelos. El bundle 3.4.0 agrega cinco GeoTIFF QA de 12 bandas
+per-pixel —total/L30/S30 por DJF/MAM/JJA/SON— y separa la fecha solicitada
+`2024-12-31` de la cobertura efectiva `2024-11-30`. Las figuras incorporan
+leyendas discretas, norte y escala métrica. Las pérdidas y ganancias candidatas
+siguen requiriendo persistencia temporal y referencia independiente; no se
+promueve el candidato y `temporal_transfer_validated` permanece `false`.
+
+El run canónico
+`costa-uru-rf-deltas-2020-2024__20260806T213320256834Z__582c56fd-557`
+manifestó 56 artefactos y 38 TIFF sobre la misma grilla EPSG:32721 de 149×98
+píxeles a 30 m. Los cinco QA tienen 12 bandas `int16`, nodata `-9999`, nombres,
+semántica, grilla y SHA-256 verificados. Las métricas quedaron invariantes
+respecto del run anterior: el desacuerdo P0/candidato 2020 sigue en 276 píxeles
+(`24,84 ha`).
+
+El TABLE GEE se mantiene como artefacto de paridad. GEE construye el
+`decisionTreeEnsemble` candidato y `reduceRegion` puntual funciona. El fallo
+observado queda limitado a `getDownloadURL` del grafo real completo —stack HLS
+anual más clasificación candidata— con `Description length exceeds maximum`;
+P0 sí descarga y el componente limitante exacto no está aislado. El fallback
+descarga los predictores desde GEE y aplica el joblib sklearn exacto localmente.
+
+La etiqueta multianual sigue siendo un proxy conservador: MapBiomas y Hansen
+aportan variación anual, mientras JRC y WorldCover son anclajes 2020. El
+dataset no representa un LULC anual completo ni demuestra bosque o ausencia de
+deforestación conforme a EUDR.
 
 ## 1. Validación independiente del detector actual
 
@@ -347,13 +423,16 @@ Comparar configuraciones sin romper estas reglas:
 **Criterio de salida:** informe de calibración reproducible o decisión
 documentada de conservar los benchmarks.
 
-## 5. Diseñar el Paso 15: atribución
+## 5. Consolidar el Paso 15: atribución
 
-No escribir el clasificador hasta cerrar un contrato explícito.
+El atribuidor determinístico v0 ya está implementado sobre eventos persistentes
+y trayectorias RF 2020–2024. Su alcance actual es separar recuperación,
+contexto de cosecha forestal, perturbación temporal, agricultura probable y
+desconocido sin confundir pérdida de cobertura con conversión.
 
 ### 5.1 Paso 15.0 — contrato de atribución
 
-Definir una salida versionada que consuma candidatos de perturbación y preserve:
+La salida versionada ya consume candidatos de perturbación y preserva:
 
 - bosque o regeneración;
 - pastura;
@@ -388,7 +467,9 @@ La atribución no puede depender de una única escena. Diseñar ventanas que:
 - conserven estacionalidad y cantidad de observaciones;
 - eviten usar información anterior como si describiera el uso posterior.
 
-Empezar con funciones puras y series sintéticas antes de consultar GEE.
+Las funciones puras y series sintéticas ya cubren pérdida persistente,
+recuperación, cosecha declarada y el gate agrícola independiente. Falta ampliar
+la ventana más allá de 2024 cuando existan predictores y validación compatibles.
 
 ### 5.3 Paso 15.2 — explicaciones alternativas
 
@@ -402,9 +483,11 @@ Separar evidencia compatible con conversión de:
 - error de línea base;
 - recuperación o regeneración.
 
-Definir qué fuente respalda cada explicación y qué ocurre cuando faltan datos.
-Una explicación alternativa razonable debe impedir una conclusión automática
-fuerte y enviar el caso a revisión.
+La v0 registra la fuente de cada explicación. El contexto declarado de
+plantación es una explicación alternativa no independiente; recuperación
+forestal se deriva de la trayectoria RF. Cuando falta evidencia explícita de
+uso agrícola el resultado es `unknown/review_required`. Todavía falta integrar
+capas independientes de incendio, clima y cobertura postcambio.
 
 ### 5.4 Paso 15.3 — agregación atribuida
 
@@ -444,13 +527,16 @@ documentada y no pertenece al modelo automático.
 
 ### 5.6 Paso 15.5 — materialización compacta
 
-Antes de publicar archivos, diseñar el mínimo paquete auditable:
+La v0 ya publica el mínimo paquete auditable:
 
 - un JSON de atribución;
-- un raster multibanda de clases, confianza y flags;
+- referencias por hash a los rasters RF fuente, sin duplicarlos;
 - un vector de eventos;
 - una tabla por evento;
-- una figura antes/después o una lámina equivalente.
+- una figura de atribución equivalente.
+
+Permanece pendiente un raster multibanda atribuido cuando exista una semántica
+per-píxel validada; la v0 es deliberadamente por evento.
 
 No crear carpetas por índice, modelo o regla. Referenciar productos existentes
 por hash en lugar de duplicarlos.
@@ -459,6 +545,14 @@ por hash en lugar de duplicarlos.
 incertidumbre preservada, eventos medidos y ningún lenguaje de certificación.
 
 ## 6. Incrementos posteriores, no inmediatos
+
+El entrypoint secuencial `scripts/run_complete_analysis.py` ya materializa un
+envelope auditable sobre los cuatro componentes actuales. Su contrato debe ser
+la base de la futura API interna: recibir geometría y parámetros acotados,
+ejecutar el mismo orquestador y devolver el estado y las referencias del
+expediente, sin duplicar la lógica científica en la capa HTTP.
+El envelope ya valida integridad completa de los manifests hijos y diferencia
+el `analysis_id` padre de los IDs científicos propios de cada bundle.
 
 Mantener fuera del siguiente incremento hasta cerrar lo anterior:
 

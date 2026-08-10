@@ -14,12 +14,32 @@ from deforestation_pipeline.config import (
     ResolvedPipelineConfig,
     execution_config_hash,
     load_config,
+    load_forest_model_config,
     load_license_registry,
     resolve_run_config,
     scientific_parameters_hash,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
+
+
+def test_candidate_forest_model_override_is_explicit_and_default_stays_p0() -> None:
+    default = load_config(PROJECT_ROOT / "configs" / "default.yml").forest_model
+    candidate = load_forest_model_config(CANDIDATE_FOREST_MODEL_CONFIG)
+
+    assert default.schema_version == "1.0.0"
+    assert default.asset_id.endswith("/rf_forest_2020")
+    assert default.supported_observation_years == (2020,)
+    assert default.temporal_transfer_validated is False
+    assert candidate.schema_version == "1.1.0"
+    assert candidate.asset_id.endswith("/rf_forest_multiyear_2020_2024_v1")
+    assert candidate.inference_backend == "local_sklearn_joblib"
+    assert candidate.local_joblib_path is not None
+    assert candidate.local_joblib_path.endswith("/random_forest_forest_multiyear_2020_2024.joblib")
+    assert candidate.comparison_asset_id == default.asset_id
+    assert candidate.supported_observation_years == (2020, 2021, 2022, 2023, 2024)
+    assert candidate.temporal_transfer_validated is False
 
 
 def _forest_baseline_payload() -> dict[str, Any]:
@@ -283,7 +303,7 @@ def test_execution_hash_matches_golden_for_controlled_configuration() -> None:
     resolved = resolve_run_config(config, date(2021, 1, 1))
 
     assert execution_config_hash(resolved) == (
-        "848f61e4451672a05c66c6856ba6c03baf4b63a10052a5e57ab2fa1a198bc2c7"
+        "ef74ab215bab40eb4bac5b783bc2e36813cc9c480c7c7dc4358830ecb73e5bf6"
     )
 
 

@@ -53,8 +53,10 @@ from deforestation_pipeline.ccdc_benchmark import (
 )
 from deforestation_pipeline.change_detection import disturbance_detection_output_paths
 from deforestation_pipeline.config import (
+    ForestRandomForestConfig,
     execution_config_hash,
     load_config,
+    load_forest_model_config,
     resolve_run_config,
     scientific_parameters_hash,
 )
@@ -81,6 +83,12 @@ from deforestation_pipeline.forest_baseline_products import (
     build_forest_baseline_images,
 )
 from deforestation_pipeline.forest_rf import ForestRfImages, build_forest_rf_images
+from deforestation_pipeline.forest_rf_temporal import (
+    FOREST_RF_TEMPORAL_BUNDLE_SCHEMA_VERSION,
+    ForestRfTemporalMaterialization,
+    forest_rf_temporal_output_paths,
+    materialize_forest_rf_temporal,
+)
 from deforestation_pipeline.forest_screening import build_screening_temporal_domain
 from deforestation_pipeline.gee import (
     GeeMetadataQuery,
@@ -107,6 +115,7 @@ from deforestation_pipeline.raster_products import (
     materialize_ee_image_to_grid,
     materialize_hls_raster_products,
 )
+from deforestation_pipeline.rf_model_release import verify_local_rf_model_release
 from deforestation_pipeline.schemas import DatasetRecord, RasterGridSpec
 from deforestation_pipeline.seasonal_feature_stack import (
     build_yearly_seasonal_feature_stack,
@@ -135,6 +144,7 @@ def run_local_vector_pipeline(
     input_path: Path,
     output_root: Path,
     config_path: Path,
+    forest_model_config_path: Path | None = None,
     source_crs: str | None,
     establishment_id: str,
     analysis_end_date: date,
@@ -144,6 +154,7 @@ def run_local_vector_pipeline(
     gee_credentials_path: Path | None = None,
     generate_hls_composite: bool = False,
     generate_forest_baseline: bool = False,
+    generate_rf_deltas: bool = False,
     hls_seasonal_request: HlsSeasonalRequest | None = None,
     generate_disturbance_detection: bool = False,
     vector_layer: str | None = None,
@@ -170,6 +181,16 @@ def run_local_vector_pipeline(
                 "requested_analysis_end_date_precedes_published_seasonal_range"
             )
     config = load_config(config_path)
+    if forest_model_config_path is not None:
+        config = config.model_copy(
+            update={"forest_model": load_forest_model_config(forest_model_config_path)}
+        )
+    if generate_rf_deltas:
+        analysis_end_date = _observation_years_analysis_end_date(
+            config.forest_model.supported_observation_years
+        )
+        if requested_analysis_end_date < analysis_end_date:
+            raise LocalVectorInputError("requested_analysis_end_date_precedes_rf_observation_range")
     resolved_config = resolve_run_config(config, analysis_end_date)
     catalog = load_source_catalog(catalog_path)
     source_plan = build_benchmark_source_plan(catalog, resolved_config)
@@ -186,11 +207,46 @@ def run_local_vector_pipeline(
     baseline_feature_product: ForestBaselineFeatureProduct | None = None
     baseline_images: ForestBaselineImages | None = None
     forest_rf_images: ForestRfImages | None = None
+    forest_rf_temporal: ForestRfTemporalMaterialization | None = None
     baseline_materialization: ForestBaselineMaterialization | None = None
     disturbance_materialization: DisturbanceMaterialization | None = None
     disturbance_skip_reason: str | None = None
     support_materialization: HlsSeasonalMaterialization | None = None
     raster_grid: RasterGridSpec | None = None
+    if generate_rf_deltas and forest_model_config_path is None:
+        raise LocalVectorInputError(
+            "la inferencia RF multianual requiere --forest-model-config explícito"
+        )
+    if forest_model_config_path is not None and not generate_rf_deltas:
+        raise LocalVectorInputError(
+            "--forest-model-config sólo se admite junto con la inferencia RF multianual"
+        )
+    if generate_rf_deltas and (
+        gee_query is not None
+        or generate_hls_composite
+        or generate_forest_baseline
+        or hls_seasonal_request is not None
+        or generate_disturbance_detection
+    ):
+        raise LocalVectorInputError("la inferencia RF multianual es un modo exclusivo del MVP")
+    if generate_rf_deltas and (
+        resolved_config.forest_model.schema_version != "1.1.0"
+        or resolved_config.forest_model.supported_observation_years
+        != (2020, 2021, 2022, 2023, 2024)
+    ):
+        raise LocalVectorInputError(
+            "la inferencia RF multianual requiere el contrato candidato 2020-2024"
+        )
+    if generate_rf_deltas and analysis_end_date != date(2024, 11, 30):
+        raise LocalVectorInputError(
+            "analysis_end_date efectiva del candidato debe cerrar en SON 2024 (2024-11-30)"
+        )
+    if generate_rf_deltas:
+        verify_local_rf_model_release(
+            resolved_config.forest_model,
+            project_root=PROJECT_ROOT,
+            load_bundle=False,
+        )
     if generate_disturbance_detection and hls_seasonal_request is None:
         raise LocalVectorInputError(
             "la detección de perturbaciones requiere un rango estacional HLS"
@@ -208,7 +264,9 @@ def run_local_vector_pipeline(
         raise LocalVectorInputError(
             "generate_hls_composite requiere una consulta GEE con fechas explícitas"
         )
-    remote_requested = gee_query is not None or temporal_request or generate_forest_baseline
+    remote_requested = (
+        gee_query is not None or temporal_request or generate_forest_baseline or generate_rf_deltas
+    )
     if remote_requested:
         if gee_credentials_path is None:
             raise LocalVectorInputError(
@@ -273,6 +331,76 @@ def run_local_vector_pipeline(
             aoi_wgs84=validated.analysis_geometry,
             grid_spec=raster_grid,
             request=hls_seasonal_request,
+            generated_at=run_created_at,
+        )
+    if generate_rf_deltas:
+        raster_target_crs = select_projected_crs(
+            validated,
+            resolved_config.spatial.raster_crs_strategy,
+        )
+        raster_grid = derive_raster_grid_spec(
+            aoi_wgs84=validated.analysis_geometry,
+            target_crs=raster_target_crs,
+            resolution_m=resolved_config.data.target_resolution_m,
+            nodata=resolved_config.output.raster_nodata,
+        )
+        candidate_config = resolved_config.forest_model
+        yearly_feature_stacks = {
+            year: build_yearly_seasonal_feature_stack(
+                session=gee_session,
+                source_plan=source_plan,
+                data_config=resolved_config.data,
+                aoi_wgs84=validated.analysis_geometry,
+                grid_spec=raster_grid,
+                year=year,
+                generated_at=run_created_at,
+            )
+            for year in candidate_config.supported_observation_years
+        }
+        yearly_rf_images = {
+            year: build_forest_rf_images(
+                module=gee_session.module,
+                config=candidate_config,
+                feature_stack=yearly_feature_stacks[year],
+                observation_year=year,
+                aoi_wgs84=validated.analysis_geometry,
+                generated_at=run_created_at,
+            )
+            for year in candidate_config.supported_observation_years
+        }
+        p0_payload = candidate_config.model_dump(mode="python")
+        p0_payload.update(
+            {
+                "schema_version": "1.0.0",
+                "asset_id": candidate_config.comparison_asset_id,
+                "model_training_scope": "p0_2020",
+                "supported_observation_years": (2020,),
+                "serialized_trees_sha256": None,
+                "serialized_tree_multiset_sha256": None,
+                "joblib_sha256": None,
+                "model_registry_path": None,
+                "model_registry_sha256": None,
+                "inference_backend": "gee_decision_tree_ensemble",
+                "local_joblib_path": None,
+                "comparison_asset_id": None,
+            }
+        )
+        p0_config = ForestRandomForestConfig.model_validate(p0_payload)
+        p0_images = build_forest_rf_images(
+            module=gee_session.module,
+            config=p0_config,
+            feature_stack=yearly_feature_stacks[2020],
+            observation_year=2020,
+            aoi_wgs84=validated.analysis_geometry,
+            generated_at=run_created_at,
+        )
+        forest_rf_temporal = materialize_forest_rf_temporal(
+            yearly_images=yearly_rf_images,
+            yearly_feature_stacks=yearly_feature_stacks,
+            p0_images=p0_images,
+            config=candidate_config,
+            output_config=resolved_config.output,
+            grid_spec=raster_grid,
             generated_at=run_created_at,
         )
     if generate_forest_baseline:
@@ -463,6 +591,7 @@ def run_local_vector_pipeline(
                     hls_seasonal_request,
                     generate_forest_baseline,
                     generate_disturbance_detection,
+                    generate_rf_deltas,
                 ),
             )
         ),
@@ -480,11 +609,13 @@ def run_local_vector_pipeline(
         gee_result is not None
         or seasonal_materialization is not None
         or baseline_materialization is not None
+        or forest_rf_temporal is not None
     )
     pixel_data_accessed = (
         raster_materialization is not None
         or seasonal_materialization is not None
         or baseline_materialization is not None
+        or forest_rf_temporal is not None
     )
     datasets = _dataset_records_for_query(
         source_plan=source_plan,
@@ -498,7 +629,11 @@ def run_local_vector_pipeline(
             access_date=run_created_at.date(),
         )
     common_metadata = {
-        "schema_version": LOCAL_BUNDLE_SCHEMA_VERSION,
+        "schema_version": (
+            FOREST_RF_TEMPORAL_BUNDLE_SCHEMA_VERSION
+            if forest_rf_temporal is not None
+            else LOCAL_BUNDLE_SCHEMA_VERSION
+        ),
         "run_id": run_id,
         "analysis_id": str(analysis_id),
         "establishment_id": establishment_id,
@@ -512,7 +647,12 @@ def run_local_vector_pipeline(
         "remote_data_accessed": remote_data_accessed,
         "pixel_data_accessed": pixel_data_accessed,
     }
-    if seasonal_materialization is not None:
+    if forest_rf_temporal is not None:
+        access_limitation = (
+            "Las clases RF anuales son evidencia aprendida experimental; los deltas "
+            "no atribuyen causa ni uso posterior."
+        )
+    elif seasonal_materialization is not None:
         access_limitation = (
             "El cubo virtual contiene composites estacionales; cada período es una "
             "síntesis temporal y no una fecha de adquisición única."
@@ -550,6 +690,14 @@ def run_local_vector_pipeline(
                 "Los scores robusto y CCDC conservan escalas independientes no calibradas.",
             ]
         )
+    if forest_rf_temporal is not None:
+        limitations.extend(
+            [
+                "La transferencia temporal del RF multianual no está validada independientemente.",
+                "La fracción RAW de votos no es una probabilidad calibrada.",
+                "Pérdida forestal candidata no equivale a deforestación.",
+            ]
+        )
     limitations.extend(
         [
             "No se ejecutó atribución de conversión ni se generó una conclusión final.",
@@ -560,21 +708,25 @@ def run_local_vector_pipeline(
     run_summary = {
         **common_metadata,
         "stage": (
-            "disturbance_detection"
-            if disturbance_materialization is not None
+            "forest_rf_deltas_2020_2024"
+            if forest_rf_temporal is not None
             else (
-                "forest_baseline_2020"
-                if baseline_materialization is not None
+                "disturbance_detection"
+                if disturbance_materialization is not None
                 else (
-                    "seasonal_temporal_cube"
-                    if seasonal_materialization is not None
+                    "forest_baseline_2020"
+                    if baseline_materialization is not None
                     else (
-                        "annual_hls_composite"
-                        if pixel_data_accessed
+                        "seasonal_temporal_cube"
+                        if seasonal_materialization is not None
                         else (
-                            "scene_metadata_inventory"
-                            if remote_data_accessed
-                            else "spatial_preparation"
+                            "annual_hls_composite"
+                            if pixel_data_accessed
+                            else (
+                                "scene_metadata_inventory"
+                                if remote_data_accessed
+                                else "spatial_preparation"
+                            )
                         )
                     )
                 )
@@ -614,6 +766,38 @@ def run_local_vector_pipeline(
                 "primary_interpretation_domain": "automated_forest",
                 "final_assessment_generated": False,
             },
+        }
+    if forest_rf_temporal is not None:
+        run_summary["status"] = "review_required"
+        temporal_paths = forest_rf_temporal_output_paths(
+            years=resolved_config.forest_model.supported_observation_years
+        )
+        run_summary["forest_rf_deltas"] = {
+            "executed": True,
+            "reference_year": 2020,
+            "years": list(resolved_config.forest_model.supported_observation_years),
+            "model": resolved_config.forest_model.model_dump(mode="json"),
+            "grid_sha256": forest_rf_temporal.grid_spec.grid_sha256,
+            "assets": temporal_paths,
+            "per_pixel_observation_qa": {
+                "band_count_per_year": 12,
+                "years": {
+                    str(year): temporal_paths[f"observation_qa_{year}"]
+                    for year in resolved_config.forest_model.supported_observation_years
+                },
+                "metadata_path": temporal_paths["metadata"],
+            },
+            "yearly_summaries": list(forest_rf_temporal.yearly_summaries),
+            "comparison_2020": dict(forest_rf_temporal.model_comparison_2020.summary),
+            "scientific_status": "review_required",
+            "temporal_transfer_validated": False,
+            "gee_candidate_graph_diagnostic": {
+                "point_reduce_region_succeeded": True,
+                "fixed_grid_get_download_url_succeeded": False,
+                "precise_limiting_component_isolated": False,
+            },
+            "attribution_generated": False,
+            "final_assessment_generated": False,
         }
     disturbance_paths = disturbance_detection_output_paths()
     if disturbance_materialization is not None:
@@ -778,6 +962,8 @@ def run_local_vector_pipeline(
         files.update(seasonal_materialization.files)
     if baseline_materialization is not None:
         files.update(baseline_materialization.files)
+    if forest_rf_temporal is not None:
+        files.update(forest_rf_temporal.files)
     if disturbance_materialization is not None:
         files.update(disturbance_materialization.files)
     _publish_bundle(
@@ -795,10 +981,26 @@ def _inclusive_period_end_date(end_date_exclusive: date) -> date:
 
 
 def _seasonal_request_analysis_end_date(request: HlsSeasonalRequest) -> date:
-    plan = build_meteorological_south_window_plan(
+    return _meteorological_range_analysis_end_date(
         start_year=request.start_year,
         end_year=request.end_year,
-        generated_at=datetime(request.end_year + 1, 1, 1, tzinfo=UTC),
+    )
+
+
+def _observation_years_analysis_end_date(years: tuple[int, ...]) -> date:
+    if not years or years != tuple(sorted(set(years))):
+        raise ValueError("observation years debe ser único, no vacío y ordenado")
+    return _meteorological_range_analysis_end_date(
+        start_year=years[0],
+        end_year=years[-1],
+    )
+
+
+def _meteorological_range_analysis_end_date(*, start_year: int, end_year: int) -> date:
+    plan = build_meteorological_south_window_plan(
+        start_year=start_year,
+        end_year=end_year,
+        generated_at=datetime(end_year + 1, 1, 1, tzinfo=UTC),
     )
     return max(_inclusive_period_end_date(window.end_date_exclusive) for window in plan.windows)
 
@@ -1068,21 +1270,23 @@ def _gee_query_identity(
     seasonal_request: HlsSeasonalRequest | None,
     generate_forest_baseline: bool,
     generate_disturbance_detection: bool,
+    generate_rf_deltas: bool,
 ) -> str:
     forest_suffix = ":forest_baseline=2020" if generate_forest_baseline else ""
     disturbance_suffix = ":disturbance_detection=14.6" if generate_disturbance_detection else ""
+    rf_suffix = ":rf_deltas=multiyear_2020_2024_v1" if generate_rf_deltas else ""
     if seasonal_request is not None:
         return (
             f"gee:seasonal-series:{seasonal_request.start_year}:"
             f"{seasonal_request.end_year}:meteorological_south_v1"
-            f"{forest_suffix}{disturbance_suffix}"
+            f"{forest_suffix}{disturbance_suffix}{rf_suffix}"
         )
     if query is None:
-        return f"gee:not-requested{forest_suffix}{disturbance_suffix}"
+        return f"gee:not-requested{forest_suffix}{disturbance_suffix}{rf_suffix}"
     return (
         f"gee:{query.start_date.isoformat()}:{query.end_date.isoformat()}:"
         f"{query.max_scenes_per_source}:composite={generate_hls_composite}"
-        f"{forest_suffix}{disturbance_suffix}"
+        f"{forest_suffix}{disturbance_suffix}{rf_suffix}"
     )
 
 
@@ -1225,6 +1429,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rf-annual-deltas",
+        action="store_true",
+        help=(
+            "ejecuta el RF multianual candidato 2020-2024 y deltas contra 2020; "
+            "modo experimental exclusivo"
+        ),
+    )
+    parser.add_argument(
+        "--forest-model-config",
+        type=Path,
+        help="override YAML explícito del RF candidato; no modifica configs/default.yml",
+    )
+    parser.add_argument(
         "--seasonal",
         action="store_true",
         help="compatibilidad: los rangos de --full-pipeline ya son estacionales",
@@ -1279,9 +1496,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     gee_query = None
     generate_hls_composite = arguments.build_hls_composite
     generate_forest_baseline = False
+    generate_rf_deltas = False
     hls_seasonal_request = None
     generate_disturbance_detection = False
-    if arguments.full_pipeline:
+    if arguments.rf_annual_deltas:
+        if arguments.forest_model_config is None:
+            parser.error("--rf-annual-deltas requiere --forest-model-config")
+        if (
+            arguments.full_pipeline
+            or arguments.seasonal
+            or arguments.query_gee
+            or arguments.build_hls_composite
+            or arguments.hls_year is not None
+            or arguments.hls_start_year is not None
+            or arguments.hls_end_year is not None
+            or arguments.gee_start_date is not None
+            or arguments.gee_end_date is not None
+        ):
+            parser.error("--rf-annual-deltas no se combina con otros modos GEE")
+        generate_rf_deltas = True
+    elif arguments.forest_model_config is not None:
+        parser.error("--forest-model-config requiere --rf-annual-deltas")
+    elif arguments.full_pipeline:
         generate_forest_baseline = True
         range_requested = arguments.hls_start_year is not None or arguments.hls_end_year is not None
         if arguments.hls_year is None and not range_requested:
@@ -1349,6 +1585,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             input_path=vector_path,
             output_root=arguments.output_root,
             config_path=arguments.config,
+            forest_model_config_path=arguments.forest_model_config,
             source_crs=arguments.source_crs,
             establishment_id=establishment_id,
             analysis_end_date=analysis_end_date,
@@ -1361,11 +1598,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     gee_query is not None
                     or hls_seasonal_request is not None
                     or generate_forest_baseline
+                    or generate_rf_deltas
                 )
                 else None
             ),
             generate_hls_composite=generate_hls_composite,
             generate_forest_baseline=generate_forest_baseline,
+            generate_rf_deltas=generate_rf_deltas,
             hls_seasonal_request=hls_seasonal_request,
             generate_disturbance_detection=generate_disturbance_detection,
             vector_layer=arguments.layer,

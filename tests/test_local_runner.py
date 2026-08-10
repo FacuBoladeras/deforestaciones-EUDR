@@ -14,8 +14,9 @@ import pytest
 from shapely.geometry import box
 
 import deforestation_pipeline.local_runner as local_runner_module
-from deforestation_pipeline.config import SpectralIndex
+from deforestation_pipeline.config import ForestRandomForestConfig, SpectralIndex, load_config
 from deforestation_pipeline.forest_baseline import forest_baseline_output_paths
+from deforestation_pipeline.forest_rf_temporal import forest_rf_temporal_output_paths
 from deforestation_pipeline.gee import (
     CollectionMetadataResult,
     GeeMetadataQuery,
@@ -33,6 +34,7 @@ from deforestation_pipeline.hls_composite import (
 from deforestation_pipeline.hls_seasonal import HlsSeasonalRequest
 from deforestation_pipeline.local_runner import (
     _inclusive_period_end_date,
+    _observation_years_analysis_end_date,
     _seasonal_request_analysis_end_date,
     main,
     run_local_vector_pipeline,
@@ -44,6 +46,7 @@ from deforestation_pipeline.vector_ingestion import VectorIngestionError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "default.yml"
+CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
 FIXED_NOW = datetime(2026, 7, 23, 18, 30, tzinfo=UTC)
 
 
@@ -53,6 +56,9 @@ def test_seasonal_authoritative_end_uses_closed_djf_and_son_boundaries() -> None
     assert _seasonal_request_analysis_end_date(
         HlsSeasonalRequest(start_year=2020, end_year=2025)
     ) == date(2025, 11, 30)
+    assert _observation_years_analysis_end_date((2020, 2021, 2022, 2023, 2024)) == date(
+        2024, 11, 30
+    )
 
 
 def _windows_access_denied() -> PermissionError:
@@ -389,6 +395,42 @@ def test_full_pipeline_single_year_remains_backward_compatible(
     assert captured["hls_seasonal_request"] is None
     assert captured["vector_layer"] == "parcelas"
     assert captured["dissolve_all"] is True
+    assert Path(capsys.readouterr().out.strip()) == expected_directory
+
+
+def test_cli_routes_explicit_rf_candidate_mode_without_promoting_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_path = tmp_path / "territorio.geojson"
+    input_path.write_bytes(b"runner-mocked")
+    captured: dict[str, object] = {}
+    expected_directory = tmp_path / "rf-run"
+
+    def fake_run(**kwargs: object) -> Path:
+        captured.update(kwargs)
+        return expected_directory
+
+    monkeypatch.setattr(local_runner_module, "run_local_vector_pipeline", fake_run)
+
+    result = main(
+        [
+            str(input_path),
+            "--rf-annual-deltas",
+            "--forest-model-config",
+            str(CANDIDATE_FOREST_MODEL_CONFIG),
+            "--analysis-end-date",
+            "2024-12-31",
+        ]
+    )
+
+    assert result == 0
+    assert captured["generate_rf_deltas"] is True
+    assert captured["forest_model_config_path"] == CANDIDATE_FOREST_MODEL_CONFIG
+    assert captured["generate_forest_baseline"] is False
+    assert captured["generate_disturbance_detection"] is False
+    assert captured["gee_credentials_path"] == local_runner_module.DEFAULT_GEE_CREDENTIALS_PATH
     assert Path(capsys.readouterr().out.strip()) == expected_directory
 
 
@@ -961,3 +1003,113 @@ def test_local_runner_publishes_compact_forest_baseline_bundle(
     assert summary["forest_baseline"]["metadata_path"] == paths["metadata"]
     assert summary["final_assessment_generated"] is False
     assert any(dataset["dataset_id"] == "jrc_gfc2020_v3" for dataset in summary["datasets"])
+
+
+def test_local_runner_uses_same_2020_stack_for_opt_in_model_comparison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "establecimiento.geojson"
+    _write_feature(input_path)
+    credentials_path = tmp_path / "credentials.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        local_runner_module,
+        "authenticate_earth_engine",
+        lambda path: SimpleNamespace(module=object()),
+    )
+    stacks: dict[int, object] = {}
+
+    def fake_build_stack(**kwargs: object) -> object:
+        year = cast(int, kwargs["year"])
+        stack = SimpleNamespace(observation_year=year, periods=())
+        stacks[year] = stack
+        return stack
+
+    rf_calls: list[dict[str, object]] = []
+
+    def fake_build_rf(**kwargs: object) -> object:
+        rf_calls.append(dict(kwargs))
+        config = cast(ForestRandomForestConfig, kwargs["config"])
+        return SimpleNamespace(
+            forest_class=object(),
+            forest_vote_fraction=object(),
+            input_complete=object(),
+            metadata=SimpleNamespace(
+                model_dump=lambda mode: {
+                    "asset_id": config.asset_id,
+                    "observation_year": kwargs["observation_year"],
+                    "temporal_transfer_validated": False,
+                }
+            ),
+        )
+
+    paths = forest_rf_temporal_output_paths(years=(2020, 2021, 2022, 2023, 2024))
+
+    def fake_materialize(**kwargs: object) -> object:
+        grid = cast(RasterGridSpec, kwargs["grid_spec"])
+        return SimpleNamespace(
+            files={path: b"{}\n" for path in paths.values()},
+            grid_spec=grid,
+            yearly_summaries=({"year": 2020}, {"year": 2021}),
+            model_comparison_2020=SimpleNamespace(summary={"same_input_complete_mask": True}),
+        )
+
+    monkeypatch.setattr(
+        local_runner_module,
+        "build_yearly_seasonal_feature_stack",
+        fake_build_stack,
+    )
+    monkeypatch.setattr(local_runner_module, "build_forest_rf_images", fake_build_rf)
+    monkeypatch.setattr(
+        local_runner_module,
+        "materialize_forest_rf_temporal",
+        fake_materialize,
+        raising=False,
+    )
+
+    run_directory = run_local_vector_pipeline(
+        input_path=input_path,
+        output_root=tmp_path / "outputs",
+        config_path=DEFAULT_CONFIG,
+        forest_model_config_path=CANDIDATE_FOREST_MODEL_CONFIG,
+        source_crs="EPSG:4326",
+        establishment_id="rf-deltas-test",
+        analysis_end_date=date(2024, 12, 31),
+        created_at=datetime(2026, 8, 6, 18, tzinfo=UTC),
+        gee_credentials_path=credentials_path,
+        generate_rf_deltas=True,
+    )
+
+    assert tuple(stacks) == (2020, 2021, 2022, 2023, 2024)
+    candidate_2020 = next(
+        call
+        for call in rf_calls
+        if cast(ForestRandomForestConfig, call["config"]).schema_version == "1.1.0"
+        and call["observation_year"] == 2020
+    )
+    p0_2020 = next(
+        call
+        for call in rf_calls
+        if cast(ForestRandomForestConfig, call["config"]).schema_version == "1.0.0"
+    )
+    assert candidate_2020["feature_stack"] is p0_2020["feature_stack"] is stacks[2020]
+    assert all((run_directory / path).is_file() for path in paths.values())
+    summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
+    assert summary["schema_version"] == "3.4.0"
+    assert summary["analysis_end_date"] == "2024-11-30"
+    assert summary["requested_analysis_end_date"] == "2024-12-31"
+    assert summary["status"] == "review_required"
+    assert summary["stage"] == "forest_rf_deltas_2020_2024"
+    assert summary["forest_rf_deltas"]["comparison_2020"]["same_input_complete_mask"] is True
+    assert summary["forest_rf_deltas"]["temporal_transfer_validated"] is False
+    assert summary["forest_rf_deltas"]["scientific_status"] == "review_required"
+    default_model = json.loads(
+        (run_directory / "json/configuration/resolved.json").read_text(encoding="utf-8")
+    )["forest_model"]
+    resolved = json.loads(
+        (run_directory / "json/configuration/resolved.json").read_text(encoding="utf-8")
+    )
+    assert resolved["analysis"]["analysis_end_date"] == "2024-11-30"
+    assert default_model["asset_id"].endswith("/rf_forest_multiyear_2020_2024_v1")
+    assert load_config(DEFAULT_CONFIG).forest_model.asset_id.endswith("/rf_forest_2020")

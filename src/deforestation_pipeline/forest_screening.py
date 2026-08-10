@@ -131,9 +131,7 @@ def build_forest_screening_domain(
     _validate_binary_where(rf_complete_values, aoi, "rf_input_complete")
     rf_complete = aoi & np.isfinite(rf_complete_values) & (rf_complete_values == 1)
     _validate_fraction_where(rf_votes, rf_complete, "rf_vote_fraction")
-    quantized_rf_votes = (
-        np.rint(rf_votes * config.expected_tree_count) / config.expected_tree_count
-    )
+    quantized_rf_votes = np.rint(rf_votes * config.expected_tree_count) / config.expected_tree_count
 
     consensus_mask = sufficient & np.isfinite(consensus) & (consensus == 1)
     disagreement_mask = sufficient & np.isfinite(disagrees) & (disagrees == 1)

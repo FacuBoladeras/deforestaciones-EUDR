@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import Any, Literal, cast
+
+import pytest
 
 from deforestation_pipeline.config import SpectralIndex
 from deforestation_pipeline.seasonal_feature_stack import seasonal_feature_columns
@@ -86,6 +88,25 @@ def test_sampling_request_enforces_p0_budget_and_block_alignment() -> None:
     assert AOI_FILTERS == {"ADM0_NAME": "Argentina", "ADM1_NAME": "Entre Rios"}
 
 
+def test_sampling_request_accepts_only_mapbiomas_annual_label_years() -> None:
+    common: Any = {
+        "seed": 73,
+        "grid_crs": "EPSG:32720",
+        "utm_zone": 20,
+        "scale_m": 30,
+        "block_size_m": 3000,
+        "quotas": SamplingQuotas(forest=900, non_forest=700, ambiguous=400),
+        "generated_at": datetime(2026, 7, 30, 18, tzinfo=UTC),
+    }
+
+    assert TrainingSamplingRequest(year=2024, **common).year == 2024
+    assert TrainingSamplingRequest(year=2024, **common).schema_version == "1.1.0"
+    with pytest.raises(ValueError, match=r"schema_version 1\.1\.0"):
+        TrainingSamplingRequest(schema_version="1.0.0", year=2024, **common)
+    with pytest.raises(ValueError):
+        TrainingSamplingRequest(year=2025, **common)  # type: ignore[arg-type]
+
+
 def test_partition_requests_can_be_joined_into_one_2000_point_p0_plan() -> None:
     generated_at = datetime(2026, 7, 30, 18, tzinfo=UTC)
     requests = tuple(
@@ -118,6 +139,7 @@ def test_source_assets_are_explicit_and_mapbiomas_is_only_proxy_evidence() -> No
         "mapbiomas_argentina_collection2_integration_v3"
     )
     assert SOURCE_ASSETS["mapbiomas"].band_for_year(2020) == "classification_2020"
+    assert SOURCE_ASSETS["mapbiomas"].band_for_year(2024) == "classification_2024"
     assert SOURCE_ASSETS["mapbiomas"].forest_values == (3, 4, 6)
     assert SOURCE_ASSETS["mapbiomas"].masked_pixels_are_non_forest is False
     assert SOURCE_ASSETS["jrc"].asset_id == "JRC/GFC2020/V3"
@@ -126,6 +148,7 @@ def test_source_assets_are_explicit_and_mapbiomas_is_only_proxy_evidence() -> No
     assert SOURCE_ASSETS["worldcover"].masked_pixels_are_non_forest is True
     assert SOURCE_ASSETS["hansen"].asset_id.startswith("UMD/hansen/global_forest_change_")
     assert SOURCE_ASSETS["hansen"].masked_pixels_are_non_forest is True
+    assert "sample_year" in SOURCE_ASSETS["hansen"].semantics
     features = seasonal_feature_columns(year=2020, indices=tuple(SpectralIndex))
     assert all("mapbiomas" not in column for column in features)
 
@@ -425,10 +448,21 @@ def test_build_feature_stack_reuses_the_existing_seasonal_builder(
             valid_observation_count=FakeImage(("valid_observation_count",)),
             valid_observation_count_l30=FakeImage(("valid_observation_count_l30",)),
             valid_observation_count_s30=FakeImage(("valid_observation_count_s30",)),
+            metadata=SimpleNamespace(input_scene_count=12),
         )
+        period_bounds = {
+            "DJF": (date(2019, 12, 1), date(2020, 3, 1)),
+            "MAM": (date(2020, 3, 1), date(2020, 6, 1)),
+            "JJA": (date(2020, 6, 1), date(2020, 9, 1)),
+            "SON": (date(2020, 9, 1), date(2020, 12, 1)),
+        }
         items.append(
             SimpleNamespace(
-                window=SimpleNamespace(period_id=f"2020-{season}"),
+                window=SimpleNamespace(
+                    period_id=f"2020-{season}",
+                    start_date=period_bounds[season][0],
+                    end_date_exclusive=period_bounds[season][1],
+                ),
                 composite=composite,
             )
         )
@@ -463,3 +497,49 @@ def test_build_feature_stack_reuses_the_existing_seasonal_builder(
         indices=tuple(SpectralIndex),
     )
     assert result.image.bands == result.feature_columns
+
+
+def test_multiyear_feature_stack_maps_each_observation_year_to_the_p0_schema(
+    monkeypatch: Any,
+) -> None:
+    from deforestation_pipeline import training_sampling
+
+    observed_years: list[int] = []
+    source_columns = seasonal_feature_columns(year=2024, indices=tuple(SpectralIndex))
+
+    class FakeImage:
+        def __init__(self, bands: tuple[str, ...]) -> None:
+            self.bands = bands
+
+        def rename(self, bands: list[str]) -> FakeImage:
+            return FakeImage(tuple(bands))
+
+    def fake_builder(**kwargs: object) -> SimpleNamespace:
+        observed_years.append(cast(int, kwargs["year"]))
+        return SimpleNamespace(image=FakeImage(source_columns), feature_columns=source_columns)
+
+    monkeypatch.setattr(training_sampling, "build_yearly_seasonal_feature_stack", fake_builder)
+    request = TrainingSamplingRequest(
+        year=2024,
+        seed=73,
+        grid_crs="EPSG:32720",
+        utm_zone=20,
+        scale_m=30,
+        block_size_m=3000,
+        quotas=SamplingQuotas(forest=900, non_forest=700, ambiguous=400),
+        generated_at=datetime(2026, 7, 30, 18, tzinfo=UTC),
+    )
+
+    result = training_sampling.build_seasonal_feature_stack(
+        session=cast(Any, SimpleNamespace()),
+        source_plan=cast(Any, SimpleNamespace()),
+        data_config=cast(Any, SimpleNamespace(indices=tuple(SpectralIndex))),
+        aoi_wgs84=cast(Any, SimpleNamespace()),
+        grid_spec=cast(Any, SimpleNamespace()),
+        request=request,
+    )
+
+    expected = seasonal_feature_columns(year=2020, indices=tuple(SpectralIndex))
+    assert observed_years == [2024]
+    assert result.feature_columns == expected
+    assert result.image.bands == expected

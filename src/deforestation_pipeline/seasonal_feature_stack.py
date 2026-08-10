@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from shapely.geometry.base import BaseGeometry
@@ -27,9 +27,21 @@ SEASONAL_QA_COUNT_BANDS = (
 
 
 @dataclass(frozen=True, slots=True)
+class SeasonalFeaturePeriod:
+    """Soporte temporal observado de un slot estacional del stack."""
+
+    period_id: str
+    start_date: date
+    end_date_exclusive: date
+    input_scene_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class SeasonalFeatureStack:
     image: Any = field(repr=False, compare=False)
     feature_columns: tuple[str, ...]
+    observation_year: int | None = None
+    periods: tuple[SeasonalFeaturePeriod, ...] = ()
 
 
 def seasonal_feature_columns(
@@ -101,4 +113,18 @@ def build_yearly_seasonal_feature_stack(
     if stack is None:
         raise ValueError("no se construyeron composites estacionales")
     columns = seasonal_feature_columns(year=year, indices=data_config.indices)
-    return SeasonalFeatureStack(image=stack, feature_columns=columns)
+    periods = tuple(
+        SeasonalFeaturePeriod(
+            period_id=item.window.period_id,
+            start_date=item.window.start_date,
+            end_date_exclusive=item.window.end_date_exclusive,
+            input_scene_count=item.composite.metadata.input_scene_count,
+        )
+        for item in seasonal.items
+    )
+    return SeasonalFeatureStack(
+        image=stack,
+        feature_columns=columns,
+        observation_year=year,
+        periods=periods,
+    )

@@ -20,6 +20,9 @@ from deforestation_pipeline.schemas import EUDR_CUTOFF_DATE, LicenseRegistry
 
 AtLeastSix = Annotated[int, Field(ge=6)]
 PositiveHectares = Annotated[float, Field(gt=0)]
+FOREST_RF_PREDICTOR_COLUMNS_SHA256 = (
+    "35b5b2ba36bfccb07e798a27e354fb9fae0ba0819975986975b5c20c5fdd6d0f"
+)
 
 
 class ConfigurationError(ValueError):
@@ -230,9 +233,9 @@ class OutputConfig(StrictConfigModel):
 
 
 class ForestRandomForestConfig(StrictConfigModel):
-    """Contrato versionado del RF P0 usado sólo como evidencia forestal 2020."""
+    """Contrato del RF P0 o del candidato multianual, siempre limitado a Entre Ríos."""
 
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.0.0", "1.1.0"]
     asset_id: str = Field(min_length=1)
     asset_type: Literal["geemap_tree_feature_collection"]
     tree_property: Literal["tree"]
@@ -247,6 +250,32 @@ class ForestRandomForestConfig(StrictConfigModel):
     independent_evidence: Literal[False]
     temporal_transfer_validated: Literal[False]
     calibrated_probability: Literal[False]
+    predictor_slot_year: Literal[2020] = 2020
+    model_training_scope: Literal[
+        "p0_2020",
+        "multiyear_2020_2024_candidate",
+    ] = "p0_2020"
+    supported_observation_years: tuple[int, ...] = (2020,)
+    predictor_columns_sha256: str = Field(
+        default=FOREST_RF_PREDICTOR_COLUMNS_SHA256,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    serialized_trees_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    serialized_tree_multiset_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
+    joblib_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    model_registry_path: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    model_registry_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
+    inference_backend: Literal[
+        "gee_decision_tree_ensemble",
+        "local_sklearn_joblib",
+    ] = "gee_decision_tree_ensemble"
+    local_joblib_path: str | None = None
+    comparison_asset_id: str | None = None
+    comparison_expected_tree_count: Literal[500] = 500
 
     @field_validator("asset_id")
     @classmethod
@@ -254,6 +283,63 @@ class ForestRandomForestConfig(StrictConfigModel):
         if not value.startswith("projects/") or "/assets/" not in value:
             raise ValueError("asset_id debe identificar un asset de proyecto GEE")
         return value
+
+    @field_validator("comparison_asset_id")
+    @classmethod
+    def comparison_asset_is_optional_project_asset(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("projects/") or "/assets/" not in value):
+            raise ValueError("comparison_asset_id debe identificar un asset de proyecto GEE")
+        return value
+
+    @model_validator(mode="after")
+    def model_scope_is_consistent(self) -> ForestRandomForestConfig:
+        years = self.supported_observation_years
+        if not years or years != tuple(sorted(set(years))):
+            raise ValueError("supported_observation_years debe ser único y ordenado")
+        if self.reference_year not in years:
+            raise ValueError("reference_year debe estar incluido en supported_observation_years")
+        if self.predictor_columns_sha256 != FOREST_RF_PREDICTOR_COLUMNS_SHA256:
+            raise ValueError("predictor_columns_sha256 no coincide con los 56 slots canónicos")
+        if self.schema_version == "1.0.0":
+            if years != (2020,) or self.model_training_scope != "p0_2020":
+                raise ValueError("forest_model 1.0.0 sólo admite el RF P0 2020")
+            if self.comparison_asset_id is not None:
+                raise ValueError("forest_model 1.0.0 no admite comparison_asset_id")
+            if self.inference_backend != "gee_decision_tree_ensemble" or self.local_joblib_path:
+                raise ValueError("forest_model 1.0.0 sólo admite inferencia GEE")
+            if any(
+                value is not None
+                for value in (
+                    self.serialized_tree_multiset_sha256,
+                    self.model_registry_path,
+                    self.model_registry_sha256,
+                )
+            ):
+                raise ValueError("forest_model 1.0.0 no admite model registry multianual")
+        else:
+            if self.model_training_scope != "multiyear_2020_2024_candidate" or years != (
+                2020,
+                2021,
+                2022,
+                2023,
+                2024,
+            ):
+                raise ValueError("forest_model 1.1.0 requiere el candidato multianual 2020-2024")
+            if self.comparison_asset_id is None:
+                raise ValueError("forest_model 1.1.0 requiere comparison_asset_id P0")
+            if self.inference_backend != "local_sklearn_joblib" or not self.local_joblib_path:
+                raise ValueError("forest_model 1.1.0 requiere joblib local explícito")
+            if not all(
+                (
+                    self.serialized_trees_sha256,
+                    self.serialized_tree_multiset_sha256,
+                    self.joblib_sha256,
+                    self.model_registry_path,
+                    self.model_registry_sha256,
+                )
+            ):
+                raise ValueError("forest_model 1.1.0 requiere release registry y hashes completos")
+        return self
 
 
 class PipelineConfig(StrictConfigModel):
@@ -341,6 +427,11 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
 def load_config(path: Path) -> PipelineConfig:
     """Carga y valida una configuración del pipeline."""
     return PipelineConfig.model_validate(_load_yaml_mapping(path))
+
+
+def load_forest_model_config(path: Path) -> ForestRandomForestConfig:
+    """Carga un override versionado que contiene sólo el contrato del modelo RF."""
+    return ForestRandomForestConfig.model_validate(_load_yaml_mapping(path))
 
 
 def load_license_registry(path: Path) -> LicenseRegistry:

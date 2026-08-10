@@ -1,4 +1,4 @@
- """Materialización reproducible del paquete ciego de validación RF 2020."""
+"""Materialización reproducible del paquete ciego de validación RF 2020."""
 
 from __future__ import annotations
 

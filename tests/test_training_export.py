@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -47,9 +48,14 @@ class FakeTableExport:
         return self.task
 
 
-def _sampling_request() -> TrainingSamplingRequest:
+def _sampling_request(
+    *,
+    year: Literal[2020, 2021, 2022, 2023, 2024] = 2020,
+    schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
+) -> TrainingSamplingRequest:
     return TrainingSamplingRequest(
-        year=2020,
+        schema_version=schema_version,
+        year=year,
         seed=73,
         grid_crs="EPSG:32720",
         utm_zone=20,
@@ -74,6 +80,7 @@ def test_manifest_separates_features_label_and_metadata() -> None:
     assert payload["label_column"] == LABEL_COLUMN
     assert payload["metadata_columns"] == list(METADATA_COLUMNS)
     assert payload["year"] == 2020
+    assert payload["schema_version"] == "1.0.0"
     assert payload["quotas"] == {
         "forest": 900,
         "non_forest": 700,
@@ -84,6 +91,28 @@ def test_manifest_separates_features_label_and_metadata() -> None:
     assert payload["aoi"]["asset_id"] == "FAO/GAUL/2015/level1"
     assert "mapbiomas" in payload["source_assets"]
     assert not set(features) & set(payload["metadata_columns"])
+
+
+def test_manifest_uses_the_same_predictor_schema_for_a_2024_observation() -> None:
+    request = _sampling_request(year=2024, schema_version="1.1.0")
+    features = seasonal_feature_columns(year=2020, indices=tuple(SpectralIndex))
+
+    manifest = TrainingExportManifest.from_sampling_request(
+        request=request,
+        feature_columns=features,
+    )
+
+    assert manifest.year == 2024
+    assert manifest.schema_version == "1.1.0"
+    assert manifest.feature_columns == features
+    assert manifest.source_assets["mapbiomas"].band == "classification_2024"
+    assert manifest.source_assets["jrc"].band == "Map"
+    assert "sample_year" in manifest.source_assets["hansen"].semantics
+
+    legacy_payload = manifest.model_dump()
+    legacy_payload["schema_version"] = "1.0.0"
+    with pytest.raises(ValidationError, match=r"schema_version 1\.1\.0"):
+        TrainingExportManifest.model_validate(legacy_payload)
 
 
 def test_drive_export_starts_only_through_explicit_function_with_selectors() -> None:

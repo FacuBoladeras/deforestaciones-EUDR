@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/post-change-attribution-v1.0.0.json",
+  "title": "Post-change attribution v1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "analysis_id",
+    "establishment_id",
+    "created_at",
+    "status",
+    "automatic_final_assessment_generated",
+    "conversion_confirmed_count",
+    "conversion_likely_count",
+    "counts_by_post_change_use",
+    "events"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "analysis_id": {"type": "string", "format": "uuid"},
+    "establishment_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "status": {"const": "review_required"},
+    "automatic_final_assessment_generated": {"const": false},
+    "conversion_confirmed_count": {"const": 0},
+    "conversion_likely_count": {"type": "integer", "minimum": 0},
+    "counts_by_post_change_use": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "event_id",
+          "post_change_use",
+          "automatic_status",
+          "conversion_confirmed",
+          "human_review_required",
+          "gates",
+          "reason_codes",
+          "trajectory",
+          "context",
+          "quality_flags"
+        ],
+        "properties": {
+          "schema_version": {"const": "1.0.0"},
+          "event_id": {"type": "string", "minLength": 1},
+          "post_change_use": {
+            "enum": [
+              "agriculture_likely",
+              "forest_recovery",
+              "managed_harvest",
+              "temporary_disturbance",
+              "unknown"
+            ]
+          },
+          "automatic_status": {"enum": ["review_required", "conversion_likely"]},
+          "conversion_confirmed": {"const": false},
+          "human_review_required": {"const": true},
+          "gates": {"type": "object"},
+          "reason_codes": {"type": "array", "items": {"type": "string"}},
+          "trajectory": {"type": "object"},
+          "context": {"type": "object"},
+          "agricultural_use_evidence": {"type": ["object", "null"]},
+          "area_ha": {"type": ["number", "null"]},
+          "area_threshold_met": {"type": ["boolean", "null"]},
+          "estimated_onset_period_id": {"type": ["string", "null"]},
+          "confidence": {"type": ["number", "null"]},
+          "confidence_semantics": {"const": "not_calibrated_in_v0"},
+          "quality_flags": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}
