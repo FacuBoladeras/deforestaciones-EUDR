@@ -264,12 +264,76 @@ class ReferenceLabelCatalogSource(StrictCatalogModel):
         return self.rule.forest_values
 
 
+class AgriculturalClassRule(StrictCatalogModel):
+    """Mapeo conservador de una clase temática hacia el dominio agrícola."""
+
+    output_land_use: Literal["crop", "other"]
+    source_probability_band: Literal["crops", "built"]
+    source_label_value: Literal[4, 6]
+    automatic_gate_eligible: bool
+    interpretation: NonEmptyString
+
+    @model_validator(mode="after")
+    def eligibility_matches_land_use(self) -> AgriculturalClassRule:
+        if self.automatic_gate_eligible != (self.output_land_use == "crop"):
+            raise ValueError("sólo crop puede ser elegible automáticamente en Dynamic World")
+        return self
+
+
+class AgriculturalCatalogSource(StrictCatalogModel):
+    """Fuente temporal registrada para evidencia agrícola posterior al evento."""
+
+    source_id: Literal["dynamic_world_v1"]
+    family: Literal["AGRICULTURAL_EVIDENCE"]
+    product: Literal["DYNAMIC_WORLD_V1"]
+    provider: Literal["Google / World Resources Institute"]
+    collection_id: Literal["GOOGLE/DYNAMICWORLD/V1"]
+    version: Literal["1"]
+    asset_type: Literal["image_collection"]
+    spatial_resolution_m: Literal[10]
+    availability_start: date
+    availability_end: None
+    access_status: Literal[SourceAccessStatus.METADATA_ACCESS_VERIFIED]
+    catalog_checked_at: date
+    doi_url: HttpsUrl
+    catalog_url: HttpsUrl
+    documentation_url: HttpsUrl
+    data_terms_summary: NonEmptyString
+    license: Literal["CC-BY-4.0"]
+    attribution: NonEmptyString
+    platform_terms_separate: Literal[True]
+    evidence_role: Literal["candidate_independent"]
+    sensor_family: Literal["sentinel2"]
+    upstream_dataset_ids: tuple[Literal["copernicus_s2_l1c"], ...]
+    temporal_granularity: Literal["source_scene"]
+    grid_conversion: Literal["nearest_equal_area_10m_fractional_event_footprint"]
+    class_rules: Annotated[tuple[AgriculturalClassRule, ...], Field(min_length=2)]
+    limitations: Annotated[tuple[NonEmptyString, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def class_rules_are_exact(self) -> AgriculturalCatalogSource:
+        if self.availability_start != date(2015, 6, 27):
+            raise ValueError("Dynamic World V1 debe comenzar el 2015-06-27")
+        keys = tuple(
+            (rule.source_probability_band, rule.source_label_value) for rule in self.class_rules
+        )
+        if keys != (("crops", 4), ("built", 6)):
+            raise ValueError("Dynamic World debe documentar crops=4 y built=6 en ese orden")
+        return self
+
+
 class SourceCatalog(StrictCatalogModel):
     """Catálogo versionado de fuentes candidatas todavía no utilizadas."""
 
-    schema_version: Literal["2.0.0"]
+    schema_version: Literal["2.1.0"]
     sources: Annotated[
-        tuple[CatalogSource | ForestCatalogSource | ReferenceLabelCatalogSource, ...],
+        tuple[
+            CatalogSource
+            | ForestCatalogSource
+            | ReferenceLabelCatalogSource
+            | AgriculturalCatalogSource,
+            ...,
+        ],
         Field(min_length=1),
     ]
 
@@ -307,6 +371,15 @@ class ForestBaselineSourcePlan(StrictCatalogModel):
     core_sources: Annotated[tuple[ForestCatalogSource, ...], Field(min_length=2)]
     supporting_sources: tuple[ForestCatalogSource, ...]
     deferred_source_ids: tuple[NonEmptyString, ...]
+    remote_data_accessed: Literal[False] = False
+
+
+class AgriculturalEvidenceSourcePlan(StrictCatalogModel):
+    """Selección mínima: una candidata temporal y corroboración no independiente."""
+
+    target_resolution_m: Literal[10]
+    candidate_source: AgriculturalCatalogSource
+    corroborative_sources: Annotated[tuple[ReferenceLabelCatalogSource, ...], Field(min_length=1)]
     remote_data_accessed: Literal[False] = False
 
 
@@ -404,4 +477,28 @@ def build_forest_baseline_source_plan(
         core_sources=core_sources,
         supporting_sources=supporting_sources,
         deferred_source_ids=("mapbiomas_chaco_deferred",),
+    )
+
+
+def build_agricultural_evidence_source_plan(
+    catalog: SourceCatalog,
+) -> AgriculturalEvidenceSourcePlan:
+    """Selecciona el slice agrícola sin consultar colecciones remotas."""
+    candidates = tuple(
+        source for source in catalog.sources if isinstance(source, AgriculturalCatalogSource)
+    )
+    corroborative = tuple(
+        source for source in catalog.sources if isinstance(source, ReferenceLabelCatalogSource)
+    )
+    violations: list[str] = []
+    if len(candidates) != 1:
+        violations.append("se requiere exactamente una fuente agrícola candidata")
+    if not corroborative:
+        violations.append("se requiere al menos una fuente corroborativa no independiente")
+    if violations:
+        raise CatalogCompatibilityError(violations)
+    return AgriculturalEvidenceSourcePlan(
+        target_resolution_m=10,
+        candidate_source=candidates[0],
+        corroborative_sources=corroborative,
     )

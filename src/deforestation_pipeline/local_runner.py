@@ -93,6 +93,7 @@ from deforestation_pipeline.forest_screening import build_screening_temporal_dom
 from deforestation_pipeline.gee import (
     GeeMetadataQuery,
     GeeMetadataQueryResult,
+    GeeSession,
     authenticate_earth_engine,
     query_hls_scene_metadata,
 )
@@ -152,6 +153,7 @@ def run_local_vector_pipeline(
     catalog_path: Path = DEFAULT_CATALOG_PATH,
     gee_query: GeeMetadataQuery | None = None,
     gee_credentials_path: Path | None = None,
+    gee_session: GeeSession | None = None,
     generate_hls_composite: bool = False,
     generate_forest_baseline: bool = False,
     generate_rf_deltas: bool = False,
@@ -268,14 +270,17 @@ def run_local_vector_pipeline(
         gee_query is not None or temporal_request or generate_forest_baseline or generate_rf_deltas
     )
     if remote_requested:
-        if gee_credentials_path is None:
+        if gee_session is not None:
+            active_gee_session = gee_session
+        elif gee_credentials_path is None:
             raise LocalVectorInputError(
                 "gee_credentials_path es obligatorio cuando se solicita GEE"
             )
-        gee_session = authenticate_earth_engine(gee_credentials_path)
+        else:
+            active_gee_session = authenticate_earth_engine(gee_credentials_path)
     if gee_query is not None:
         gee_result = query_hls_scene_metadata(
-            session=gee_session,
+            session=active_gee_session,
             plan=source_plan,
             aoi_wgs84=validated.analysis_geometry,
             query=gee_query,
@@ -293,7 +298,7 @@ def run_local_vector_pipeline(
                 scale_m=resolved_config.data.target_resolution_m,
             )
             composite_product = build_hls_annual_composite(
-                session=gee_session,
+                session=active_gee_session,
                 plan=source_plan,
                 data_config=resolved_config.data,
                 aoi_wgs84=validated.analysis_geometry,
@@ -324,7 +329,7 @@ def run_local_vector_pipeline(
             nodata=resolved_config.output.raster_nodata,
         )
         seasonal_materialization = materialize_hls_seasonal_series(
-            session=gee_session,
+            session=active_gee_session,
             source_plan=source_plan,
             data_config=resolved_config.data,
             output_config=resolved_config.output,
@@ -347,7 +352,7 @@ def run_local_vector_pipeline(
         candidate_config = resolved_config.forest_model
         yearly_feature_stacks = {
             year: build_yearly_seasonal_feature_stack(
-                session=gee_session,
+                session=active_gee_session,
                 source_plan=source_plan,
                 data_config=resolved_config.data,
                 aoi_wgs84=validated.analysis_geometry,
@@ -359,7 +364,7 @@ def run_local_vector_pipeline(
         }
         yearly_rf_images = {
             year: build_forest_rf_images(
-                module=gee_session.module,
+                module=active_gee_session.module,
                 config=candidate_config,
                 feature_stack=yearly_feature_stacks[year],
                 observation_year=year,
@@ -387,7 +392,7 @@ def run_local_vector_pipeline(
         )
         p0_config = ForestRandomForestConfig.model_validate(p0_payload)
         p0_images = build_forest_rf_images(
-            module=gee_session.module,
+            module=active_gee_session.module,
             config=p0_config,
             feature_stack=yearly_feature_stacks[2020],
             observation_year=2020,
@@ -416,7 +421,7 @@ def run_local_vector_pipeline(
                 nodata=resolved_config.output.raster_nodata,
             )
         baseline_feature_product = build_forest_baseline_features(
-            session=gee_session,
+            session=active_gee_session,
             hls_plan=source_plan,
             data_config=resolved_config.data,
             baseline_config=resolved_config.forest_baseline,
@@ -425,7 +430,7 @@ def run_local_vector_pipeline(
             generated_at=run_created_at,
         )
         baseline_images = build_forest_baseline_images(
-            session=gee_session,
+            session=active_gee_session,
             source_plan=forest_source_plan,
             baseline_config=resolved_config.forest_baseline,
             feature_product=baseline_feature_product,
@@ -433,7 +438,7 @@ def run_local_vector_pipeline(
             generated_at=run_created_at,
         )
         rf_feature_stack = build_yearly_seasonal_feature_stack(
-            session=gee_session,
+            session=active_gee_session,
             source_plan=source_plan,
             data_config=resolved_config.data,
             aoi_wgs84=validated.analysis_geometry,
@@ -442,7 +447,7 @@ def run_local_vector_pipeline(
             generated_at=run_created_at,
         )
         forest_rf_images = build_forest_rf_images(
-            module=gee_session.module,
+            module=active_gee_session.module,
             config=resolved_config.forest_model,
             feature_stack=rf_feature_stack,
             aoi_wgs84=validated.analysis_geometry,
@@ -477,7 +482,7 @@ def run_local_vector_pipeline(
             )
             if support_end_year >= support_start_year:
                 support_materialization = materialize_hls_seasonal_series(
-                    session=gee_session,
+                    session=active_gee_session,
                     source_plan=source_plan,
                     data_config=resolved_config.data,
                     output_config=resolved_config.output,
@@ -512,7 +517,7 @@ def run_local_vector_pipeline(
             )
             try:
                 ccdc_remote = build_ccdc_remote_benchmark(
-                    session=gee_session,
+                    session=active_gee_session,
                     plan=source_plan,
                     data_config=resolved_config.data,
                     aoi_wgs84=validated.analysis_geometry,
@@ -520,7 +525,7 @@ def run_local_vector_pipeline(
                     config=resolved_config.disturbance_detection,
                 )
                 ccdc_scalar_image = build_ccdc_scalar_summary_image(
-                    session=gee_session,
+                    session=active_gee_session,
                     remote=ccdc_remote,
                 )
                 ccdc_scalar = materialize_ee_image_to_grid(

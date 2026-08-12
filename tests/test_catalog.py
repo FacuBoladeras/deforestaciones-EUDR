@@ -9,11 +9,13 @@ import pytest
 import yaml
 
 from deforestation_pipeline.catalog import (
+    AgriculturalCatalogSource,
     BandRole,
     CatalogCompatibilityError,
     ReferenceLabelCatalogSource,
     SourceAccessStatus,
     SourceCatalog,
+    build_agricultural_evidence_source_plan,
     build_benchmark_source_plan,
     load_source_catalog,
 )
@@ -28,7 +30,7 @@ def test_hls_v2_catalog_records_both_constituent_products() -> None:
     catalog = load_source_catalog(CATALOG_PATH)
     hls_sources = tuple(source for source in catalog.sources if source.family == "HLS")
 
-    assert catalog.schema_version == "2.0.0"
+    assert catalog.schema_version == "2.1.0"
     assert tuple(source.product for source in hls_sources) == ("HLSL30", "HLSS30")
     assert tuple(source.collection_id for source in hls_sources) == (
         "NASA/HLS/HLSL30/v002",
@@ -52,6 +54,35 @@ def test_mapbiomas_reference_label_is_parsed_without_entering_baseline_consensus
     assert source.p0_reference_band == "classification_2020"
     assert source.forest_values == (3, 4, 6)
     assert source.eligible_for_core_consensus is False
+
+
+def test_dynamic_world_is_cataloged_as_temporal_crop_candidate_with_conservative_classes() -> None:
+    catalog = load_source_catalog(CATALOG_PATH)
+    source = next(
+        source for source in catalog.sources if isinstance(source, AgriculturalCatalogSource)
+    )
+
+    assert source.source_id == "dynamic_world_v1"
+    assert source.collection_id == "GOOGLE/DYNAMICWORLD/V1"
+    assert source.spatial_resolution_m == 10
+    assert source.availability_start == date(2015, 6, 27)
+    assert source.availability_end is None
+    assert source.license == "CC-BY-4.0"
+    by_land_use = {rule.output_land_use: rule for rule in source.class_rules}
+    assert by_land_use["crop"].source_probability_band == "crops"
+    assert by_land_use["crop"].source_label_value == 4
+    assert by_land_use["crop"].automatic_gate_eligible is True
+    assert by_land_use["other"].automatic_gate_eligible is False
+    assert source.sensor_family == "sentinel2"
+
+
+def test_agricultural_source_plan_preserves_candidate_and_corroboration_roles() -> None:
+    plan = build_agricultural_evidence_source_plan(load_source_catalog(CATALOG_PATH))
+
+    assert plan.candidate_source.source_id == "dynamic_world_v1"
+    assert plan.corroborative_sources[0].source_id == "mapbiomas_argentina_collection2"
+    assert plan.target_resolution_m == 10
+    assert plan.remote_data_accessed is False
 
 
 def test_hls_common_band_roles_are_mapped_per_product() -> None:

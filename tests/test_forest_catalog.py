@@ -24,7 +24,7 @@ def test_catalog_declares_verified_forest_sources_and_roles() -> None:
     catalog = load_source_catalog(CATALOG_PATH)
     plan = build_forest_baseline_source_plan(catalog, load_config(CONFIG_PATH))
 
-    assert catalog.schema_version == "2.0.0"
+    assert catalog.schema_version == "2.1.0"
     assert tuple(source.source_id for source in plan.core_sources) == (
         "jrc_gfc2020_v3",
         "esa_worldcover_2020_v100",

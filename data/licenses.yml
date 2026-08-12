@@ -113,3 +113,23 @@ datasets:
         recommend use at 1:50,000.
       - >-
         Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "dynamic_world_v1"
+    provider: "Google / World Resources Institute"
+    collection: "GOOGLE/DYNAMICWORLD/V1"
+    version: "1"
+    license: "CC-BY-4.0"
+    access_date: 2026-08-11
+    attribution: >-
+      This dataset is produced for the Dynamic World Project by Google in
+      partnership with National Geographic Society and the World Resources Institute.
+      Contains modified Copernicus Sentinel data.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        The Copernicus Sentinel Data Legal Notice applies to the Sentinel-derived input.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+      - >-
+        Dynamic World classes are model outputs and do not independently establish
+        legal EUDR compliance or the purpose of built infrastructure.

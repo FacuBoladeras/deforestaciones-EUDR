@@ -313,7 +313,7 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
     grid = _grid()
     pipeline_config = load_config(PROJECT_ROOT / "configs/default.yml")
     candidate_config = load_forest_model_config(
-        PROJECT_ROOT / "configs/rf-multiyear-candidate-costa-uru.yml"
+        PROJECT_ROOT / "configs/rf-forest-entrerios-2020-2024.yml"
     )
 
     class FakeImage:

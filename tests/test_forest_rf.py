@@ -182,9 +182,7 @@ def _feature_stack(year: int = 2020) -> SeasonalFeatureStack:
 
 
 def _multiyear_config() -> ForestRandomForestConfig:
-    return load_forest_model_config(
-        PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
-    )
+    return load_forest_model_config(PROJECT_ROOT / "configs" / "rf-forest-entrerios-2020-2024.yml")
 
 
 def test_rf_contract_has_exactly_56_predictors_in_deterministic_order() -> None:

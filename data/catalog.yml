@@ -1,4 +1,4 @@
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 
 sources:
   - source_id: "hls_l30_v2"
@@ -228,3 +228,64 @@ sources:
       - >-
         The producer recommends use at scales up to 1:100,000 and does not
         recommend use at 1:50,000.
+
+  - source_id: "dynamic_world_v1"
+    family: "AGRICULTURAL_EVIDENCE"
+    product: "DYNAMIC_WORLD_V1"
+    provider: "Google / World Resources Institute"
+    collection_id: "GOOGLE/DYNAMICWORLD/V1"
+    version: "1"
+    asset_type: "image_collection"
+    spatial_resolution_m: 10
+    availability_start: 2015-06-27
+    availability_end: null
+    access_status: "metadata_access_verified"
+    catalog_checked_at: 2026-08-11
+    doi_url: "https://doi.org/10.1038/s41597-022-01307-4"
+    catalog_url: >-
+      https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1
+    documentation_url: >-
+      https://developers.google.com/earth-engine/tutorials/community/introduction-to-dynamic-world-pt-1
+    data_terms_summary: >-
+      Dynamic World V1 is a 10 m near-real-time land-cover image collection
+      produced from Sentinel-2 L1C scenes and distributed under CC-BY-4.0.
+    license: "CC-BY-4.0"
+    attribution: >-
+      This dataset is produced for the Dynamic World Project by Google in
+      partnership with National Geographic Society and the World Resources Institute.
+      Contains modified Copernicus Sentinel data.
+    platform_terms_separate: true
+    evidence_role: "candidate_independent"
+    sensor_family: "sentinel2"
+    upstream_dataset_ids: ["copernicus_s2_l1c"]
+    temporal_granularity: "source_scene"
+    grid_conversion: "nearest_equal_area_10m_fractional_event_footprint"
+    class_rules:
+      - output_land_use: "crop"
+        source_probability_band: "crops"
+        source_label_value: 4
+        automatic_gate_eligible: true
+        interpretation: >-
+          Crop is eligible only when label=4 and the crops score exceeds the
+          versioned threshold over repeated valid observations.
+      - output_land_use: "other"
+        source_probability_band: "built"
+        source_label_value: 6
+        automatic_gate_eligible: false
+        interpretation: >-
+          Built is generic infrastructure context and cannot by itself prove
+          livestock infrastructure.
+    limitations:
+      - >-
+        Dynamic World predictions are per Sentinel-2 scene; a single crop label
+        does not demonstrate persistent post-change agricultural use.
+      - >-
+        The grass class includes natural and managed grassland and is not accepted
+        automatically as pasture evidence.
+      - >-
+        Built cover does not identify the purpose of infrastructure and remains
+        review-only unless supported by independent contextual evidence.
+      - >-
+        Crop top-1 scores may be comparatively low because crop identity depends
+        partly on temporal context; thresholds and valid-observation support must
+        remain explicit.

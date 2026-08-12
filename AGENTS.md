@@ -34,6 +34,91 @@ El MVP termina en la generación de evidencia geoespacial por establecimiento.
 No incluye todavía la gestión completa de trazabilidad animal ni la
 presentación de declaraciones en sistemas de la Unión Europea.
 
+### 2.1 Checkpoint auditado del MVP — 10 de agosto de 2026
+
+Este checkpoint resulta de contrastar el código, configuraciones, tests, runs
+locales y las páginas metodológicas 8–10 y 13–14 del Protocolo VISEC. Debe
+usarse como contexto de partida antes de proponer nuevos incrementos.
+
+| Capacidad | Estado verificado | Alcance y brecha principal |
+| --- | --- | --- |
+| Ingesta territorial | Parcial alto | Valida geometrías y CRS, pero el análisis ambiental operativo requiere `Polygon` o `MultiPolygon`; un punto no permite medir eventos. |
+| Área y grilla | Completo | Repara geometría, selecciona CRS métrico y calcula superficie; supera el conteo fijo de píxeles. |
+| HLS S30/L30 v002 y Fmask | Completo | Es el benchmark óptico VISEC a 30 m y conserva QA por píxel. |
+| Índices VISEC | Completo | NDVI, EVI2, NMDI, LSWI, NIRv y kNDVI están implementados; NBR y NDMI son variables adicionales declaradas. |
+| Espacios temporales VISEC | Parcial | Hay DJF, MAM, JJA y SON. No existe todavía el espacio mensual ni el período julio–junio del protocolo. |
+| Hampel | Parcial, no equivalente | Opera sobre medianas estacionales ya agregadas y sólo como diagnóstico. VISEC lo aplica antes de agregar escenas. No afirmar réplica metodológica. |
+| Clasificación forestal | Parcial | Existe un RF bosque/no bosque multianual proxy. No existen el GTB ni las tres clasificaciones VISEC con convergencia dos de tres. |
+| Línea base 2020 | Parcial sólido | Integra JRC, ESA, Hansen y RF con desacuerdo explícito. MapBiomas intervino en pseudolabels y no debe presentarse como validación independiente del RF. |
+| Detección robusta poscorte | Implementado | Calcula anomalías, persistencia y soporte; falta validación temática independiente suficiente. |
+| CCDC | Implementado como benchmark | Conserva `changeProb` en su escala y no lo llama probabilidad de deforestación. |
+| Convergencia de detectores | Implementado, diferente de VISEC | Converge detector robusto y CCDC preservando desacuerdo; esto no sustituye el ensamble RF/GTB de VISEC. |
+| Eventos y 0,5 ha | Completo | Segmenta con ocho vecinos, calcula área métrica y conserva también eventos menores al umbral. |
+| Evidencia materializada | Parcial alto | Produce TIFF, PNG, CSV, JSON y GeoJSON con manifests y hashes. Todavía no genera informe PDF ni API. |
+| Reproducibilidad | Alta con dependencia externa explícita | El release RF registra hashes y verifica joblib/modelo. `outputs/models/rf_forest_multiyear_2020_2024_v1/` es hoy dependencia de inferencia local; los CSV de entrenamiento deben restaurarse externamente o regenerarse. |
+| Validación independiente | Insuficiente | La adjudicación anterior sólo logró 56 % de casos adjudicables y no validó adecuadamente bosque abierto. |
+| Atribución post-cambio | Inicial | La v0 separa recuperación, cosecha, perturbación temporal, agricultura probable y desconocido, pero todavía no recolecta evidencia agrícola espacial y temporal por sí misma. |
+| Certificación o confirmación legal | Ausente por diseño | Ningún resultado automático puede emitir `conversion_confirmed`, habilitación ni certificación EUDR. |
+
+### 2.2 Estado operativo comprobado
+
+- El detector completo corrió sobre el caso Viale y generó 481 artefactos,
+  cuatro eventos persistentes, dos mayores a 0,5 ha y 17,28 ha candidatas.
+  La evidencia permanece en
+  `outputs/runs/viale-completo__20260810T205334422162Z__86de3ecd.failed/`.
+- El envelope superior quedó `partial`: Hampel falló con
+  `hampel_insufficient_strict_stable_controls` antes de RF y atribución. Aunque
+  está configurado como diagnóstico no activado, actualmente es bloqueante en
+  `complete_analysis.py`. Esto debe corregirse antes de considerar estable el
+  run único.
+- El atribuidor v0 sí fue ejecutado de forma independiente sobre costa-uru:
+  37 eventos, seis compatibles con `managed_harvest`, 31 `unknown`, cero
+  `conversion_likely` y cero `conversion_confirmed`. El caso es una plantación
+  forestal y funciona como control de cosecha/recuperación, no como positivo de
+  conversión agrícola. El bundle canónico está en
+  `outputs/local_tests/costa-uru-attribution-v0__20260810T213849356631Z__dbf211dc/`.
+- La CLI de cuatro componentes existe en `scripts/run_complete_analysis.py`,
+  pero aún no existe una ejecución real exitosa de punta a punta posterior a la
+  integración del atribuidor.
+- La cobertura RF soportada sigue cerrada en 2020–2024. No extender a 2025 o
+  2026 sin predictores compatibles y validación explícita.
+
+### 2.3 Brecha prioritaria y regla de avance
+
+El bloqueo científico principal ya no es generar otra señal de pérdida. Es
+demostrar **uso agrícola o ganadero posterior** con evidencia independiente,
+espacial, temporal y reproducible. El siguiente incremento debe:
+
+1. versionar un contrato de evidencia agrícola con fuente, dataset, versión,
+   licencia, fecha de acceso, geometría, resolución, ventana temporal, calidad
+   y hash;
+2. derivar independencia mediante una política de fuentes, no aceptar un
+   booleano arbitrario del llamador;
+3. medir por evento cobertura atribuida y persistencia postcambio;
+4. integrar la evidencia al orquestador único y conservar `unknown` o
+   `review_required` cuando sea insuficiente;
+5. calcular `likely_conversion_area_ha` sólo sobre la fracción simultáneamente
+   forestal al corte, perdida, persistente y atribuida a uso agrícola.
+
+MapBiomas no puede actuar como evidencia independiente del mismo RF si participó
+en sus pseudolabels. Una clase de una sola fecha tampoco demuestra persistencia.
+Antes de sumar GTB, mensualidad u otros detectores, completar este gate de
+atribución para el MVP acotado.
+
+### 2.4 Política de limpieza derivada de la auditoría
+
+- Los 47 archivos de tests, 520 casos ejecutados y cobertura total de 90,48 %
+  protegen módulos activos. No borrarlos en bloque ni por ahorro de espacio:
+  pesan aproximadamente 0,56 MiB.
+- Conservar `outputs/models/rf_forest_multiyear_2020_2024_v1/`; no es un run
+  descartable mientras el preflight local dependa del joblib.
+- Conservar runs científicos canónicos o útiles para validación. Al estar
+  ignorados por Git, no pueden recuperarse con `rollback`.
+- Sólo eliminar código, tests, configs o schemas después de comprobar ausencia
+  de imports, referencias runtime, uso documental y valor de auditoría.
+- Caches, `__pycache__` y extracciones temporales del PDF son regenerables y
+  deben mantenerse fuera del expediente.
+
 ## 3. Alcance autorizado
 
 ### 3.1 Incluido

@@ -14,8 +14,31 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from deforestation_pipeline.agricultural_collector import (
+    RasterProvider,
+    load_agricultural_collector_config,
+    make_dynamic_world_raster_provider,
+    materialize_agricultural_evidence_collection,
+)
+from deforestation_pipeline.agricultural_evidence import (
+    AgriculturalEvidenceDocument,
+    AgriculturalEvidencePolicy,
+    evaluate_agricultural_evidence,
+    load_agricultural_evidence_document,
+    load_agricultural_evidence_policy,
+)
+from deforestation_pipeline.agricultural_persistence import (
+    load_agricultural_persistence_config,
+    materialize_agricultural_persistence,
+)
 from deforestation_pipeline.config import load_config, load_forest_model_config
+from deforestation_pipeline.gee import (
+    GeeSession,
+    authenticate_earth_engine,
+    authenticate_earth_engine_user_oauth,
+)
 from deforestation_pipeline.hampel_benchmark import (
+    HampelDiagnosticUnavailableError,
     load_hampel_benchmark_config,
     materialize_seasonal_hampel_benchmark,
 )
@@ -26,9 +49,15 @@ from deforestation_pipeline.post_change_attribution import (
     DeclaredLandUse,
     materialize_post_change_attribution,
 )
+from deforestation_pipeline.report_figures import (
+    REPORT_FIGURE_COLLECTION_SCHEMA_VERSION,
+    REPORT_FIGURE_SELECTION_POLICY_VERSION,
+    materialize_report_figure_collection,
+)
 from deforestation_pipeline.rf_model_release import verify_local_rf_model_release
 
-COMPLETE_ANALYSIS_SCHEMA_VERSION = "1.1.0"
+COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.2.0"
+COMPONENT_STATUS_SCHEMA_VERSION = "1.0.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_END_DATE = date(2025, 12, 31)
 _MANIFEST_RELATIVE_PATH = Path("json/run/manifest.json")
@@ -54,10 +83,20 @@ class CompleteAnalysisRequest:
     forest_model_config_path: Path
     hampel_config_path: Path
     establishment_id: str
+    agricultural_evidence_policy_path: Path = PROJECT_ROOT / "configs/agricultural-evidence.yml"
+    agricultural_collector_config_path: Path = PROJECT_ROOT / "configs/agricultural-collector.yml"
+    agricultural_persistence_config_path: Path = (
+        PROJECT_ROOT / "configs/agricultural-persistence.yml"
+    )
+    catalog_path: Path = PROJECT_ROOT / "data/catalog.yml"
+    licenses_path: Path = PROJECT_ROOT / "data/licenses.yml"
+    agricultural_evidence_path: Path | None = None
+    agricultural_persistence_bundle_path: Path | None = None
     analysis_end_date: date = DEFAULT_ANALYSIS_END_DATE
     hls_start_year: int = 2020
     hls_end_year: int = 2025
     credentials_path: Path | None = None
+    gee_project: str | None = None
     source_crs: str | None = None
     vector_layer: str | None = None
     dissolve_all: bool = False
@@ -87,16 +126,35 @@ def run_complete_analysis(
     config_loader: Callable[[Path], object] = load_config,
     model_loader: Callable[[Path], object] = load_forest_model_config,
     delta_runner: Runner = run_local_vector_pipeline,
+    agricultural_collector_runner: Runner = materialize_agricultural_evidence_collection,
+    agricultural_persistence_runner: Runner = materialize_agricultural_persistence,
     attribution_runner: Runner = materialize_post_change_attribution,
+    raster_provider: RasterProvider | None = None,
+    gee_session: GeeSession | None = None,
+    gee_authenticator: Callable[[Path], GeeSession] = authenticate_earth_engine,
+    gee_oauth_authenticator: Callable[..., GeeSession] = authenticate_earth_engine_user_oauth,
+    agricultural_provider_factory: Callable[..., RasterProvider] = (
+        make_dynamic_world_raster_provider
+    ),
+    agricultural_evidence_loader: Callable[
+        [Path], AgriculturalEvidenceDocument
+    ] = load_agricultural_evidence_document,
+    agricultural_policy_loader: Callable[
+        [Path], AgriculturalEvidencePolicy
+    ] = load_agricultural_evidence_policy,
+    agricultural_collector_loader: Callable[[Path], object] = (load_agricultural_collector_config),
+    agricultural_persistence_loader: Callable[[Path], object] = (
+        load_agricultural_persistence_config
+    ),
 ) -> Path:
-    """Ejecuta full → Hampel → deltas → atribución y publica un envelope auditable."""
+    """Ejecuta el DAG completo y publica todos sus bundles bajo un parent atómico."""
     started = created_at or datetime.now(UTC)
     if started.tzinfo is None or started.utcoffset() is None:
         raise ValueError("created_at_requires_timezone")
     resolved = _validate_request(request, started)
-    # Parsear los tres contratos antes de cualquier acceso remoto evita corridas
-    # parciales por YAML inválido.
-    config_loader(resolved["config"])
+    # Parsear todos los contratos antes de cualquier acceso remoto evita
+    # corridas parciales por YAML inválido.
+    pipeline_config = config_loader(resolved["config"])
     model_config = model_loader(resolved["model"])
     if getattr(model_config, "schema_version", None) == "1.1.0":
         verify_local_rf_model_release(
@@ -105,6 +163,32 @@ def run_complete_analysis(
             load_bundle=False,
         )
     hampel_config = hampel_loader(resolved["hampel"])
+    agricultural_policy = agricultural_policy_loader(resolved["agricultural_policy"])
+    agricultural_mode = _agricultural_mode(resolved)
+    if agricultural_mode == "auto":
+        agricultural_collector_loader(resolved["agricultural_collector"])
+        agricultural_persistence_loader(resolved["agricultural_persistence"])
+    agricultural_evidence = (
+        agricultural_evidence_loader(resolved["agricultural_evidence"])
+        if resolved["agricultural_evidence"] is not None
+        else None
+    )
+    evaluated_agricultural_evidence = (
+        evaluate_agricultural_evidence(agricultural_evidence, agricultural_policy)
+        if agricultural_evidence is not None
+        else {}
+    )
+    gee_authentication_mode = (
+        "injected_session"
+        if gee_session is not None
+        else "service_account"
+        if resolved["credentials"] is not None
+        else "user_oauth"
+        if resolved["gee_project"] is not None
+        else "unavailable"
+    )
+    active_session = gee_session
+    active_raster_provider = raster_provider
     configured_rf_years = getattr(model_config, "supported_observation_years", None)
     if not isinstance(configured_rf_years, (list, tuple)):
         raise ValueError("rf_supported_observation_years_missing")
@@ -114,16 +198,26 @@ def run_complete_analysis(
     slug = _slug(request.establishment_id)
     run_name = f"{slug}__{started.strftime('%Y%m%dT%H%M%S%fZ')}__{str(identifier)[:8]}"
     components = [
-        _component(name)
-        for name in (
-            "full_pipeline",
-            "hampel_benchmark",
-            "rf_annual_deltas",
-            "post_change_attribution",
-        )
+        _component("full_pipeline"),
+        _component("hampel_benchmark", required_for_publication=False),
+        _component("rf_annual_deltas"),
     ]
+    if agricultural_mode == "auto":
+        components.extend(
+            [
+                _component("agricultural_collection"),
+                _component("agricultural_persistence"),
+            ]
+        )
+    components.append(_component("post_change_attribution"))
     manifest = _base_manifest(
-        request, resolved, started, identifier, components, (min(rf_years), max(rf_years))
+        request,
+        resolved,
+        started,
+        identifier,
+        components,
+        (min(rf_years), max(rf_years)),
+        gee_authentication_mode,
     )
     output_root = request.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -134,6 +228,20 @@ def run_complete_analysis(
         raise FileExistsError(f"complete_analysis_run_collision:{run_name}")
     staging.mkdir()
     try:
+        if active_session is None and resolved["credentials"] is not None:
+            active_session = gee_authenticator(resolved["credentials"])
+        elif active_session is None and resolved["gee_project"] is not None:
+            active_session = gee_oauth_authenticator(project=resolved["gee_project"])
+        if agricultural_mode == "auto" and active_raster_provider is None:
+            if active_session is None:
+                raise ValueError("gee_session_required_for_automatic_agriculture")
+            output_config = getattr(pipeline_config, "output", None)
+            if output_config is None:
+                raise ValueError("pipeline_output_config_missing")
+            active_raster_provider = agricultural_provider_factory(
+                session=active_session,
+                output_config=output_config,
+            )
         full = _execute(
             components[0],
             staging,
@@ -142,12 +250,14 @@ def run_complete_analysis(
                 input_path=resolved["input"],
                 output_root=root,
                 config_path=resolved["config"],
+                catalog_path=resolved["catalog"],
                 forest_model_config_path=None,
                 source_crs=request.source_crs,
                 establishment_id=request.establishment_id,
                 analysis_end_date=request.analysis_end_date,
                 created_at=started,
                 gee_credentials_path=resolved["credentials"],
+                gee_session=active_session,
                 generate_hls_composite=False,
                 generate_forest_baseline=True,
                 generate_rf_deltas=False,
@@ -159,19 +269,25 @@ def run_complete_analysis(
                 dissolve_all=request.dissolve_all,
             ),
         )
-        _execute(
-            components[1],
-            staging,
-            started,
-            lambda root: hampel_runner(
-                source_bundle=full,
-                output_root=root,
-                input_geojson=resolved["input"],
-                establishment_id=request.establishment_id,
-                config=hampel_config,
-                created_at=started,
-            ),
-        )
+        try:
+            _execute(
+                components[1],
+                staging,
+                started,
+                lambda root: hampel_runner(
+                    source_bundle=full,
+                    output_root=root,
+                    input_geojson=resolved["input"],
+                    establishment_id=request.establishment_id,
+                    config=hampel_config,
+                    created_at=started,
+                ),
+            )
+        except HampelDiagnosticUnavailableError as exc:
+            _mark_diagnostic_unavailable(components[1], exc)
+            manifest["scientific_warnings"].append(
+                {"component": "hampel_benchmark", "code": str(exc)}
+            )
         deltas = _execute(
             components[2],
             staging,
@@ -180,12 +296,14 @@ def run_complete_analysis(
                 input_path=resolved["input"],
                 output_root=root,
                 config_path=resolved["config"],
+                catalog_path=resolved["catalog"],
                 forest_model_config_path=resolved["model"],
                 source_crs=request.source_crs,
                 establishment_id=request.establishment_id,
                 analysis_end_date=date(max(rf_years), 12, 31),
                 created_at=started,
                 gee_credentials_path=resolved["credentials"],
+                gee_session=active_session,
                 generate_hls_composite=False,
                 generate_forest_baseline=False,
                 generate_rf_deltas=True,
@@ -195,8 +313,41 @@ def run_complete_analysis(
                 dissolve_all=request.dissolve_all,
             ),
         )
+        persistence_bundle = resolved["agricultural_persistence_bundle"]
+        attribution_component_index = 3
+        if agricultural_mode == "auto":
+            collection = _execute(
+                components[3],
+                staging,
+                started,
+                lambda root: agricultural_collector_runner(
+                    source_event_bundle=full,
+                    output_root=root,
+                    establishment_id=request.establishment_id,
+                    analysis_end_date=request.analysis_end_date,
+                    config_path=resolved["agricultural_collector"],
+                    catalog_path=resolved["catalog"],
+                    licenses_path=resolved["licenses"],
+                    created_at=started,
+                    raster_provider=active_raster_provider,
+                ),
+            )
+            persistence_bundle = _execute(
+                components[4],
+                staging,
+                started,
+                lambda root: agricultural_persistence_runner(
+                    source_collection_bundle=collection,
+                    output_root=root,
+                    config_path=resolved["agricultural_persistence"],
+                    created_at=started,
+                ),
+            )
+            manifest["scientific_flags"]["persistent_agricultural_evidence_provided"] = True
+            manifest["scientific_flags"]["agricultural_evidence_generated_in_same_run"] = True
+            attribution_component_index = 5
         _execute(
-            components[3],
+            components[attribution_component_index],
             staging,
             started,
             lambda root: attribution_runner(
@@ -207,14 +358,30 @@ def run_complete_analysis(
                 context=AttributionContext(
                     declared_land_use=request.declared_land_use,
                     declared_context_source=request.declared_context_source,
+                    agricultural_use_evidence=evaluated_agricultural_evidence,
                 ),
                 created_at=started,
+                source_agricultural_bundle=persistence_bundle,
+                agricultural_policy=agricultural_policy,
             ),
         )
         _revalidate_components(components, staging, started)
         _validate_child_correlations(components, str(identifier))
-        manifest["overall_status"] = "complete"
+        manifest["overall_status"] = (
+            "partial"
+            if any(item["status"] == "diagnostic_unavailable" for item in components)
+            else "complete"
+        )
         manifest["completed_at"] = datetime.now(UTC).isoformat()
+        _materialize_component_status_receipts(
+            components, staging, manifest["dependencies"], manifest["completed_at"]
+        )
+        manifest["report_assets"] = materialize_report_figure_collection(
+            staging=staging,
+            components=components,
+            overall_status=manifest["overall_status"],
+            recorded_at=manifest["completed_at"],
+        )
         manifest["parameters_hash"] = _parameters_hash(manifest)
         _write_json_atomic(staging / "run_manifest.json", manifest)
         staging.rename(final)
@@ -228,6 +395,25 @@ def run_complete_analysis(
                 resolved["config"]: "[CONFIG_PATH]",
                 resolved["model"]: "[MODEL_CONFIG_PATH]",
                 resolved["hampel"]: "[HAMPEL_CONFIG_PATH]",
+                resolved["agricultural_policy"]: "[AGRICULTURAL_POLICY_PATH]",
+                resolved["agricultural_collector"]: "[AGRICULTURAL_COLLECTOR_CONFIG_PATH]",
+                resolved["agricultural_persistence"]: ("[AGRICULTURAL_PERSISTENCE_CONFIG_PATH]"),
+                resolved["catalog"]: "[CATALOG_PATH]",
+                resolved["licenses"]: "[LICENSES_PATH]",
+                **(
+                    {resolved["agricultural_evidence"]: "[AGRICULTURAL_EVIDENCE_PATH]"}
+                    if resolved["agricultural_evidence"] is not None
+                    else {}
+                ),
+                **(
+                    {
+                        resolved["agricultural_persistence_bundle"]: (
+                            "[AGRICULTURAL_PERSISTENCE_BUNDLE]"
+                        )
+                    }
+                    if resolved["agricultural_persistence_bundle"] is not None
+                    else {}
+                ),
             },
         )
         _mark_failure(components, exc, safe_message)
@@ -236,6 +422,25 @@ def run_complete_analysis(
         )
         manifest["completed_at"] = datetime.now(UTC).isoformat()
         manifest["failure"] = {"error_type": type(exc).__name__, "message": safe_message}
+        _materialize_component_status_receipts(
+            components, staging, manifest["dependencies"], manifest["completed_at"]
+        )
+        if manifest.get("report_assets") is None:
+            try:
+                manifest["report_assets"] = materialize_report_figure_collection(
+                    staging=staging,
+                    components=components,
+                    overall_status=manifest["overall_status"],
+                    recorded_at=manifest["completed_at"],
+                )
+            except Exception:
+                manifest["report_assets"] = {
+                    "schema_version": REPORT_FIGURE_COLLECTION_SCHEMA_VERSION,
+                    "selection_policy_version": REPORT_FIGURE_SELECTION_POLICY_VERSION,
+                    "status": "unavailable",
+                    "error_code": "report_figure_collection_failed",
+                    "figure_count": 0,
+                }
         manifest["parameters_hash"] = _parameters_hash(manifest)
         _write_json_atomic(staging / "run_manifest.json", manifest)
         staging.rename(failed)
@@ -264,6 +469,11 @@ def _validate_request(request: CompleteAnalysisRequest, now: datetime) -> dict[s
         ("config", request.config_path),
         ("model", request.forest_model_config_path),
         ("hampel", request.hampel_config_path),
+        ("agricultural_policy", request.agricultural_evidence_policy_path),
+        ("agricultural_collector", request.agricultural_collector_config_path),
+        ("agricultural_persistence", request.agricultural_persistence_config_path),
+        ("catalog", request.catalog_path),
+        ("licenses", request.licenses_path),
     ):
         candidate = path.resolve()
         if not candidate.is_file():
@@ -273,7 +483,44 @@ def _validate_request(request: CompleteAnalysisRequest, now: datetime) -> dict[s
     if credentials is not None and not credentials.is_file():
         raise FileNotFoundError(f"credentials_file_missing:{credentials.name}")
     resolved["credentials"] = credentials
+    gee_project = request.gee_project.strip() if request.gee_project is not None else None
+    if gee_project == "":
+        raise ValueError("gee_project_empty")
+    if credentials is not None and gee_project is not None:
+        raise ValueError("gee_authentication_modes_are_mutually_exclusive")
+    resolved["gee_project"] = gee_project
+    agricultural_evidence = (
+        request.agricultural_evidence_path.resolve()
+        if request.agricultural_evidence_path is not None
+        else None
+    )
+    if agricultural_evidence is not None and not agricultural_evidence.is_file():
+        raise FileNotFoundError(
+            f"required_file_missing:agricultural_evidence:{agricultural_evidence.name}"
+        )
+    resolved["agricultural_evidence"] = agricultural_evidence
+    persistence_bundle = (
+        request.agricultural_persistence_bundle_path.resolve()
+        if request.agricultural_persistence_bundle_path is not None
+        else None
+    )
+    if agricultural_evidence is not None and persistence_bundle is not None:
+        raise ValueError("agricultural evidence JSON y persistence bundle son excluyentes")
+    if persistence_bundle is not None:
+        manifest = persistence_bundle / _MANIFEST_RELATIVE_PATH
+        if not persistence_bundle.is_dir() or not manifest.is_file():
+            raise FileNotFoundError("required_bundle_missing:agricultural_persistence")
+    resolved["agricultural_persistence_bundle"] = persistence_bundle
     return resolved
+
+
+def _agricultural_mode(resolved: Mapping[str, Any]) -> str:
+    """Usa evidencia externa sólo cuando fue pedida de forma explícita."""
+    if resolved["agricultural_evidence"] is not None:
+        return "precomputed_evidence"
+    if resolved["agricultural_persistence_bundle"] is not None:
+        return "precomputed_persistence"
+    return "auto"
 
 
 def _validate_rf_years(years: tuple[int, ...], current_year: int) -> None:
@@ -289,9 +536,10 @@ def _validate_rf_years(years: tuple[int, ...], current_year: int) -> None:
         raise ValueError("rf_supported_observation_years_must_be_closed")
 
 
-def _component(name: str) -> dict[str, Any]:
+def _component(name: str, *, required_for_publication: bool = True) -> dict[str, Any]:
     return {
         "name": name,
+        "required_for_publication": required_for_publication,
         "status": "pending",
         "started_at": None,
         "completed_at": None,
@@ -299,6 +547,8 @@ def _component(name: str) -> dict[str, Any]:
         "output_bundle": None,
         "child_manifest": None,
         "child_manifest_sha256": None,
+        "status_receipt": None,
+        "status_receipt_sha256": None,
         "error": None,
     }
 
@@ -341,13 +591,25 @@ def _execute(
         )
         return bundle
     except Exception as exc:
+        error_code = getattr(exc, "code", None)
+        if not isinstance(error_code, str) or not re.fullmatch(r"[a-z0-9_]+", error_code):
+            error_code = "component_validation_failed"
         component.update(
             status="failed",
             completed_at=datetime.now(UTC).isoformat(),
             elapsed_seconds=round(time.monotonic() - before, 6),
-            error={"error_type": type(exc).__name__, "message": "component_validation_failed"},
+            error={"error_type": type(exc).__name__, "message": error_code},
         )
         raise
+
+
+def _mark_diagnostic_unavailable(
+    component: dict[str, Any], exc: HampelDiagnosticUnavailableError
+) -> None:
+    component.update(
+        status="diagnostic_unavailable",
+        error={"error_type": type(exc).__name__, "message": str(exc)},
+    )
 
 
 def _validate_child_manifest(
@@ -406,7 +668,9 @@ def _validate_child_manifest(
 
 
 def _validate_child_correlations(components: list[dict[str, Any]], parent_analysis_id: str) -> None:
-    child_ids = [str(item.get("child_analysis_id")) for item in components]
+    child_ids = [
+        str(item["child_analysis_id"]) for item in components if item.get("status") == "completed"
+    ]
     if parent_analysis_id in child_ids:
         raise ValueError("child_analysis_id_must_differ_from_parent")
     if len(set(child_ids)) != len(child_ids):
@@ -418,6 +682,11 @@ def _revalidate_components(
 ) -> None:
     staging_root = staging.resolve()
     for component in components:
+        if (
+            component.get("status") == "diagnostic_unavailable"
+            and component.get("required_for_publication") is False
+        ):
+            continue
         if component.get("status") != "completed":
             raise ValueError("component_not_completed_before_publication")
         relative_text = component.get("output_bundle")
@@ -452,12 +721,58 @@ def _revalidate_components(
 
 
 def _mark_failure(components: list[dict[str, Any]], exc: Exception, safe_message: str) -> None:
+    failed_at = datetime.now(UTC).isoformat()
     for component in components:
         if component["status"] == "running":
             component["status"] = "failed"
+            component["completed_at"] = failed_at
             component["error"] = {"error_type": type(exc).__name__, "message": safe_message}
         elif component["status"] == "pending":
             component["status"] = "skipped"
+            component["completed_at"] = failed_at
+
+
+def _materialize_component_status_receipts(
+    components: list[dict[str, Any]],
+    staging: Path,
+    dependencies: Mapping[str, list[str]],
+    recorded_at: str,
+) -> None:
+    """Materializa estados sin bundle para que una carpeta vacía sea explicable."""
+    for component in components:
+        if component["status"] == "completed":
+            continue
+        name = str(component["name"])
+        component_root = staging / "components" / name
+        component_root.mkdir(parents=True, exist_ok=True)
+        relative = Path("components") / name / "component_status.json"
+        error = component.get("error")
+        error_type = "DependencyUnavailable"
+        error_code = "dependency_not_completed"
+        if isinstance(error, dict):
+            candidate_type = error.get("error_type")
+            if isinstance(candidate_type, str) and re.fullmatch(r"[A-Za-z0-9_.]+", candidate_type):
+                error_type = candidate_type
+            candidate_code = error.get("message")
+            if isinstance(candidate_code, str) and re.fullmatch(r"[a-z0-9_]+", candidate_code):
+                error_code = candidate_code
+            else:
+                error_code = "component_validation_failed"
+        receipt = {
+            "schema_version": COMPONENT_STATUS_SCHEMA_VERSION,
+            "component": name,
+            "status": component["status"],
+            "required_for_publication": component["required_for_publication"],
+            "started_at": component["started_at"],
+            "completed_at": component["completed_at"],
+            "recorded_at": recorded_at,
+            "dependencies": dependencies.get(name, []),
+            "error": {"error_type": error_type, "code": error_code},
+        }
+        receipt_path = staging / relative
+        _write_json_atomic(receipt_path, receipt)
+        component["status_receipt"] = relative.as_posix()
+        component["status_receipt_sha256"] = _sha256(receipt_path)
 
 
 def _base_manifest(
@@ -467,7 +782,62 @@ def _base_manifest(
     analysis_id: UUID,
     components: list[dict[str, Any]],
     rf_year_range: tuple[int, int],
+    gee_authentication_mode: str,
 ) -> dict[str, Any]:
+    agricultural_mode = _agricultural_mode(resolved)
+    automatic_agriculture = agricultural_mode == "auto"
+    dependencies: dict[str, list[str]] = {
+        "hampel_benchmark": ["full_pipeline"],
+        "rf_annual_deltas": ["full_pipeline"],
+    }
+    if automatic_agriculture:
+        dependencies.update(
+            {
+                "agricultural_collection": ["full_pipeline"],
+                "agricultural_persistence": ["agricultural_collection"],
+                "post_change_attribution": [
+                    "full_pipeline",
+                    "rf_annual_deltas",
+                    "agricultural_persistence",
+                ],
+            }
+        )
+    else:
+        dependencies["post_change_attribution"] = ["full_pipeline", "rf_annual_deltas"]
+    coverage: dict[str, Any] = {
+        "full_pipeline": {
+            "requested_years": [request.hls_start_year, request.hls_end_year],
+            "requested_analysis_end_date": request.analysis_end_date.isoformat(),
+            "effective_analysis_end_date": date(request.hls_end_year, 11, 30).isoformat(),
+        },
+        "hampel_benchmark": {"derived_from": "full_pipeline"},
+        "rf_annual_deltas": {
+            "requested_years": list(rf_year_range),
+            "effective_analysis_end_date": date(rf_year_range[1], 11, 30).isoformat(),
+        },
+    }
+    if automatic_agriculture:
+        coverage.update(
+            {
+                "agricultural_collection": {
+                    "event_onset_relative": True,
+                    "analysis_end_date_inclusive": request.analysis_end_date.isoformat(),
+                    "cadence": "calendar_month",
+                },
+                "agricultural_persistence": {"derived_from": "agricultural_collection"},
+                "post_change_attribution": {
+                    "derived_from": [
+                        "full_pipeline",
+                        "rf_annual_deltas",
+                        "agricultural_persistence",
+                    ]
+                },
+            }
+        )
+    else:
+        coverage["post_change_attribution"] = {
+            "derived_from": ["full_pipeline", "rf_annual_deltas"]
+        }
     return {
         "schema_version": COMPLETE_ANALYSIS_SCHEMA_VERSION,
         "analysis_id": str(analysis_id),
@@ -483,33 +853,49 @@ def _base_manifest(
             "layer": request.vector_layer,
             "dissolve_all": request.dissolve_all,
         },
-        "coverage": {
-            "full_pipeline": {
-                "requested_years": [request.hls_start_year, request.hls_end_year],
-                "analysis_end_date": request.analysis_end_date.isoformat(),
-            },
-            "hampel_benchmark": {"derived_from": "full_pipeline"},
-            "rf_annual_deltas": {
-                "requested_years": list(rf_year_range),
-                "analysis_end_date": date(rf_year_range[1], 12, 31).isoformat(),
-            },
-            "post_change_attribution": {"derived_from": ["full_pipeline", "rf_annual_deltas"]},
-        },
+        "coverage": coverage,
         "configs": {
             key: {
                 **_portable_path(resolved[key]),
                 "sha256": _sha256(resolved[key]),
                 "size_bytes": resolved[key].stat().st_size,
             }
-            for key in ("config", "model", "hampel")
+            for key in (
+                "config",
+                "model",
+                "hampel",
+                "agricultural_policy",
+                "agricultural_collector",
+                "agricultural_persistence",
+                "catalog",
+                "licenses",
+            )
         },
+        "agricultural_evidence_input": (
+            None
+            if resolved["agricultural_evidence"] is None
+            else {
+                **_portable_path(resolved["agricultural_evidence"]),
+                "sha256": _sha256(resolved["agricultural_evidence"]),
+                "size_bytes": resolved["agricultural_evidence"].stat().st_size,
+            }
+        ),
+        "agricultural_persistence_input": (
+            None
+            if resolved["agricultural_persistence_bundle"] is None
+            else {
+                "bundle_name": resolved["agricultural_persistence_bundle"].name,
+                "scope": "external",
+                "manifest_sha256": _sha256(
+                    resolved["agricultural_persistence_bundle"] / _MANIFEST_RELATIVE_PATH
+                ),
+            }
+        ),
         "code": _code_provenance(),
+        "gee_authentication_mode": gee_authentication_mode,
+        "agricultural_mode": agricultural_mode,
         "component_order": [item["name"] for item in components],
-        "dependencies": {
-            "hampel_benchmark": ["full_pipeline"],
-            "rf_annual_deltas": ["hampel_benchmark"],
-            "post_change_attribution": ["full_pipeline", "rf_annual_deltas"],
-        },
+        "dependencies": dependencies,
         "components": components,
         "scientific_flags": {
             "automatic_final_assessment_generated": False,
@@ -518,7 +904,16 @@ def _base_manifest(
             "automatic_conversion_confirmed": False,
             "declared_land_use": request.declared_land_use,
             "declared_context_source": request.declared_context_source,
+            "agricultural_evidence_policy_applied": True,
+            "agricultural_evidence_provided": resolved["agricultural_evidence"] is not None,
+            "persistent_agricultural_evidence_provided": (
+                resolved["agricultural_persistence_bundle"] is not None
+            ),
+            "agricultural_evidence_generation_requested": automatic_agriculture,
+            "agricultural_evidence_generated_in_same_run": False,
         },
+        "scientific_warnings": [],
+        "report_assets": None,
         "failure": None,
     }
 
@@ -568,9 +963,14 @@ def _parameters_hash(manifest: Mapping[str, Any]) -> str:
         "input": manifest.get("input"),
         "coverage": manifest.get("coverage"),
         "configs": manifest.get("configs"),
+        "agricultural_evidence_input": manifest.get("agricultural_evidence_input"),
+        "agricultural_persistence_input": manifest.get("agricultural_persistence_input"),
+        "agricultural_mode": manifest.get("agricultural_mode"),
+        "gee_authentication_mode": manifest.get("gee_authentication_mode"),
         "component_order": manifest.get("component_order"),
         "dependencies": manifest.get("dependencies"),
         "scientific_flags": manifest.get("scientific_flags"),
+        "scientific_warnings": manifest.get("scientific_warnings"),
     }
     return hashlib.sha256(
         json.dumps(parameters, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()

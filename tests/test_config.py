@@ -21,7 +21,7 @@ from deforestation_pipeline.config import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
+CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-forest-entrerios-2020-2024.yml"
 
 
 def test_candidate_forest_model_override_is_explicit_and_default_stays_p0() -> None:
@@ -835,6 +835,7 @@ def test_license_registry_records_operational_pixel_sources() -> None:
         "esa_worldcover_2020_v100",
         "hansen_gfc_2025_v1_13",
         "mapbiomas_argentina_collection2",
+        "dynamic_world_v1",
     )
     assert all(dataset.attribution.strip() for dataset in registry.datasets)
     assert all(

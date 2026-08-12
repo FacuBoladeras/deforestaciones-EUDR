@@ -11,6 +11,12 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from deforestation_pipeline.agricultural_collector import agricultural_collection_json_schema
+from deforestation_pipeline.agricultural_evidence import (
+    agricultural_evidence_json_schema,
+    agricultural_evidence_policy_json_schema,
+)
+from deforestation_pipeline.agricultural_persistence import agricultural_persistence_json_schema
 from deforestation_pipeline.disturbance_evidence import (
     DisturbanceEvidenceMetadata,
     disturbance_evidence_json_schema,
@@ -101,3 +107,26 @@ def test_committed_disturbance_evidence_schema_matches_pydantic_model() -> None:
     assert committed_schema == disturbance_evidence_json_schema()
     assert committed_schema["title"] == DisturbanceEvidenceMetadata.__name__
     assert committed_schema["$id"] == ("urn:deforestation-pipeline:disturbance-evidence:1.2.0")
+
+
+@pytest.mark.parametrize(
+    ("filename", "factory"),
+    [
+        ("agricultural-evidence-v1.0.0.json", agricultural_evidence_json_schema),
+        (
+            "agricultural-evidence-policy-v1.0.0.json",
+            agricultural_evidence_policy_json_schema,
+        ),
+        (
+            "agricultural-collection-v1.0.0.json",
+            agricultural_collection_json_schema,
+        ),
+        (
+            "agricultural-persistence-v1.0.0.json",
+            agricultural_persistence_json_schema,
+        ),
+    ],
+)
+def test_committed_agricultural_schemas_match_pydantic_models(filename: str, factory: Any) -> None:
+    committed = json.loads((PROJECT_ROOT / "data" / "schemas" / filename).read_text("utf-8"))
+    assert committed == factory()

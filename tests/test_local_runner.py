@@ -46,7 +46,7 @@ from deforestation_pipeline.vector_ingestion import VectorIngestionError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "default.yml"
-CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-multiyear-candidate-costa-uru.yml"
+CANDIDATE_FOREST_MODEL_CONFIG = PROJECT_ROOT / "configs" / "rf-forest-entrerios-2020-2024.yml"
 FIXED_NOW = datetime(2026, 7, 23, 18, 30, tzinfo=UTC)
 
 

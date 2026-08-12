@@ -7,6 +7,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from deforestation_pipeline.agricultural_collector import agricultural_collection_json_schema
+from deforestation_pipeline.agricultural_evidence import (
+    agricultural_evidence_json_schema,
+    agricultural_evidence_policy_json_schema,
+)
+from deforestation_pipeline.agricultural_persistence import agricultural_persistence_json_schema
 from deforestation_pipeline.change_detection import (
     disturbance_detection_json_schema,
 )
@@ -27,6 +33,22 @@ from deforestation_pipeline.temporal_cube import (
 )
 
 SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
+    (
+        Path("data/schemas/agricultural-persistence-v1.0.0.json"),
+        agricultural_persistence_json_schema,
+    ),
+    (
+        Path("data/schemas/agricultural-collection-v1.0.0.json"),
+        agricultural_collection_json_schema,
+    ),
+    (
+        Path("data/schemas/agricultural-evidence-v1.0.0.json"),
+        agricultural_evidence_json_schema,
+    ),
+    (
+        Path("data/schemas/agricultural-evidence-policy-v1.0.0.json"),
+        agricultural_evidence_policy_json_schema,
+    ),
     (
         Path("data/schemas/analysis-summary-v1.0.0.json"),
         analysis_summary_json_schema,

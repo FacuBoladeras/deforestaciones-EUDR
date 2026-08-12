@@ -32,6 +32,12 @@ TEST_GRID = derive_raster_grid_spec(
     resolution_m=30,
     nodata=-9999,
 )
+EQUAL_AREA_TEST_GRID = derive_raster_grid_spec(
+    aoi_wgs84=TEST_AOI,
+    target_crs="EPSG:6933",
+    resolution_m=10,
+    nodata=-9999,
+)
 
 
 def test_download_estimate_is_computed_in_the_explicit_target_grid() -> None:
@@ -111,6 +117,16 @@ class _DownloadImage:
         return f"https://example.invalid/{self.identifier}"
 
 
+class _EarthEngineProjectionCheckingImage(_DownloadImage):
+    """Reproduce el rechazo real de EE al alias EPSG:6933."""
+
+    def getDownloadURL(self, parameters: dict[str, object]) -> str:
+        self.download_parameters = parameters
+        if parameters["crs"] == "EPSG:6933":
+            raise RuntimeError("Projection: The CRS of a map projection could not be parsed.")
+        return f"https://example.invalid/{self.identifier}"
+
+
 def _geotiff_bytes(
     *,
     band_count: int,
@@ -168,6 +184,37 @@ def test_materializes_generic_ee_image_on_exact_grid() -> None:
         "dimensions": [TEST_GRID.width, TEST_GRID.height],
         "format": "GEO_TIFF",
     }
+
+
+def test_equal_area_epsg_6933_is_sent_as_gee_parseable_wkt() -> None:
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    image = _EarthEngineProjectionCheckingImage("dynamic-world")
+    content = _geotiff_bytes(
+        band_count=1,
+        dtype="float32",
+        values=np.ones(
+            (1, EQUAL_AREA_TEST_GRID.height, EQUAL_AREA_TEST_GRID.width), dtype=np.float32
+        ),
+        crs=EQUAL_AREA_TEST_GRID.target_crs,
+        transform_value=Affine(*EQUAL_AREA_TEST_GRID.transform),
+    )
+
+    materialize_ee_image_to_grid(
+        image=image,
+        band_names=("crop",),
+        artifact_path="tiffs/evidence/agricultural/event/2021-09_dynamic_world.tif",
+        download_name="dynamic_world_event_2021-09",
+        output_config=config.output,
+        grid_spec=EQUAL_AREA_TEST_GRID,
+        output_type="float32",
+        fetch_bytes=lambda _url, _maximum_bytes: content,
+    )
+
+    assert image.download_parameters is not None
+    requested_crs = image.download_parameters["crs"]
+    assert isinstance(requested_crs, str)
+    assert requested_crs.startswith("PROJCS[")
+    assert 'AUTHORITY["EPSG","6933"]' in requested_crs
 
 
 def test_downloaded_geotiff_is_normalized_and_scientifically_validated() -> None:
@@ -651,6 +698,10 @@ class _FailingDownloadImage(_DownloadImage):
         ("quota exceeded", "quota_or_rate_limit"),
         ("request size too large", "remote_size_limit_exceeded"),
         ("deadline timeout", "timeout"),
+        (
+            "Projection: The CRS of a map projection could not be parsed.",
+            "remote_projection_invalid",
+        ),
         ("unexpected", "download_url_failed"),
     ],
 )

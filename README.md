@@ -7,8 +7,8 @@ El sistema **no certifica** que un establecimiento sea libre de deforestación,
 no determina por sí solo cumplimiento del Reglamento (UE) 2023/1115 y no
 reemplaza la debida diligencia ni la revisión humana. La formulación correcta
 del resultado actual es _evidencia de perturbación y atribución conservadora_;
-la v0 separa explicaciones compatibles, pero exige evidencia independiente y
-revisión humana antes de sostener una conversión.
+la v1 separa explicaciones compatibles y deriva elegibilidad desde una política
+de linaje, pero exige revisión humana antes de sostener una conversión.
 
 Este archivo es la referencia canónica del estado actual. El orden de trabajo
 pendiente vive únicamente en [`NEXT_STEPS.md`](NEXT_STEPS.md). Las reglas de
@@ -43,16 +43,16 @@ para rangos estacionales HLS. El pipeline puede:
 15. publicar todos los eventos en CSV, JSON y GeoJSON, más un mapa general y
     hasta cinco fichas de los eventos de mayor superficie;
 16. atribuir conservadoramente cada evento mediante su trayectoria RF, evidencia
-    independiente opcional y explicaciones alternativas declaradas;
-17. publicar la atribución v0 por evento en CSV, JSON, GeoJSON y PNG, con hashes
+    opcional habilitada por política y explicaciones alternativas declaradas;
+17. publicar la atribución v1 por evento en CSV, JSON, GeoJSON y PNG, con hashes
     de sus bundles fuente y sin emitir confirmación automática.
 
 La frontera actual es deliberada:
 
 - **detección de perturbaciones:** implementada;
-- **atribución post-cambio v0:** implementada por evento; distingue agricultura
+- **atribución post-cambio v1:** implementada por evento; distingue agricultura
   probable, recuperación, cosecha forestal, perturbación temporal y desconocido;
-  todavía requiere ampliar evidencia independiente y causas alternativas;
+  todavía requiere recolectar evidencia agrícola y ampliar causas alternativas;
 - **eventos persistentes de detección:** vectorizados y medidos; el umbral de
   0,5 ha se informa sin descartar eventos menores;
 - **agregación final luego de atribuir uso posterior:** pendiente;
@@ -416,7 +416,106 @@ Este asset sigue siendo **candidato**: no reemplaza el asset activo de
 Clasifica cobertura forestal proxy estable; no detecta conversión y no demuestra
 ausencia de deforestación ni cumplimiento EUDR.
 
-### 5.2 Atribución post-cambio v0
+### 5.2 Recolector agrícola mensual por evento
+
+`agricultural_collector.py` implementa la adquisición espacial acotada del
+incremento agrícola. Consume un bundle de eventos, inicia las ventanas el día
+posterior al fin del onset estimado y consulta únicamente meses calendario
+hasta la fecha inclusiva pedida. La fuente candidata inicial es Dynamic World
+V1: `crops` requiere simultáneamente etiqueta 4 y probabilidad superior al
+umbral versionado; `grass` no se interpreta automáticamente como pastura y
+`built` no demuestra uso ganadero.
+
+Cada evento usa una grilla única EPSG:6933 a 10 m. El área no se obtiene del
+rectángulo raster: se pondera con un GeoTIFF de fracción exacta de intersección
+entre el polígono y cada píxel. Por ventana se conservan conteos válidos,
+conteos de cultivo calificante, probabilidad media y fracción de observaciones
+agrícolas. `crop`, `unknown` y `nodata` son mutuamente excluyentes y deben
+cerrar el área del evento.
+
+El bundle atómico publica `agricultural_evidence.csv`,
+`agricultural_evidence.geojson`, `agricultural_evidence.json`,
+`agricultural_evidence_metadata.json`, los rasters auditables y un manifest
+con hashes y referencias al bundle fuente. La salida cruda **no** afirma
+persistencia ni conversión. El componente de persistencia consume este bundle
+sin reinterpretar una observación mensual como uso permanente.
+
+Cuando existe al menos un período con soporte espacial válido, también publica
+una lámina `agricultural_monthly_evidence_<event-id>.png` por evento. La lámina
+no multiplica un PNG por mes: muestra la serie temporal completa y hasta cuatro
+pares de mapas, elegidos por una regla determinística registrada en el manifest
+—primer período programado, primer período espacialmente válido, pico de la
+fracción media de observaciones `crop` y último período programado—. Cada par
+separa fracción de observaciones `crop` y score medio `crop`. `nodata` aparece
+en gris y nunca se confunde con un cero observado. El manifest registra hash
+del PNG, TIFFs fuente, ventanas seleccionadas, semántica de bandas y disclaimer.
+
+```powershell
+uv run python scripts/run_agricultural_collector.py `
+  outputs/runs/<run-id>/components/full_pipeline/<bundle> `
+  --establishment-id establecimiento `
+  --analysis-end-date 2025-12-31 `
+  --credentials .\credentials.json
+```
+
+El comando completo recomendado ya ejecuta este recolector y la persistencia
+sin exigir que el operador copie rutas entre comandos:
+
+```powershell
+uv run python scripts/run_complete_analysis.py .\establecimiento.geojson `
+  --establishment-id establecimiento `
+  --credentials .\credentials.json
+```
+
+Dentro del mismo parent run, el orquestador pasa el bundle de eventos recién
+creado al recolector, su salida a persistencia y los tres bundles del mismo run
+al atribuidor. El linaje conserva `analysis_id`, hash del input y el hash exacto
+de `disturbance_events.geojson`; así se rechaza evidencia derivada de otros
+eventos. `--agricultural-persistence-bundle` y
+`--agricultural-evidence-json` permanecen sólo como modos precomputados
+explícitos para reproducir o diagnosticar expedientes anteriores; son
+excluyentes y desactivan la recolección automática.
+
+La ruta productiva GEE está cubierta por tests con dobles, incluidos filtros
+espaciales/temporales y la regla de clase. Además se ejecutó el smoke remoto
+acotado de un evento/mes descripto en la sección de verificación; sigue
+pendiente el run remoto completo.
+
+### 5.3 Persistencia agrícola post-cambio
+
+`agricultural_persistence.py` aplica la regla versionada de
+`configs/agricultural-persistence.yml`. La ventana continúa siendo estrictamente
+posterior al onset. El gate primario exige al menos tres períodos válidos, dos
+períodos agrícolas calificantes y 180 días observados. Los períodos agrícolas
+no tienen que ser consecutivos: un barbecho observado no borra un cultivo
+estacional previo. Los meses sin soporte permanecen como gaps y nunca se
+interpolan. Tanto la duración como el máximo de gaps se evalúan por píxel sobre
+observaciones efectivamente válidas; la mera extensión de la ventana solicitada
+no satisface el gate.
+
+Por píxel se materializa un raster de fracción persistente del evento en
+EPSG:6933. El bundle publica además período, soporte mensual, gaps, desacuerdo
+temporal, área persistente y sensibilidad a umbrales `0,40`, `0,50` y `0,60`.
+Una serie corta produce `insufficient_series` y cero observaciones
+habilitantes. Con una sola fuente temporal, el desacuerdo entre fuentes queda
+`single_source_not_assessed`; no se fabrica concordancia.
+
+Un evento con soporte persistente espacial positivo agrega
+`agricultural_persistence_<event-id>.png`: mapa del soporte, serie temporal
+completa y sensibilidad a umbrales. Un evento insuficiente o sin soporte no
+fabrica una lámina vacía. El PNG es presentación derivada; el GeoTIFF continúa
+siendo el producto científico utilizado para calcular superficie.
+
+```powershell
+uv run python scripts/run_agricultural_persistence.py `
+  outputs/agricultural_evidence/<bundle-mensual>
+```
+
+Dynamic World no distingue por sí mismo recuperación forestal. Esa explicación
+alternativa se evalúa después con la trayectoria RF y queda registrada como
+limitación del bundle de persistencia.
+
+### 5.4 Atribución post-cambio v1
 
 `post_change_attribution.py` cruza cada geometría de perturbación persistente
 con las clases y votos RF 2020–2024. Publica CSV, JSON, GeoJSON, metadata y una
@@ -425,12 +524,34 @@ figura con cinco resultados posibles: `agriculture_likely`,
 
 La regla es deliberadamente conservadora. `agriculture_likely` sólo puede
 alcanzar `conversion_likely` cuando coinciden bosque al corte, pérdida
-poscorte, persistencia, área defendible, evidencia **independiente** de uso
+poscorte, persistencia, área defendible, evidencia **habilitada por política** de uso
 agrícola/ganadero posterior y ausencia de una explicación alternativa fuerte.
 Una pérdida RF sola queda `unknown/review_required`. Un contexto declarado de
 plantación forestal se registra como explicación alternativa, nunca como
 evidencia independiente. El atribuidor automático siempre conserva
 `conversion_confirmed: false`.
+
+La integración persistente acepta un **bundle**, no un booleano ni un área
+declarada. Para cada evento reproyecta la conjunción RF de bosque 2020, pérdida
+poscorte y no-bosque persistente sobre la grilla agrícola métrica; la multiplica
+por el footprint agrícola persistente y publica el raster resultante. El área
+de ese raster sólo se informa como `likely_conversion_area_ha` cuando también
+aprueban política, geometría y ausencia de recuperación. Si falla cualquier
+gate, el área probable es cero y quedan razones a favor y en contra.
+
+Cuando la conjunción contiene soporte positivo, el bundle agrega
+`likely_conversion_conjunction_<event-id>.png`, con mapa, escala, norte, área y
+los cuatro términos de la conjunción. La leyenda distingue `nodata` de cero y
+el título usa “evidencia compatible con conversión”: no es confirmación legal
+ni certificación. Una conjunción vacía conserva el TIFF y el resultado
+estructurado, pero no genera un mapa engañoso sin soporte.
+
+La entrada opcional sigue el contrato estricto
+`agricultural-evidence-v1.0.0`: exige fuente y licencia, fecha de acceso,
+geometría, resolución, cobertura espacial, ventana post-cambio, persistencia,
+calidad y hashes. El CLI rechaza campos extra —incluido `independent`— y deriva
+la independencia con `configs/agricultural-evidence.yml`. Una fuente no
+registrada o presente en el linaje de entrenamiento/validación no abre el gate.
 
 El control costa-uru, declarado por el usuario como plantación forestal con
 ciclos de cosecha, produjo 37 eventos: seis compatibles con
@@ -438,7 +559,7 @@ ciclos de cosecha, produjo 37 eventos: seis compatibles con
 recuperación suficiente dentro de 2020–2024. No produjo eventos
 `conversion_likely` ni `conversion_confirmed`.
 
-### 5.3 Deltas experimentales del RF multianual
+### 5.5 Deltas experimentales del RF multianual
 
 La CLI incorpora un modo opt-in exclusivo que calcula los stacks HLS anuales
 2020–2024 en GEE, canoniza cada año a los 56 slots del modelo y aplica el
@@ -461,7 +582,7 @@ estación publicada, `analysis_end_date=2024-11-30`.
 ```powershell
 uv run python pruebas.py C:/Users/Facu/Desktop/costa-uru.geojson `
   --rf-annual-deltas `
-  --forest-model-config configs/rf-multiyear-candidate-costa-uru.yml `
+  --forest-model-config configs/rf-forest-entrerios-2020-2024.yml `
   --analysis-end-date 2024-12-31 `
   --establishment-id costa-uru-rf-deltas-2020-2024
 ```
@@ -743,8 +864,12 @@ declarada en el propio gráfico. Ese recorte no modifica los arrays, GeoTIFF,
 estados, scores ni estadísticas.
 
 `outputs/` está ignorado por Git porque puede contener geometrías o resultados
-sensibles. Es evidencia local regenerable, no una dependencia del código ni un
-artefacto que otro clon deba asumir presente.
+sensibles. Los runs analíticos son evidencia local y otro clon no debe asumirlos
+presentes. La excepción actual es
+`outputs/models/rf_forest_multiyear_2020_2024_v1/`: la inferencia local del RF
+multianual necesita allí el joblib registrado. Un clon nuevo debe restaurar ese
+release por sus hashes o regenerarlo; el asset GEE por sí solo no satisface el
+preflight local vigente.
 
 ## Configuración, catálogo y contratos
 
@@ -754,8 +879,9 @@ artefacto que otro clon deba asumir presente.
   fuentes.
 - [`data/licenses.yml`](data/licenses.yml) conserva licencias, atribuciones,
   fechas de acceso y restricciones de los datasets incorporados.
-- [`scripts/export_schema.py`](scripts/export_schema.py) regenera los diez JSON
-  Schema canónicos.
+- [`scripts/export_schema.py`](scripts/export_schema.py) regenera catorce JSON
+  Schema canónicos. El contrato de atribución post-cambio se conserva además
+  como schema versionado independiente.
 
 Versiones vigentes:
 
@@ -766,6 +892,13 @@ Versiones vigentes:
 | bundle local | `3.1.0` |
 | bundle derivado con benchmark Hampel | `3.2.0` |
 | bundle experimental de deltas RF multianuales | `3.4.0` |
+| envelope del análisis completo | `2.2.0` |
+| índice de figuras para informe / política de selección | `1.0.0` |
+| atribución post-cambio por evento | `3.0.0` |
+| evidencia agrícola / política de independencia | `1.0.0` |
+| recolección agrícola mensual por evento | `1.0.0` |
+| persistencia agrícola por evento | `1.0.0` |
+| catálogo de fuentes | `2.1.0` |
 | resumen de análisis | `1.0.0` |
 | grilla raster | `1.0.0` |
 | línea base forestal | `1.0.0` |
@@ -882,15 +1015,61 @@ finalizaron sin errores.
 El incremento de integración RF del `2026-08-03` aprobó el mismo gate con
 **373 pruebas** y **90,88 % de cobertura total**, sin ejecutar exports remotos.
 
-El cierre de reproducibilidad RF y atribución v0 del `2026-08-10` aprobó el
-gate completo con **520 pruebas** y **90,48 % de cobertura total**. Ruff, el
+El cierre de los pasos 0–1 de evidencia agrícola del `2026-08-11` aprobó el
+gate completo con **534 pruebas** y **90,53 % de cobertura total**. Ruff, el
 control de formato y Mypy también finalizaron sin errores.
+
+Los incrementos 2–3 de evidencia agrícola del `2026-08-11` aprobaron el gate
+completo con **547 pruebas** y **90,36 % de cobertura total**. Ruff, el control
+de formato y Mypy también finalizaron sin errores. Esta verificación usa un
+proveedor GEE falso determinístico; no sustituye el smoke remoto pendiente.
+
+Los incrementos 4–5 de persistencia e integración agrícola del `2026-08-11`
+aprobaron el gate completo con **566 pruebas** y **90,38 % de cobertura total**.
+Ruff, formato y Mypy también aprobaron. Los casos agrícolas nuevos son
+sintéticos y determinísticos: verifican contratos e invariantes, no sustituyen
+un smoke GEE ni validación temática independiente.
+
+La integración operativa one-command y la corrección del transporte
+EPSG:6933 del `2026-08-11` aprobaron el gate completo con **577 pruebas** y
+**90,43 % de cobertura total**. Ruff, formato, Mypy sobre 105 archivos y
+`git diff --check` también aprobaron. Todavía no se ejecutó un run remoto real
+de los seis componentes.
+
+La incorporación de láminas agrícolas auditables del `2026-08-12` aprobó el
+gate completo con **587 pruebas** y **90,62 % de cobertura total**. Ruff,
+formato, Mypy sobre 107 archivos y `git diff --check` también aprobaron. El QA
+visual usó los TIFF del collector del run real conservado y derivó localmente
+persistencia y conjunción en una carpeta temporal, sin modificar el expediente
+histórico ni realizar nuevas consultas GEE. Esta comprobación valida el render
+y el linaje operativo, no la exactitud temática de Dynamic World.
+
+La colección curada de figuras para informe del `2026-08-12` aprobó el gate
+completo con **589 pruebas** y **90,50 % de cobertura total**. Ruff, formato,
+Mypy y `git diff --check` también aprobaron. La colección copia únicamente PNG
+declarados y hasheados por los manifests hijos; no renderiza de nuevo ni mueve
+los productos científicos originales.
+
+El primer run remoto conservado expuso una incompatibilidad concreta de
+transporte: Earth Engine no interpreta el alias literal `EPSG:6933` en
+`getDownloadURL`, aunque sí acepta la definición equivalente WKT1_GDAL. El
+pipeline mantiene `EPSG:6933` como CRS científico y del GeoTIFF, y convierte
+solamente ese parámetro remoto a WKT1_GDAL. La corrección se comprobó de forma
+acotada sobre el evento `PDE-F225FE2B4977`, ventana `2021-09`: seis escenas,
+grilla 38 x 94 y GeoTIFF validado. Esto NO equivale todavía a un run remoto
+completo de seis componentes.
 
 ## Ejecución completa recomendada
 
-El orquestador fino reutiliza las funciones públicas existentes y ejecuta, en
-orden, el pipeline principal, el benchmark Hampel derivado, los deltas anuales
-del RF multianual candidato y la atribución post-cambio v0:
+El orquestador reutiliza las funciones públicas existentes, autentica Earth
+Engine una sola vez y ejecuta este DAG secuencial:
+
+1. pipeline principal y eventos;
+2. benchmark Hampel;
+3. deltas anuales del RF multianual candidato;
+4. recolección mensual Dynamic World por evento;
+5. persistencia agrícola;
+6. atribución post-cambio.
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\run_complete_analysis.py `
@@ -901,8 +1080,48 @@ del RF multianual candidato y la atribución post-cambio v0:
   --credentials .\credentials.json
 ```
 
+Como alternativa a la cuenta de servicio, el mismo comando acepta
+`--gee-project <proyecto-versionado>` para reutilizar la credencial OAuth de
+usuario ya persistida. `--credentials` y `--gee-project` son excluyentes; en
+ambos modos se crea una sola sesión GEE y se comparte entre HLS, RF y Dynamic
+World.
+
 Cada ejecución se publica bajo `outputs/runs/<run-id>/`. El directorio contiene
-`run_manifest.json` y cuatro bundles hijos intactos bajo `components/`. El
+`run_manifest.json` y seis bundles hijos intactos bajo:
+
+```text
+components/full_pipeline/<bundle>
+components/hampel_benchmark/<bundle>                 # o diagnostic_unavailable
+components/rf_annual_deltas/<bundle>
+components/agricultural_collection/<bundle>
+components/agricultural_persistence/<bundle>
+components/post_change_attribution/<bundle>
+report_assets/index.json
+report_assets/figures/*.png
+```
+
+`report_assets/figures/` reúne copias byte a byte de las láminas más útiles
+para armar el informe sin obligar a navegar cada bundle. La política `1.0.0`
+selecciona, cuando existen: línea base y screening 2020; timeline RGB, índices y
+cobertura observacional; detección y fichas de eventos; diagnóstico Hampel;
+timeline y comparación RF; evidencia agrícola mensual y persistente; atribución
+post-cambio y mapas de conjunción. Los prefijos numéricos fijan un orden de
+lectura, pero los originales permanecen intactos y son la fuente autoritativa.
+
+`report_assets/index.json` registra para cada copia componente, motivo de
+selección, ruta y SHA-256 del PNG original, manifest hijo y ruta/hash de la
+copia. También conserva el estado de componentes sin figura. Por eso un run
+`partial` o `.failed` puede reunir de forma auditable todo lo producido antes
+del fallo, sin fabricar imágenes para componentes ausentes o sin soporte.
+
+Cuando un componente no puede publicar un bundle porque queda
+`diagnostic_unavailable`, `failed` o `skipped`, su carpeta contiene
+`component_status.json`. Este recibo no finge ser un bundle científico:
+registra estado, timestamps, dependencias y un código de error sanitizado. El
+manifest superior referencia y hashea el recibo para que una carpeta sin
+productos científicos no quede inexplicablemente vacía.
+
+El
 manifest superior registra hashes, coberturas diferentes, dependencias y
 estado; no mezcla ni reinterpreta los contratos científicos de los hijos.
 Antes de publicar `complete`, el orquestador verifica todos los tamaños y
@@ -912,11 +1131,13 @@ correlaciona el expediente; cada bundle hijo conserva y declara su propio ID.
 Los componentes se invocan como funciones Python: `subprocess` se usa solamente
 para registrar revisión y estado Git, nunca para ejecutar el procesamiento.
 
-El flujo es secuencial y *fail-fast*. Un éxito termina como `complete`. Si
-falla el primer componente termina como `failed`; si ya existe al menos un
-bundle hijo completo termina como `partial`. En ambos casos el diagnóstico se
-conserva en un directorio explícito terminado en `.failed`, con error
-sanitizado y sin credenciales. No se realizan reintentos automáticos.
+El flujo es secuencial y *fail-fast* para sus componentes científicos
+obligatorios. Hampel es un diagnóstico lateral: si no encuentra suficientes
+controles estrictamente estables queda `diagnostic_unavailable`, RF y
+atribución continúan, y el expediente se publica normalmente con estado
+`partial` y un warning científico. Cualquier otro error de Hampel sigue siendo
+bloqueante. Los fallos bloqueantes se conservan en un directorio terminado en
+`.failed`, con error sanitizado y sin credenciales. No hay reintentos automáticos.
 
 Este comando produce un expediente técnico de detección, atribución
 conservadora y revisión. No emite certificación ni confirma automáticamente
@@ -934,9 +1155,15 @@ Todavía falta:
 - calibrar umbrales y scores por paisaje o ecorregión;
 - ampliar la cobertura espacial sintética a `MultiPolygon`, bordes que cortan
   píxeles y casos que cruzan zonas UTM;
-- integrar evidencia independiente de uso agrícola o ganadero posterior y capas
-  de incendio, sequía e inundación para reducir los resultados `unknown` de la
-  atribución v0;
+- ejecutar un smoke remoto completo de los seis componentes; ya se validó de
+  forma acotada el primer evento/mes Dynamic World contra un bundle científico
+  preservado, pero no la cadena completa;
+- sumar una segunda fuente temporal para medir desacuerdo cross-source, hoy
+  declarado explícitamente como no evaluado;
+- validar la persistencia y la integración agrícola sobre casos reales sin perder
+  `unknown/review_required` cuando el soporte sea insuficiente;
+- integrar capas de incendio, sequía e inundación para reducir resultados
+  `unknown` de la atribución v1;
 - validar eventos segmentados contra referencia espacial independiente y
   cuantificar sensibilidad a bordes y resolución;
 - incorporar Sentinel-2 a 10 m como producto óptico principal del MVP;

@@ -1,0 +1,15 @@
+schema_version: "1.0.0"
+source_id: dynamic_world_v1
+minimum_valid_periods: 3
+minimum_qualifying_periods: 2
+minimum_post_onset_duration_days: 180
+primary_crop_observation_fraction: 0.50
+sensitivity_crop_observation_fractions:
+  - 0.40
+  - 0.50
+  - 0.60
+minimum_valid_observations_per_period: 2
+maximum_unobserved_gap_periods: 3
+seasonality_rule: seasonal_nonconsecutive_periods
+long_gap_interpolation_used: false
+support_raster_nodata: -9999.0

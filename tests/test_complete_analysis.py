@@ -6,11 +6,16 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 
+import deforestation_pipeline.complete_analysis as complete_module
+from deforestation_pipeline.agricultural_evidence import (
+    AgriculturalEvidenceDocument,
+    AgriculturalEvidencePolicy,
+)
 from deforestation_pipeline.complete_analysis import (
     PROJECT_ROOT,
     CompleteAnalysisError,
@@ -20,6 +25,7 @@ from deforestation_pipeline.complete_analysis import (
     _sanitize,
     run_complete_analysis,
 )
+from deforestation_pipeline.hampel_benchmark import HampelDiagnosticUnavailableError
 
 CREATED = datetime(2026, 8, 6, tzinfo=UTC)
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_complete_analysis.py"
@@ -73,11 +79,20 @@ def _publish_child(root: Path, name: str) -> Path:
 
 def _loaders() -> dict[str, Any]:
     return {
-        "config_loader": lambda _: object(),
+        "config_loader": lambda _: SimpleNamespace(output=object()),
         "model_loader": lambda _: SimpleNamespace(
             supported_observation_years=(2020, 2021, 2022, 2023, 2024)
         ),
         "hampel_loader": lambda _: object(),
+        "agricultural_collector_loader": lambda _: object(),
+        "agricultural_persistence_loader": lambda _: object(),
+        "raster_provider": lambda _: None,
+        "agricultural_collector_runner": lambda **kwargs: _publish_child(
+            Path(kwargs["output_root"]), "agricultural-collection-child"
+        ),
+        "agricultural_persistence_runner": lambda **kwargs: _publish_child(
+            Path(kwargs["output_root"]), "agricultural-persistence-child"
+        ),
         "attribution_runner": lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]), "attribution-child"
         ),
@@ -136,7 +151,7 @@ def test_runs_components_in_order_and_publishes_relative_references(tmp_path: Pa
     assert ".." not in output.name and "field-a" in output.name
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["overall_status"] == "complete"
-    assert [item["status"] for item in manifest["components"]] == ["completed"] * 4
+    assert [item["status"] for item in manifest["components"]] == ["completed"] * 6
     assert all(not Path(item["output_bundle"]).is_absolute() for item in manifest["components"])
     assert manifest["coverage"]["rf_annual_deltas"]["requested_years"] == [2020, 2024]
     assert calls[0][1]["created_at"] == calls[1][1]["created_at"] == calls[2][1]["created_at"]
@@ -153,10 +168,176 @@ def test_runs_components_in_order_and_publishes_relative_references(tmp_path: Pa
     assert all(
         item["child_analysis_id"] != manifest["analysis_id"] for item in manifest["components"]
     )
-    assert len({item["child_analysis_id"] for item in manifest["components"]}) == 4
+    assert len({item["child_analysis_id"] for item in manifest["components"]}) == 6
     assert all(item["child_created_at"] == CREATED.isoformat() for item in manifest["components"])
     assert len(manifest["parameters_hash"]) == 64
     assert manifest["parameters_hash"] == _parameters_hash(manifest)
+
+
+def test_expected_hampel_unavailability_continues_as_partial_run(tmp_path: Path) -> None:
+    paths = _inputs(tmp_path)
+    calls: list[str] = []
+
+    def runner(name: str) -> Any:
+        def call(**kwargs: Any) -> Path:
+            calls.append(name)
+            if name == "hampel":
+                raise HampelDiagnosticUnavailableError("hampel_insufficient_strict_stable_controls")
+            return _publish_child(Path(kwargs["output_root"]), name)
+
+        return call
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        establishment_id="field",
+    )
+    output = run_complete_analysis(
+        request,
+        created_at=CREATED,
+        pipeline_runner=runner("full"),
+        hampel_runner=runner("hampel"),
+        delta_runner=runner("deltas"),
+        attribution_runner=runner("attribution"),
+        **{key: value for key, value in _loaders().items() if key != "attribution_runner"},
+    )
+
+    assert calls == ["full", "hampel", "deltas", "attribution"]
+    assert not output.name.endswith(".failed")
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["overall_status"] == "partial"
+    hampel = manifest["components"][1]
+    assert hampel["required_for_publication"] is False
+    assert hampel["status"] == "diagnostic_unavailable"
+    assert hampel["error"] == {
+        "error_type": "HampelDiagnosticUnavailableError",
+        "message": "hampel_insufficient_strict_stable_controls",
+    }
+    assert manifest["scientific_warnings"] == [
+        {
+            "component": "hampel_benchmark",
+            "code": "hampel_insufficient_strict_stable_controls",
+        }
+    ]
+    assert manifest["failure"] is None
+    assert manifest["dependencies"]["rf_annual_deltas"] == ["full_pipeline"]
+    receipt_path = output / hampel["status_receipt"]
+    assert receipt_path.is_file()
+    assert hashlib.sha256(receipt_path.read_bytes()).hexdigest() == hampel["status_receipt_sha256"]
+    receipt = json.loads(receipt_path.read_text("utf-8"))
+    assert receipt == {
+        "schema_version": "1.0.0",
+        "component": "hampel_benchmark",
+        "status": "diagnostic_unavailable",
+        "required_for_publication": False,
+        "started_at": CREATED.isoformat(),
+        "completed_at": hampel["completed_at"],
+        "recorded_at": receipt["recorded_at"],
+        "dependencies": ["full_pipeline"],
+        "error": {
+            "error_type": "HampelDiagnosticUnavailableError",
+            "code": "hampel_insufficient_strict_stable_controls",
+        },
+    }
+    completed = [item for item in manifest["components"] if item["status"] == "completed"]
+    assert len({item["child_analysis_id"] for item in completed}) == 5
+
+
+def test_validated_agricultural_evidence_is_forwarded_to_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inputs(tmp_path)
+    evidence_path = tmp_path / "agricultural-evidence.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+    loaded_document = object()
+    loaded_policy = object()
+    evaluated = {"PDE-1": (object(),)}
+    monkeypatch.setattr(
+        complete_module,
+        "evaluate_agricultural_evidence",
+        lambda document, policy: (
+            evaluated
+            if document is loaded_document and policy is loaded_policy
+            else pytest.fail("se evaluaron contratos distintos de los precargados")
+        ),
+    )
+
+    def attribution(**kwargs: Any) -> Path:
+        assert kwargs["context"].agricultural_use_evidence == evaluated
+        return _publish_child(Path(kwargs["output_root"]), "attribution")
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        agricultural_evidence_path=evidence_path,
+        establishment_id="field",
+    )
+    output = run_complete_analysis(
+        request,
+        created_at=CREATED,
+        pipeline_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "full"),
+        hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
+        delta_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "deltas"),
+        attribution_runner=attribution,
+        agricultural_evidence_loader=lambda _: cast(AgriculturalEvidenceDocument, loaded_document),
+        agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, loaded_policy),
+        **{key: value for key, value in _loaders().items() if key != "attribution_runner"},
+    )
+
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["scientific_flags"]["agricultural_evidence_policy_applied"] is True
+    assert manifest["scientific_flags"]["agricultural_evidence_provided"] is True
+    assert manifest["agricultural_evidence_input"]["sha256"] == hashlib.sha256(b"{}").hexdigest()
+
+
+def test_persistent_agricultural_bundle_is_forwarded_reversibly_to_attribution(
+    tmp_path: Path,
+) -> None:
+    paths = _inputs(tmp_path)
+    agriculture = tmp_path / "agriculture"
+    agriculture_manifest = agriculture / "json/run/manifest.json"
+    agriculture_manifest.parent.mkdir(parents=True)
+    agriculture_manifest.write_text(
+        json.dumps({"analysis_id": str(uuid5(NAMESPACE_URL, "agriculture")), "artifacts": []}),
+        encoding="utf-8",
+    )
+    captured: list[dict[str, Any]] = []
+
+    def attribution(**kwargs: Any) -> Path:
+        captured.append(kwargs)
+        return _publish_child(Path(kwargs["output_root"]), "attribution")
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        agricultural_persistence_bundle_path=agriculture,
+        establishment_id="field",
+    )
+    output = run_complete_analysis(
+        request,
+        created_at=CREATED,
+        pipeline_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "full"),
+        hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
+        delta_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "deltas"),
+        attribution_runner=attribution,
+        **{key: value for key, value in _loaders().items() if key != "attribution_runner"},
+    )
+
+    assert captured[0]["source_agricultural_bundle"] == agriculture.resolve()
+    assert captured[0]["agricultural_policy"] is not None
+    manifest = json.loads((output / "run_manifest.json").read_text("utf-8"))
+    expected = hashlib.sha256(agriculture_manifest.read_bytes()).hexdigest()
+    assert manifest["agricultural_persistence_input"]["manifest_sha256"] == expected
+    assert manifest["scientific_flags"]["persistent_agricultural_evidence_provided"] is True
 
 
 @pytest.mark.parametrize("failing", ["full", "hampel", "deltas", "attribution"])
@@ -213,6 +394,19 @@ def test_failure_is_fail_fast_and_preserves_failure_envelope(tmp_path: Path, fai
     completed = [item for item in report["components"] if item["status"] == "completed"]
     for component in completed:
         assert (error.value.failure_path / component["output_bundle"]).is_dir()
+    incomplete = [item for item in report["components"] if item["status"] != "completed"]
+    for component in incomplete:
+        receipt_path = error.value.failure_path / component["status_receipt"]
+        assert receipt_path.is_file()
+        assert (
+            hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+            == component["status_receipt_sha256"]
+        )
+        receipt = json.loads(receipt_path.read_text("utf-8"))
+        assert receipt["component"] == component["name"]
+        assert receipt["status"] == component["status"]
+        assert receipt["dependencies"] == report["dependencies"].get(component["name"], [])
+        assert "abc" not in json.dumps(receipt)
 
 
 def test_failure_manifest_never_leaks_external_input_path(tmp_path: Path) -> None:
@@ -723,6 +917,19 @@ def test_cli_defaults_and_forwarding_without_credentials(
     assert request.hls_start_year == 2020 and request.hls_end_year == 2025
     assert request.declared_land_use == "unknown"
     assert request.declared_context_source == "not_provided"
+    assert request.agricultural_evidence_policy_path == (
+        PROJECT_ROOT / "configs" / "agricultural-evidence.yml"
+    )
+    assert request.agricultural_collector_config_path == (
+        PROJECT_ROOT / "configs" / "agricultural-collector.yml"
+    )
+    assert request.agricultural_persistence_config_path == (
+        PROJECT_ROOT / "configs" / "agricultural-persistence.yml"
+    )
+    assert request.catalog_path == PROJECT_ROOT / "data" / "catalog.yml"
+    assert request.licenses_path == PROJECT_ROOT / "data" / "licenses.yml"
+    assert request.agricultural_evidence_path is None
+    assert request.agricultural_persistence_bundle_path is None
 
 
 def test_cli_forwards_declared_managed_forest_context(
@@ -753,6 +960,123 @@ def test_cli_forwards_declared_managed_forest_context(
     )
     assert captured[0].declared_land_use == "managed_forest_plantation"
     assert captured[0].declared_context_source == "user_declared"
+
+
+def test_cli_forwards_all_automatic_agriculture_contract_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vector = tmp_path / "field.geojson"
+    vector.write_text("{}", encoding="utf-8")
+    named = {
+        "collector": tmp_path / "collector.yml",
+        "persistence": tmp_path / "persistence.yml",
+        "policy": tmp_path / "policy.yml",
+        "catalog": tmp_path / "catalog.yml",
+        "licenses": tmp_path / "licenses.yml",
+    }
+    captured: list[CompleteAnalysisRequest] = []
+
+    def fake_run(request: CompleteAnalysisRequest) -> Path:
+        captured.append(request)
+        return tmp_path / "published"
+
+    monkeypatch.setattr(
+        SCRIPT_MODULE,
+        "run_complete_analysis",
+        fake_run,
+    )
+    monkeypatch.setattr(SCRIPT_MODULE.Path, "is_file", lambda path: False)
+    assert (
+        SCRIPT_MODULE.main(
+            [
+                str(vector),
+                "--agricultural-collector-config",
+                str(named["collector"]),
+                "--agricultural-persistence-config",
+                str(named["persistence"]),
+                "--agricultural-evidence-policy",
+                str(named["policy"]),
+                "--catalog",
+                str(named["catalog"]),
+                "--licenses",
+                str(named["licenses"]),
+            ]
+        )
+        == 0
+    )
+    request = captured[0]
+    assert request.agricultural_collector_config_path == named["collector"]
+    assert request.agricultural_persistence_config_path == named["persistence"]
+    assert request.agricultural_evidence_policy_path == named["policy"]
+    assert request.catalog_path == named["catalog"]
+    assert request.licenses_path == named["licenses"]
+
+
+def test_cli_forwards_agricultural_evidence_contract_and_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vector = tmp_path / "field.geojson"
+    evidence = tmp_path / "agriculture.json"
+    policy = tmp_path / "policy.yml"
+    vector.write_text("{}", encoding="utf-8")
+    evidence.write_text("{}", encoding="utf-8")
+    policy.write_text("{}", encoding="utf-8")
+    captured: list[CompleteAnalysisRequest] = []
+
+    def fake_run(request: CompleteAnalysisRequest) -> Path:
+        captured.append(request)
+        return tmp_path / "published"
+
+    monkeypatch.setattr(SCRIPT_MODULE, "run_complete_analysis", fake_run)
+    assert (
+        SCRIPT_MODULE.main(
+            [
+                str(vector),
+                "--agricultural-evidence-json",
+                str(evidence),
+                "--agricultural-evidence-policy",
+                str(policy),
+            ]
+        )
+        == 0
+    )
+    assert captured[0].agricultural_evidence_path == evidence
+    assert captured[0].agricultural_evidence_policy_path == policy
+
+
+def test_cli_forwards_persistent_agricultural_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vector = tmp_path / "field.geojson"
+    bundle = tmp_path / "agriculture"
+    vector.write_text("{}", encoding="utf-8")
+    bundle.mkdir()
+    captured: list[CompleteAnalysisRequest] = []
+
+    def fake_run(request: CompleteAnalysisRequest) -> Path:
+        captured.append(request)
+        return tmp_path / "published"
+
+    monkeypatch.setattr(SCRIPT_MODULE, "run_complete_analysis", fake_run)
+    assert SCRIPT_MODULE.main([str(vector), "--agricultural-persistence-bundle", str(bundle)]) == 0
+    assert captured[0].agricultural_persistence_bundle_path == bundle
+
+
+def test_cli_forwards_user_oauth_project_without_service_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vector = tmp_path / "field.geojson"
+    vector.write_text("{}", encoding="utf-8")
+    captured: list[CompleteAnalysisRequest] = []
+
+    def fake_run(request: CompleteAnalysisRequest) -> Path:
+        captured.append(request)
+        return tmp_path / "published"
+
+    monkeypatch.setattr(SCRIPT_MODULE, "run_complete_analysis", fake_run)
+    assert SCRIPT_MODULE.main([str(vector), "--gee-project", "versioned-ee-project"]) == 0
+    assert captured[0].gee_project == "versioned-ee-project"
+    assert captured[0].credentials_path is None
 
 
 def test_cli_failure_returns_nonzero_without_traceback(

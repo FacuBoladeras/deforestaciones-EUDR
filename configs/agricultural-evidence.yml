@@ -1,0 +1,75 @@
+schema_version: "1.0.0"
+policy_id: agricultural-evidence-lineage-v1
+consumer_model:
+  model_id: rf_forest_multiyear_2020_2024_v1
+  model_family: random_forest
+  training_dataset_ids:
+    - mapbiomas_argentina_collection2
+    - jrc_gfc2020_v3
+    - esa_worldcover_2020_v100
+    - hansen_gfc_2025_v1_13
+  validation_dataset_ids: []
+  predictor_dataset_ids:
+    - nasa_hlsl30_v002
+    - nasa_hlss30_v002
+  sensor_families:
+    - landsat
+    - sentinel2
+decision_eligible_levels:
+  - methodological
+  - full
+sources:
+  - dataset_id: dynamic_world_v1
+    version: "1"
+    provider: Google / World Resources Institute
+    collection: GOOGLE/DYNAMICWORLD/V1
+    evidence_role: candidate_independent
+    upstream_dataset_ids:
+      - copernicus_s2_l1c
+    sensor_families:
+      - sentinel2
+    model_family: dynamic_world_cnn
+  - dataset_id: mapbiomas_argentina_collection2
+    version: "2"
+    provider: MapBiomas Argentina
+    collection: projects/mapbiomas-public/assets/argentina/lulc/collection2/mapbiomas_argentina_collection2_integration_v3
+    evidence_role: corroborative_non_independent
+    upstream_dataset_ids:
+      - landsat_collection2
+    sensor_families:
+      - landsat
+    model_family: mapbiomas_random_forest
+  - dataset_id: jrc_gfc2020_v3
+    version: "3"
+    provider: Joint Research Centre
+    collection: JRC/GFC2020/V3
+    evidence_role: corroborative_non_independent
+    upstream_dataset_ids:
+      - sentinel2
+      - landsat
+    sensor_families:
+      - sentinel2
+      - landsat
+    model_family: jrc_forest_cover_ensemble
+  - dataset_id: esa_worldcover_2020_v100
+    version: v100
+    provider: ESA
+    collection: ESA/WorldCover/v100
+    evidence_role: corroborative_non_independent
+    upstream_dataset_ids:
+      - sentinel1
+      - sentinel2
+    sensor_families:
+      - sentinel1
+      - sentinel2
+    model_family: worldcover_ensemble
+  - dataset_id: hansen_gfc_2025_v1_13
+    version: "1.13"
+    provider: University of Maryland / Google
+    collection: UMD/hansen/global_forest_change_2025_v1_13
+    evidence_role: corroborative_non_independent
+    upstream_dataset_ids:
+      - landsat
+    sensor_families:
+      - landsat
+    model_family: global_forest_change

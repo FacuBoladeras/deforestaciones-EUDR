@@ -44,6 +44,12 @@ from matplotlib import pyplot as plt
 
 VISEC_HAMPEL_INDICES = ("NDVI", "EVI2", "NMDI", "LSWI", "NIRv", "kNDVI")
 HAMPEL_BENCHMARK_SCHEMA_VERSION = "1.0.0"
+
+
+class HampelDiagnosticUnavailableError(ValueError):
+    """El benchmark no puede estimarse sin violar sus controles científicos."""
+
+
 DERIVED_BUNDLE_SCHEMA_VERSION = "3.2.0"
 _SAFE_ESTABLISHMENT = re.compile(r"[^a-z0-9-]+")
 
@@ -488,7 +494,7 @@ def _analyze_source_bundle(
         minimum_center_distance_pixels=(config.stable_control_minimum_center_distance_pixels),
     )
     if len(controls) < config.stable_control_count:
-        raise ValueError("hampel_insufficient_strict_stable_controls")
+        raise HampelDiagnosticUnavailableError("hampel_insufficient_strict_stable_controls")
     control_units = tuple(
         _AnalysisUnit(control.unit_id, "stable_control", control.pixels) for control in controls
     )

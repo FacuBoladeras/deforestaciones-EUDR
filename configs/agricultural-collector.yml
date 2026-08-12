@@ -1,0 +1,14 @@
+schema_version: "1.0.0"
+source_id: dynamic_world_v1
+target_crs: EPSG:6933
+resolution_m: 10
+raster_nodata: -9999.0
+temporal_cadence: calendar_month
+minimum_top1_probability: 0.60
+minimum_valid_observations_per_pixel: 2
+minimum_crop_observation_fraction: 0.50
+maximum_events: 100
+maximum_windows_per_event: 72
+maximum_total_queries: 500
+resampling: nearest
+event_footprint_method: exact_polygon_pixel_intersection_fraction

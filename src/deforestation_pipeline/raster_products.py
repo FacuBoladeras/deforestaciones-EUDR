@@ -340,6 +340,18 @@ def validate_geotiff_bytes(
     return normalized_content, validation
 
 
+def _gee_download_crs(target_crs: str) -> str:
+    """Devuelve una representación que Earth Engine pueda interpretar.
+
+    Earth Engine rechaza el alias ``EPSG:6933`` aunque acepta su definición
+    WKT1 completa. Conservamos EPSG:6933 en el contrato local y sólo adaptamos
+    el parámetro de transporte de ``getDownloadURL``.
+    """
+    if target_crs.upper() == "EPSG:6933":
+        return CRS.from_user_input(target_crs).to_wkt(version="WKT1_GDAL")
+    return target_crs
+
+
 def materialize_ee_image_to_grid(
     *,
     image: Any,
@@ -383,7 +395,7 @@ def materialize_ee_image_to_grid(
     parameters = {
         "name": download_name,
         "bands": list(band_names),
-        "crs": grid_spec.target_crs,
+        "crs": _gee_download_crs(grid_spec.target_crs),
         "crs_transform": list(grid_spec.transform),
         "dimensions": [grid_spec.width, grid_spec.height],
         "format": "GEO_TIFF",
@@ -1155,6 +1167,8 @@ def _figure_bytes(figure: Figure, dpi: int) -> bytes:
 
 def _remote_download_error_code(error: Exception) -> str:
     message = str(error).lower()
+    if "projection" in message and "crs" in message and "pars" in message:
+        return "remote_projection_invalid"
     if "permission" in message or "forbidden" in message:
         return "permission_denied"
     if "quota" in message or "rate" in message:

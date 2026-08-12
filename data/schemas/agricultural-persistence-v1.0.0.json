@@ -1,0 +1,446 @@
+{
+  "$defs": {
+    "AgriculturalPersistenceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "cross_source_disagreement_state": {
+          "const": "single_source_not_assessed",
+          "title": "Cross Source Disagreement State",
+          "type": "string"
+        },
+        "estimated_onset_window_end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Estimated Onset Window End"
+        },
+        "event_area_ha": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Event Area Ha"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "forest_recovery_assessed": {
+          "const": false,
+          "title": "Forest Recovery Assessed",
+          "type": "boolean"
+        },
+        "gap_period_count": {
+          "minimum": 0,
+          "title": "Gap Period Count",
+          "type": "integer"
+        },
+        "long_gap_interpolation_used": {
+          "const": false,
+          "title": "Long Gap Interpolation Used",
+          "type": "boolean"
+        },
+        "maximum_consecutive_gap_periods": {
+          "minimum": 0,
+          "title": "Maximum Consecutive Gap Periods",
+          "type": "integer"
+        },
+        "observed_consecutive_qualifying_periods": {
+          "minimum": 0,
+          "title": "Observed Consecutive Qualifying Periods",
+          "type": "integer"
+        },
+        "observed_duration_days": {
+          "minimum": 0,
+          "title": "Observed Duration Days",
+          "type": "integer"
+        },
+        "per_period_support": {
+          "items": {
+            "$ref": "#/$defs/PeriodSupport"
+          },
+          "title": "Per Period Support",
+          "type": "array"
+        },
+        "persistence_status": {
+          "enum": [
+            "persistent_crop_support",
+            "not_persistent",
+            "insufficient_series",
+            "insufficient_collection"
+          ],
+          "title": "Persistence Status",
+          "type": "string"
+        },
+        "persistent_crop_area_ha": {
+          "minimum": 0,
+          "title": "Persistent Crop Area Ha",
+          "type": "number"
+        },
+        "persistent_event_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Persistent Event Fraction",
+          "type": "number"
+        },
+        "post_change_window_end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Post Change Window End"
+        },
+        "post_change_window_start": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Post Change Window Start"
+        },
+        "qualifying_period_count": {
+          "minimum": 0,
+          "title": "Qualifying Period Count",
+          "type": "integer"
+        },
+        "quality_flags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "sensitivity": {
+          "items": {
+            "$ref": "#/$defs/PersistenceSensitivity"
+          },
+          "title": "Sensitivity",
+          "type": "array"
+        },
+        "support_raster_path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Support Raster Path"
+        },
+        "support_raster_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Support Raster Sha256"
+        },
+        "temporal_disagreement_present": {
+          "title": "Temporal Disagreement Present",
+          "type": "boolean"
+        },
+        "valid_period_count": {
+          "minimum": 0,
+          "title": "Valid Period Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "persistence_status",
+        "estimated_onset_window_end",
+        "post_change_window_start",
+        "post_change_window_end",
+        "observed_duration_days",
+        "valid_period_count",
+        "qualifying_period_count",
+        "observed_consecutive_qualifying_periods",
+        "gap_period_count",
+        "maximum_consecutive_gap_periods",
+        "long_gap_interpolation_used",
+        "temporal_disagreement_present",
+        "cross_source_disagreement_state",
+        "forest_recovery_assessed",
+        "event_area_ha",
+        "persistent_crop_area_ha",
+        "persistent_event_fraction",
+        "support_raster_path",
+        "support_raster_sha256",
+        "sensitivity",
+        "per_period_support",
+        "quality_flags"
+      ],
+      "title": "AgriculturalPersistenceEvent",
+      "type": "object"
+    },
+    "PeriodSupport": {
+      "additionalProperties": false,
+      "properties": {
+        "end_date_exclusive": {
+          "format": "date",
+          "title": "End Date Exclusive",
+          "type": "string"
+        },
+        "matched_scene_count": {
+          "minimum": 0,
+          "title": "Matched Scene Count",
+          "type": "integer"
+        },
+        "nodata_area_ha": {
+          "minimum": 0,
+          "title": "Nodata Area Ha",
+          "type": "number"
+        },
+        "qualifying_crop_area_ha": {
+          "minimum": 0,
+          "title": "Qualifying Crop Area Ha",
+          "type": "number"
+        },
+        "raster_path": {
+          "minLength": 1,
+          "title": "Raster Path",
+          "type": "string"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        },
+        "valid_area_ha": {
+          "minimum": 0,
+          "title": "Valid Area Ha",
+          "type": "number"
+        },
+        "window_id": {
+          "pattern": "^\\d{4}-\\d{2}$",
+          "title": "Window Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "window_id",
+        "start_date",
+        "end_date_exclusive",
+        "valid_area_ha",
+        "qualifying_crop_area_ha",
+        "nodata_area_ha",
+        "matched_scene_count",
+        "raster_path"
+      ],
+      "title": "PeriodSupport",
+      "type": "object"
+    },
+    "PersistenceSensitivity": {
+      "additionalProperties": false,
+      "properties": {
+        "crop_observation_fraction_threshold": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Crop Observation Fraction Threshold",
+          "type": "number"
+        },
+        "persistent_crop_area_ha": {
+          "minimum": 0,
+          "title": "Persistent Crop Area Ha",
+          "type": "number"
+        },
+        "persistent_event_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Persistent Event Fraction",
+          "type": "number"
+        }
+      },
+      "required": [
+        "crop_observation_fraction_threshold",
+        "persistent_crop_area_ha",
+        "persistent_event_fraction"
+      ],
+      "title": "PersistenceSensitivity",
+      "type": "object"
+    },
+    "SourceBundleReference": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_id": {
+          "format": "uuid",
+          "title": "Analysis Id",
+          "type": "string"
+        },
+        "bundle_name": {
+          "minLength": 1,
+          "title": "Bundle Name",
+          "type": "string"
+        },
+        "input_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "source_event_bundle": {
+          "$ref": "#/$defs/UpstreamEventBundleReference"
+        }
+      },
+      "required": [
+        "analysis_id",
+        "input_sha256",
+        "manifest_sha256",
+        "bundle_name",
+        "source_event_bundle"
+      ],
+      "title": "SourceBundleReference",
+      "type": "object"
+    },
+    "UpstreamEventBundleReference": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_id": {
+          "format": "uuid",
+          "title": "Analysis Id",
+          "type": "string"
+        },
+        "bundle_name": {
+          "minLength": 1,
+          "title": "Bundle Name",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "event_artifact_path": {
+          "const": "json/evidence/disturbance_events.geojson",
+          "title": "Event Artifact Path",
+          "type": "string"
+        },
+        "event_artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Event Artifact Sha256",
+          "type": "string"
+        },
+        "input_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis_id",
+        "input_sha256",
+        "manifest_sha256",
+        "bundle_name",
+        "event_artifact_path",
+        "event_artifact_sha256"
+      ],
+      "title": "UpstreamEventBundleReference",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:agricultural-persistence:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resultado de persistencia, incluyendo insuficiencia y desacuerdo explícitos.",
+  "properties": {
+    "analysis_id": {
+      "format": "uuid",
+      "title": "Analysis Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "establishment_id": {
+      "minLength": 1,
+      "title": "Establishment Id",
+      "type": "string"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/AgriculturalPersistenceEvent"
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "persistence_rule": {
+      "minLength": 1,
+      "title": "Persistence Rule",
+      "type": "string"
+    },
+    "primary_crop_observation_fraction": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Primary Crop Observation Fraction",
+      "type": "number"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_collection_bundle": {
+      "$ref": "#/$defs/SourceBundleReference"
+    }
+  },
+  "required": [
+    "schema_version",
+    "analysis_id",
+    "establishment_id",
+    "created_at",
+    "source_collection_bundle",
+    "persistence_rule",
+    "primary_crop_observation_fraction",
+    "events"
+  ],
+  "title": "AgriculturalPersistenceDocument",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

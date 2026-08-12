@@ -1,4 +1,4 @@
-"""Atribuye eventos existentes usando sus trayectorias RF 2020-2024."""
+"""Atribuye eventos usando trayectorias RF y evidencia agrícola validada por política."""
 
 from __future__ import annotations
 
@@ -7,14 +7,19 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
+from deforestation_pipeline.agricultural_evidence import (
+    EvaluatedAgriculturalEvidence,
+    evaluate_agricultural_evidence,
+    load_agricultural_evidence_document,
+    load_agricultural_evidence_policy,
+)
 from deforestation_pipeline.post_change_attribution import (
-    AgriculturalLandUse,
-    AgriculturalUseEvidence,
     AttributionContext,
     materialize_post_change_attribution,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,49 +37,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agricultural-evidence-json",
         type=Path,
-        help="JSON opcional con events[{event_id,land_use,source,independent}]",
+        help="JSON agricultural-evidence v1; no acepta un booleano independent",
+    )
+    parser.add_argument(
+        "--agricultural-persistence-bundle",
+        type=Path,
+        help="bundle persistente auditable; excluyente con --agricultural-evidence-json",
+    )
+    parser.add_argument(
+        "--agricultural-evidence-policy",
+        type=Path,
+        default=PROJECT_ROOT / "configs" / "agricultural-evidence.yml",
+        help="política versionada que deriva independencia desde el linaje",
     )
     return parser
 
 
-def _agricultural_evidence(path: Path | None) -> dict[str, AgriculturalUseEvidence]:
-    if path is None:
+def _agricultural_evidence(
+    evidence_path: Path | None,
+    policy_path: Path,
+) -> dict[str, tuple[EvaluatedAgriculturalEvidence, ...]]:
+    policy = load_agricultural_evidence_policy(policy_path)
+    if evidence_path is None:
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    rows = payload.get("events") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        raise ValueError("agricultural evidence JSON requiere events[]")
-    evidence: dict[str, AgriculturalUseEvidence] = {}
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("event_id"), str):
-            raise ValueError("agricultural evidence contiene una fila inválida")
-        event_id = row["event_id"]
-        if event_id in evidence:
-            raise ValueError(f"agricultural evidence repite event_id:{event_id}")
-        land_use = row.get("land_use")
-        independent = row.get("independent")
-        source = row.get("source")
-        if land_use not in {"crop", "pasture", "livestock_infrastructure"}:
-            raise ValueError(f"agricultural evidence land_use inválido:{event_id}")
-        if not isinstance(independent, bool):
-            raise ValueError(f"agricultural evidence independent debe ser boolean:{event_id}")
-        if not isinstance(source, str):
-            raise ValueError(f"agricultural evidence source debe ser string:{event_id}")
-        evidence[event_id] = AgriculturalUseEvidence(
-            land_use=cast(AgriculturalLandUse, land_use),
-            source=source,
-            independent=independent,
-        )
-    return evidence
+    document = load_agricultural_evidence_document(evidence_path)
+    return evaluate_agricultural_evidence(document, policy)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.agricultural_evidence_json and args.agricultural_persistence_bundle:
+            raise ValueError("agricultural evidence JSON y persistence bundle son excluyentes")
+        policy = load_agricultural_evidence_policy(args.agricultural_evidence_policy)
         context = AttributionContext(
             declared_land_use=args.declared_land_use,
             declared_context_source=args.declared_context_source,
-            agricultural_use_evidence=_agricultural_evidence(args.agricultural_evidence_json),
+            agricultural_use_evidence=_agricultural_evidence(
+                args.agricultural_evidence_json,
+                args.agricultural_evidence_policy,
+            ),
         )
         output = materialize_post_change_attribution(
             source_event_bundle=args.event_bundle,
@@ -83,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             establishment_id=args.establishment_id,
             context=context,
             created_at=datetime.now(UTC),
+            source_agricultural_bundle=args.agricultural_persistence_bundle,
+            agricultural_policy=policy,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

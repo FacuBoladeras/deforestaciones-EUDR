@@ -1,0 +1,186 @@
+{
+  "$defs": {
+    "AgriculturalEvidenceSourcePolicy": {
+      "additionalProperties": false,
+      "description": "Rol permitido y linaje conocido de un dataset de evidencia.",
+      "properties": {
+        "collection": {
+          "minLength": 1,
+          "title": "Collection",
+          "type": "string"
+        },
+        "dataset_id": {
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "evidence_role": {
+          "enum": [
+            "candidate_independent",
+            "corroborative_non_independent",
+            "declared_context",
+            "human_reference"
+          ],
+          "title": "Evidence Role",
+          "type": "string"
+        },
+        "model_family": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Family"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "sensor_families": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Sensor Families",
+          "type": "array"
+        },
+        "upstream_dataset_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Upstream Dataset Ids",
+          "type": "array"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "version",
+        "provider",
+        "collection",
+        "evidence_role",
+        "upstream_dataset_ids",
+        "sensor_families"
+      ],
+      "title": "AgriculturalEvidenceSourcePolicy",
+      "type": "object"
+    },
+    "ConsumerModelLineage": {
+      "additionalProperties": false,
+      "description": "Fuentes y familia del modelo respecto del cual se evalúa independencia.",
+      "properties": {
+        "model_family": {
+          "minLength": 1,
+          "title": "Model Family",
+          "type": "string"
+        },
+        "model_id": {
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "predictor_dataset_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Predictor Dataset Ids",
+          "type": "array"
+        },
+        "sensor_families": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Sensor Families",
+          "type": "array"
+        },
+        "training_dataset_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Training Dataset Ids",
+          "type": "array"
+        },
+        "validation_dataset_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Validation Dataset Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_family",
+        "training_dataset_ids",
+        "validation_dataset_ids",
+        "predictor_dataset_ids",
+        "sensor_families"
+      ],
+      "title": "ConsumerModelLineage",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:agricultural-evidence-policy:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Política versionada que deriva independencia; no recibe decisiones por evento.",
+  "properties": {
+    "consumer_model": {
+      "$ref": "#/$defs/ConsumerModelLineage"
+    },
+    "decision_eligible_levels": {
+      "items": {
+        "enum": [
+          "methodological",
+          "full"
+        ],
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Decision Eligible Levels",
+      "type": "array"
+    },
+    "policy_id": {
+      "minLength": 1,
+      "title": "Policy Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/AgriculturalEvidenceSourcePolicy"
+      },
+      "title": "Sources",
+      "type": "array"
+    }
+  },
+  "required": [
+    "policy_id",
+    "consumer_model",
+    "decision_eligible_levels",
+    "sources"
+  ],
+  "title": "AgriculturalEvidencePolicy",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

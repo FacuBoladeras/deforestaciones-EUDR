@@ -1,0 +1,459 @@
+{
+  "$defs": {
+    "AgriculturalEvidenceGeometry": {
+      "additionalProperties": false,
+      "description": "Huella atribuida, conservada separadamente de la geometría del evento.",
+      "properties": {
+        "coordinates": {
+          "items": {},
+          "minItems": 1,
+          "title": "Coordinates",
+          "type": "array"
+        },
+        "crs": {
+          "pattern": "^EPSG:\\d+$",
+          "title": "Crs",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "Polygon",
+            "MultiPolygon"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "coordinates",
+        "crs"
+      ],
+      "title": "AgriculturalEvidenceGeometry",
+      "type": "object"
+    },
+    "AgriculturalEvidenceObservation": {
+      "additionalProperties": false,
+      "description": "Una observación espacial y temporal atribuible a un evento.",
+      "properties": {
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "evidence_id": {
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "geometry": {
+          "$ref": "#/$defs/AgriculturalEvidenceGeometry"
+        },
+        "land_use": {
+          "enum": [
+            "crop",
+            "pasture",
+            "livestock_infrastructure",
+            "other",
+            "unknown"
+          ],
+          "title": "Land Use",
+          "type": "string"
+        },
+        "quality": {
+          "$ref": "#/$defs/AgriculturalEvidenceQuality"
+        },
+        "source": {
+          "$ref": "#/$defs/AgriculturalEvidenceSource"
+        },
+        "source_descriptor_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Descriptor Sha256",
+          "type": "string"
+        },
+        "spatial_support": {
+          "$ref": "#/$defs/AgriculturalSpatialSupport"
+        },
+        "temporal_support": {
+          "$ref": "#/$defs/AgriculturalTemporalSupport"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "event_id",
+        "land_use",
+        "source",
+        "source_descriptor_sha256",
+        "geometry",
+        "spatial_support",
+        "temporal_support",
+        "quality",
+        "artifact_sha256"
+      ],
+      "title": "AgriculturalEvidenceObservation",
+      "type": "object"
+    },
+    "AgriculturalEvidenceQuality": {
+      "additionalProperties": false,
+      "description": "Calidad declarada sin convertir un score en probabilidad calibrada.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "confidence_semantics": {
+          "minLength": 1,
+          "title": "Confidence Semantics",
+          "type": "string"
+        },
+        "discarded_observation_reasons": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Discarded Observation Reasons",
+          "type": "array"
+        },
+        "nodata_area_ha": {
+          "minimum": 0,
+          "title": "Nodata Area Ha",
+          "type": "number"
+        },
+        "quality_flags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "uncertainty_notes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Uncertainty Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "confidence_semantics",
+        "quality_flags",
+        "discarded_observation_reasons",
+        "nodata_area_ha",
+        "uncertainty_notes"
+      ],
+      "title": "AgriculturalEvidenceQuality",
+      "type": "object"
+    },
+    "AgriculturalEvidenceSource": {
+      "additionalProperties": false,
+      "description": "Identidad y licencia del dataset efectivamente observado.",
+      "properties": {
+        "access_date": {
+          "format": "date",
+          "title": "Access Date",
+          "type": "string"
+        },
+        "asset": {
+          "minLength": 1,
+          "title": "Asset",
+          "type": "string"
+        },
+        "attribution": {
+          "minLength": 1,
+          "title": "Attribution",
+          "type": "string"
+        },
+        "collection": {
+          "minLength": 1,
+          "title": "Collection",
+          "type": "string"
+        },
+        "dataset_id": {
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "restrictions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Restrictions",
+          "type": "array"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "provider",
+        "collection",
+        "version",
+        "asset",
+        "license",
+        "access_date",
+        "attribution",
+        "restrictions"
+      ],
+      "title": "AgriculturalEvidenceSource",
+      "type": "object"
+    },
+    "AgriculturalSpatialSupport": {
+      "additionalProperties": false,
+      "description": "Cobertura espacial efectiva medida dentro del evento.",
+      "properties": {
+        "attributed_area_ha": {
+          "minimum": 0,
+          "title": "Attributed Area Ha",
+          "type": "number"
+        },
+        "attributed_event_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Attributed Event Fraction",
+          "type": "number"
+        },
+        "event_area_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Event Area Ha",
+          "type": "number"
+        },
+        "event_coverage_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Event Coverage Fraction",
+          "type": "number"
+        },
+        "resampling_method": {
+          "default": "none_native_grid",
+          "minLength": 1,
+          "title": "Resampling Method",
+          "type": "string"
+        },
+        "source_resolution_m": {
+          "exclusiveMinimum": 0,
+          "title": "Source Resolution M",
+          "type": "number"
+        },
+        "valid_area_ha": {
+          "minimum": 0,
+          "title": "Valid Area Ha",
+          "type": "number"
+        }
+      },
+      "required": [
+        "source_resolution_m",
+        "event_area_ha",
+        "valid_area_ha",
+        "attributed_area_ha",
+        "event_coverage_fraction",
+        "attributed_event_fraction"
+      ],
+      "title": "AgriculturalSpatialSupport",
+      "type": "object"
+    },
+    "AgriculturalTemporalSupport": {
+      "additionalProperties": false,
+      "description": "Ventana y persistencia posteriores al inicio estimado del evento.",
+      "properties": {
+        "effective_observation_date": {
+          "format": "date",
+          "title": "Effective Observation Date",
+          "type": "string"
+        },
+        "estimated_onset_window_end": {
+          "format": "date",
+          "title": "Estimated Onset Window End",
+          "type": "string"
+        },
+        "long_gap_interpolation_used": {
+          "const": false,
+          "title": "Long Gap Interpolation Used",
+          "type": "boolean"
+        },
+        "minimum_consecutive_qualifying_periods": {
+          "minimum": 2,
+          "title": "Minimum Consecutive Qualifying Periods",
+          "type": "integer"
+        },
+        "minimum_observation_duration_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Observation Duration Days"
+        },
+        "minimum_qualifying_periods": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Qualifying Periods"
+        },
+        "observed_consecutive_qualifying_periods": {
+          "minimum": 0,
+          "title": "Observed Consecutive Qualifying Periods",
+          "type": "integer"
+        },
+        "observed_duration_days": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Duration Days"
+        },
+        "observed_qualifying_periods": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Qualifying Periods"
+        },
+        "persistence_basis": {
+          "default": "consecutive_periods",
+          "enum": [
+            "consecutive_periods",
+            "seasonal_nonconsecutive_periods"
+          ],
+          "title": "Persistence Basis",
+          "type": "string"
+        },
+        "persistence_rule": {
+          "minLength": 1,
+          "title": "Persistence Rule",
+          "type": "string"
+        },
+        "persistence_satisfied": {
+          "title": "Persistence Satisfied",
+          "type": "boolean"
+        },
+        "post_change_window_end": {
+          "format": "date",
+          "title": "Post Change Window End",
+          "type": "string"
+        },
+        "post_change_window_start": {
+          "format": "date",
+          "title": "Post Change Window Start",
+          "type": "string"
+        },
+        "qualifying_observation_count": {
+          "minimum": 1,
+          "title": "Qualifying Observation Count",
+          "type": "integer"
+        },
+        "valid_observation_count": {
+          "minimum": 1,
+          "title": "Valid Observation Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "estimated_onset_window_end",
+        "post_change_window_start",
+        "post_change_window_end",
+        "effective_observation_date",
+        "valid_observation_count",
+        "qualifying_observation_count",
+        "minimum_consecutive_qualifying_periods",
+        "observed_consecutive_qualifying_periods",
+        "persistence_satisfied",
+        "long_gap_interpolation_used",
+        "persistence_rule"
+      ],
+      "title": "AgriculturalTemporalSupport",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:agricultural-evidence:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Documento de intercambio de evidencia; nunca acepta independencia declarada.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "evidence_set_id": {
+      "format": "uuid",
+      "title": "Evidence Set Id",
+      "type": "string"
+    },
+    "observations": {
+      "items": {
+        "$ref": "#/$defs/AgriculturalEvidenceObservation"
+      },
+      "title": "Observations",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evidence_set_id",
+    "created_at",
+    "observations"
+  ],
+  "title": "AgriculturalEvidenceDocument",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

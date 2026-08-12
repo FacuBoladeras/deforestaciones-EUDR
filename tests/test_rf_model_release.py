@@ -103,7 +103,7 @@ def test_committed_candidate_registry_matches_configuration_and_local_artifact()
     from deforestation_pipeline.config import load_forest_model_config
 
     project_root = Path(__file__).parents[1]
-    config = load_forest_model_config(project_root / "configs/rf-multiyear-candidate-costa-uru.yml")
+    config = load_forest_model_config(project_root / "configs/rf-forest-entrerios-2020-2024.yml")
 
     verified = verify_local_rf_model_release(config, project_root=project_root, load_bundle=False)
 
