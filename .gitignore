@@ -8,6 +8,11 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Web client
+node_modules/
+apps/web/coverage/
+apps/web/.vite/
+
 # Virtual environments and package builds
 .venv/
 dist/

@@ -189,7 +189,7 @@ def test_auto_mode_runs_six_components_and_forwards_only_same_run_bundles(
         "2025-12-31"
     )
     assert all(not Path(item["output_bundle"]).is_absolute() for item in manifest["components"])
-    assert manifest["schema_version"] == "2.2.0"
+    assert manifest["schema_version"] == "2.3.0"
     assert manifest["report_assets"]["status"] == "completed"
     assert manifest["report_assets"]["figure_count"] == 6
     report_index_path = output / manifest["report_assets"]["index_path"]
@@ -338,6 +338,46 @@ def test_authentication_failure_publishes_sanitized_failed_parent(
     manifest = json.loads(serialized)
     assert manifest["overall_status"] == "failed"
     assert all(component["status"] == "skipped" for component in manifest["components"])
+
+
+def test_failed_parent_records_safe_secondary_report_assets_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.complete_analysis as complete_module
+
+    paths = _inputs(tmp_path)
+
+    def fail_report_assets(**_: object) -> dict[str, object]:
+        raise ValueError("report_figure_source_sha256_mismatch")
+
+    monkeypatch.setattr(
+        complete_module,
+        "materialize_report_figure_collection",
+        fail_report_assets,
+    )
+
+    with pytest.raises(CompleteAnalysisError) as captured:
+        run_complete_analysis(
+            _request(paths, tmp_path / "runs"),
+            created_at=CREATED,
+            gee_authenticator=lambda _: (_ for _ in ()).throw(RuntimeError("token=secret")),
+            config_loader=lambda _: SimpleNamespace(output=object()),
+            model_loader=lambda _: SimpleNamespace(
+                supported_observation_years=(2020, 2021, 2022, 2023, 2024)
+            ),
+            hampel_loader=lambda _: object(),
+            agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
+            agricultural_collector_loader=lambda _: object(),
+            agricultural_persistence_loader=lambda _: object(),
+        )
+
+    manifest = json.loads((captured.value.failure_path / "run_manifest.json").read_text("utf-8"))
+    assert manifest["report_assets"]["error"] == {
+        "error_type": "ValueError",
+        "code": "report_figure_source_sha256_mismatch",
+    }
+    assert "secret" not in json.dumps(manifest)
 
 
 @pytest.mark.parametrize("failing", ["collection", "persistence", "attribution"])

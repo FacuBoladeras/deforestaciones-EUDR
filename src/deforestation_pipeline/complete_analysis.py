@@ -56,7 +56,7 @@ from deforestation_pipeline.report_figures import (
 )
 from deforestation_pipeline.rf_model_release import verify_local_rf_model_release
 
-COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.2.0"
+COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.3.0"
 COMPONENT_STATUS_SCHEMA_VERSION = "1.0.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_END_DATE = date(2025, 12, 31)
@@ -381,6 +381,7 @@ def run_complete_analysis(
             components=components,
             overall_status=manifest["overall_status"],
             recorded_at=manifest["completed_at"],
+            parent_analysis_id=manifest["analysis_id"],
         )
         manifest["parameters_hash"] = _parameters_hash(manifest)
         _write_json_atomic(staging / "run_manifest.json", manifest)
@@ -432,13 +433,15 @@ def run_complete_analysis(
                     components=components,
                     overall_status=manifest["overall_status"],
                     recorded_at=manifest["completed_at"],
+                    parent_analysis_id=manifest["analysis_id"],
                 )
-            except Exception:
+            except Exception as report_exc:
                 manifest["report_assets"] = {
                     "schema_version": REPORT_FIGURE_COLLECTION_SCHEMA_VERSION,
                     "selection_policy_version": REPORT_FIGURE_SELECTION_POLICY_VERSION,
                     "status": "unavailable",
                     "error_code": "report_figure_collection_failed",
+                    "error": _safe_report_assets_error(report_exc),
                     "figure_count": 0,
                 }
         manifest["parameters_hash"] = _parameters_hash(manifest)
@@ -730,6 +733,17 @@ def _mark_failure(components: list[dict[str, Any]], exc: Exception, safe_message
         elif component["status"] == "pending":
             component["status"] = "skipped"
             component["completed_at"] = failed_at
+
+
+def _safe_report_assets_error(exc: Exception) -> dict[str, str]:
+    error_type = type(exc).__name__
+    if not re.fullmatch(r"[A-Za-z0-9_.]+", error_type):
+        error_type = "ReportFigureCollectionError"
+    candidate = str(exc)
+    code = (
+        candidate if re.fullmatch(r"[a-z0-9_]+", candidate) else "report_figure_collection_failed"
+    )
+    return {"error_type": error_type, "code": code}
 
 
 def _materialize_component_status_receipts(

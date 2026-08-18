@@ -22,9 +22,10 @@ from numpy.typing import NDArray
 from pydantic import Field, field_validator, model_validator
 from pyproj import Transformer
 from rasterio.io import MemoryFile
+from rasterio.warp import Resampling, reproject
 from shapely.geometry import box, mapping, shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import transform
+from shapely.ops import transform, unary_union
 
 from deforestation_pipeline.agricultural_visualization import (
     render_monthly_agricultural_evidence,
@@ -47,6 +48,7 @@ from deforestation_pipeline.raster_products import (
 from deforestation_pipeline.schemas import NonEmptyString, RasterGridSpec, StrictModel
 
 AGRICULTURAL_COLLECTION_SCHEMA_VERSION: Final = "1.0.0"
+AGRICULTURAL_COLLECTION_BUNDLE_SCHEMA_VERSION: Final = "1.1.0"
 DYNAMIC_WORLD_RASTER_BANDS: Final = (
     "valid_observation_count",
     "qualifying_crop_count",
@@ -60,7 +62,7 @@ _SAFE_IDENTIFIER = re.compile(r"[^A-Za-z0-9_-]+")
 class AgriculturalCollectorConfig(StrictModel):
     """Parámetros acotados del recolector, separados del gate de persistencia."""
 
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.1.0"]
     source_id: Literal["dynamic_world_v1"]
     target_crs: Literal["EPSG:6933"]
     resolution_m: Literal[10]
@@ -71,7 +73,8 @@ class AgriculturalCollectorConfig(StrictModel):
     minimum_crop_observation_fraction: Annotated[float, Field(gt=0, le=1, strict=True)]
     maximum_events: Annotated[int, Field(ge=1, le=100, strict=True)]
     maximum_windows_per_event: Annotated[int, Field(ge=1, le=72, strict=True)]
-    maximum_total_queries: Annotated[int, Field(ge=1, le=500, strict=True)]
+    maximum_remote_acquisitions: Annotated[int, Field(ge=1, le=500, strict=True)]
+    maximum_shared_grid_pixels: Annotated[int, Field(ge=1, le=5_000_000, strict=True)]
     resampling: Literal["nearest"]
     event_footprint_method: Literal["exact_polygon_pixel_intersection_fraction"]
 
@@ -218,7 +221,48 @@ class CollectedWindowRaster:
             raise ValueError("una consulta con escenas requiere contenido raster")
 
 
-RasterProvider = Callable[[DynamicWorldWindowQuery], CollectedWindowRaster]
+@dataclass(frozen=True, slots=True)
+class DynamicWorldSharedEvent:
+    """Evento incluido en una adquisición mensual compartida."""
+
+    event_id: str
+    geometry_wgs84: BaseGeometry
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicWorldSharedWindowQuery:
+    """Una adquisición remota mensual reutilizada por varios eventos."""
+
+    window_id: str
+    start_date: date
+    end_date_exclusive: date
+    geometry_wgs84: BaseGeometry
+    grid: RasterGridSpec
+    events: tuple[DynamicWorldSharedEvent, ...]
+    source: AgriculturalCatalogSource
+    minimum_top1_probability: float
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedSharedWindowRaster:
+    """Raster mensual común y conteos exactos por evento."""
+
+    content: bytes | None
+    matched_scene_counts: Mapping[str, int]
+    retrieved_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.matched_scene_counts or any(
+            not event_id or count < 0 for event_id, count in self.matched_scene_counts.items()
+        ):
+            raise ValueError("matched_scene_counts compartidos son inválidos")
+        if self.retrieved_at.tzinfo is None or self.retrieved_at.utcoffset() is None:
+            raise ValueError("retrieved_at debe incluir zona horaria")
+        if any(count > 0 for count in self.matched_scene_counts.values()) and self.content is None:
+            raise ValueError("una adquisición compartida con escenas requiere contenido raster")
+
+
+RasterProvider = Callable[[DynamicWorldSharedWindowQuery], CollectedSharedWindowRaster]
 
 
 class AgriculturalCollectorRemoteError(RuntimeError):
@@ -284,7 +328,9 @@ def materialize_agricultural_evidence_collection(
     if any(len(windows) > config.maximum_windows_per_event for windows in event_windows.values()):
         raise ValueError("agricultural_collector_window_budget_exceeded")
     query_count = sum(len(windows) for windows in event_windows.values())
-    if query_count > config.maximum_total_queries:
+    acquisition_plan = _shared_acquisition_plan(events, event_windows)
+    remote_acquisition_count = len(acquisition_plan)
+    if remote_acquisition_count > config.maximum_remote_acquisitions:
         raise ValueError("agricultural_collector_total_query_budget_exceeded")
 
     identity = {
@@ -297,38 +343,22 @@ def materialize_agricultural_evidence_collection(
     }
     analysis_id = uuid5(
         NAMESPACE_URL,
-        "agricultural-collector-v1:" + json.dumps(identity, sort_keys=True, separators=(",", ":")),
+        "agricultural-collector-v1-shared-monthly:"
+        + json.dumps(identity, sort_keys=True, separators=(",", ":")),
     )
     files: dict[str, bytes] = {}
     rows: list[dict[str, Any]] = []
     output_features: list[dict[str, Any]] = []
     query_records: list[dict[str, Any]] = []
+    acquisition_records: list[dict[str, Any]] = []
     event_summaries: list[dict[str, Any]] = []
     visualizations: list[dict[str, Any]] = []
+    spatial: dict[str, tuple[RasterGridSpec, _Footprint, str, str]] = {}
 
     for event in events:
         windows = event_windows[event.event_id]
-        if event.onset_end is None:
-            summary = _event_summary(
-                event,
-                status="insufficient_onset",
-                windows=0,
-                quality_flags=["estimated_onset_window_end_missing"],
-            )
-            event_summaries.append(summary)
-            output_features.append(_output_feature(event, summary))
-            continue
         if not windows:
-            summary = _event_summary(
-                event,
-                status="insufficient_post_onset_window",
-                windows=0,
-                quality_flags=["analysis_end_not_after_estimated_onset"],
-            )
-            event_summaries.append(summary)
-            output_features.append(_output_feature(event, summary))
             continue
-
         grid = derive_raster_grid_spec(
             aoi_wgs84=event.geometry,
             target_crs=config.target_crs,
@@ -339,21 +369,79 @@ def materialize_agricultural_evidence_collection(
         event_root = f"tiffs/evidence/agricultural/{_safe_id(event.event_id)}"
         footprint_path = f"{event_root}/event_footprint_fraction.tif"
         files[footprint_path] = footprint.content
+        spatial[event.event_id] = (grid, footprint, event_root, footprint_path)
 
-        for window_id, start_date, end_date_exclusive in windows:
-            query = DynamicWorldWindowQuery(
-                event_id=event.event_id,
-                window_id=window_id,
-                start_date=start_date,
-                end_date_exclusive=end_date_exclusive,
-                geometry_wgs84=event.geometry,
-                grid=grid,
-                source=source,
-                minimum_top1_probability=config.minimum_top1_probability,
-            )
-            collected = raster_provider(query)
+    shared_grid = (
+        derive_raster_grid_spec(
+            aoi_wgs84=unary_union(
+                [event.geometry for event in events if event.event_id in spatial]
+            ),
+            target_crs=config.target_crs,
+            resolution_m=float(config.resolution_m),
+            nodata=config.raster_nodata,
+        )
+        if spatial
+        else None
+    )
+    if (
+        shared_grid is not None
+        and shared_grid.width * shared_grid.height > config.maximum_shared_grid_pixels
+    ):
+        raise ValueError("agricultural_collector_shared_grid_budget_exceeded")
+    for window_id, start_date, end_date_exclusive, participants in acquisition_plan:
+        assert shared_grid is not None
+        query = DynamicWorldSharedWindowQuery(
+            window_id=window_id,
+            start_date=start_date,
+            end_date_exclusive=end_date_exclusive,
+            geometry_wgs84=unary_union([event.geometry for event in participants]),
+            grid=shared_grid,
+            events=tuple(
+                DynamicWorldSharedEvent(
+                    event_id=event.event_id,
+                    geometry_wgs84=event.geometry,
+                )
+                for event in participants
+            ),
+            source=source,
+            minimum_top1_probability=config.minimum_top1_probability,
+        )
+        collected = raster_provider(query)
+        participant_ids = {event.event_id for event in participants}
+        if set(collected.matched_scene_counts) != participant_ids:
+            raise ValueError("agricultural_collector_shared_scene_counts_mismatch")
+        shared_path = f"tiffs/evidence/agricultural/_shared/{window_id}_dynamic_world.tif"
+        raw_shared = collected.content or _empty_dynamic_world_raster(shared_grid)
+        normalized_shared, shared_validation = validate_geotiff_bytes(
+            raw_shared,
+            expected_grid=shared_grid,
+            expected_band_names=DYNAMIC_WORLD_RASTER_BANDS,
+            artifact_path=shared_path,
+            product="dynamic_world_shared_monthly_crop_support",
+            all_nodata_band_policy="allow_for_missing_period",
+        )
+        files[shared_path] = normalized_shared
+        shared_sha256 = hashlib.sha256(normalized_shared).hexdigest()
+        acquisition_records.append(
+            {
+                "acquisition_id": f"dynamic-world-{window_id}",
+                "window_id": window_id,
+                "start_date": start_date.isoformat(),
+                "end_date_exclusive": end_date_exclusive.isoformat(),
+                "event_count": len(participants),
+                "event_ids": sorted(participant_ids),
+                "retrieved_at": collected.retrieved_at.isoformat(),
+                "grid_sha256": shared_grid.grid_sha256,
+                "raster_path": shared_path,
+                "raster_sha256": shared_sha256,
+                "raster_validation": shared_validation.model_dump(mode="json"),
+            }
+        )
+        for event in participants:
+            grid, footprint, event_root, footprint_path = spatial[event.event_id]
+            matched_scene_count = collected.matched_scene_counts[event.event_id]
             raster_path = f"{event_root}/{window_id}_dynamic_world.tif"
-            raw = collected.content or _empty_dynamic_world_raster(grid)
+            raw = _extract_shared_raster_to_event_grid(normalized_shared, grid)
             normalized, validation = validate_geotiff_bytes(
                 raw,
                 expected_grid=grid,
@@ -371,7 +459,7 @@ def materialize_agricultural_evidence_collection(
                 window_id=window_id,
                 start_date=start_date,
                 end_date_exclusive=end_date_exclusive,
-                matched_scene_count=collected.matched_scene_count,
+                matched_scene_count=matched_scene_count,
                 raster_path=raster_path,
                 footprint_path=footprint_path,
                 grid=grid,
@@ -383,8 +471,11 @@ def materialize_agricultural_evidence_collection(
                     "window_id": window_id,
                     "start_date": start_date.isoformat(),
                     "end_date_exclusive": end_date_exclusive.isoformat(),
-                    "matched_scene_count": collected.matched_scene_count,
+                    "matched_scene_count": matched_scene_count,
                     "retrieved_at": collected.retrieved_at.isoformat(),
+                    "shared_acquisition_id": f"dynamic-world-{window_id}",
+                    "shared_raster_path": shared_path,
+                    "shared_raster_sha256": shared_sha256,
                     "grid_sha256": grid.grid_sha256,
                     "raster_path": raster_path,
                     "raster_sha256": hashlib.sha256(normalized).hexdigest(),
@@ -392,14 +483,32 @@ def materialize_agricultural_evidence_collection(
                 }
             )
 
-        summary = _event_summary(
-            event,
-            status="collected",
-            windows=len(windows),
-            quality_flags=[],
-            footprint=footprint,
-            grid=grid,
-        )
+    for event in events:
+        windows = event_windows[event.event_id]
+        if event.onset_end is None:
+            summary = _event_summary(
+                event,
+                status="insufficient_onset",
+                windows=0,
+                quality_flags=["estimated_onset_window_end_missing"],
+            )
+        elif not windows:
+            summary = _event_summary(
+                event,
+                status="insufficient_post_onset_window",
+                windows=0,
+                quality_flags=["analysis_end_not_after_estimated_onset"],
+            )
+        else:
+            grid, footprint, _, _ = spatial[event.event_id]
+            summary = _event_summary(
+                event,
+                status="collected",
+                windows=len(windows),
+                quality_flags=[],
+                footprint=footprint,
+                grid=grid,
+            )
         event_summaries.append(summary)
         output_features.append(_output_feature(event, summary))
 
@@ -453,7 +562,7 @@ def materialize_agricultural_evidence_collection(
     metadata = {
         "schema_version": AGRICULTURAL_COLLECTION_SCHEMA_VERSION,
         "analysis_id": str(analysis_id),
-        "method": "dynamic_world_event_monthly_collector_v1",
+        "method": "dynamic_world_shared_monthly_collector_v1",
         "source": source_identity,
         "configuration": config.model_dump(mode="json"),
         "spatial_method": {
@@ -463,6 +572,10 @@ def materialize_agricultural_evidence_collection(
             "event_footprint": config.event_footprint_method,
             "area_method": "sum_pixel_area_times_exact_event_footprint_fraction",
             "area_unit": "hectare",
+            "shared_acquisition_grid": (
+                shared_grid.model_dump(mode="json") if shared_grid is not None else None
+            ),
+            "event_raster_derivation": "aligned_nearest_window_from_shared_monthly_raster",
         },
         "temporal_method": {
             "cadence": config.temporal_cadence,
@@ -472,6 +585,12 @@ def materialize_agricultural_evidence_collection(
         },
         "query_count": len(query_records),
         "queries": query_records,
+        "remote_acquisition_count": len(acquisition_records),
+        "event_window_reuse_ratio": (
+            len(query_records) / len(acquisition_records) if acquisition_records else 0.0
+        ),
+        "remote_query_budget_semantics": "unique_shared_monthly_acquisitions",
+        "shared_acquisitions": acquisition_records,
         "signed_urls_persisted": False,
         "visualizations": visualizations,
         "limitations": [
@@ -510,7 +629,7 @@ def materialize_agricultural_evidence_collection(
         run_directory=run_directory,
         files=files,
         manifest_metadata={
-            "schema_version": AGRICULTURAL_COLLECTION_SCHEMA_VERSION,
+            "schema_version": AGRICULTURAL_COLLECTION_BUNDLE_SCHEMA_VERSION,
             "analysis_id": str(analysis_id),
             "establishment_id": establishment_id,
             "created_at": created_at.isoformat(),
@@ -521,11 +640,12 @@ def materialize_agricultural_evidence_collection(
             "catalog_sha256": identity["catalog_sha256"],
             "licenses_sha256": identity["licenses_sha256"],
             "query_count": len(query_records),
+            "remote_acquisition_count": len(acquisition_records),
             "signed_urls_persisted": False,
             "persistence_evaluated": False,
             "visualizations": visualizations,
         },
-        remote_data_accessed=bool(query_records),
+        remote_data_accessed=bool(acquisition_records),
         datasets=(source_identity,),
     )
     return run_directory
@@ -539,8 +659,8 @@ def make_dynamic_world_raster_provider(
 ) -> RasterProvider:
     """Construye el provider productivo GEE sin exponer la sesión en artefactos."""
 
-    def provider(query: DynamicWorldWindowQuery) -> CollectedWindowRaster:
-        return collect_dynamic_world_window(
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+        return collect_dynamic_world_shared_window(
             query=query,
             session=session,
             output_config=output_config,
@@ -548,6 +668,135 @@ def make_dynamic_world_raster_provider(
         )
 
     return provider
+
+
+def collect_dynamic_world_shared_window(
+    *,
+    query: DynamicWorldSharedWindowQuery,
+    session: GeeSession,
+    output_config: OutputConfig,
+    fetch_bytes: FetchBytes | None = None,
+    retrieved_at: datetime | None = None,
+) -> CollectedSharedWindowRaster:
+    """Descarga una vez el mes y obtiene conteos por evento en una sola evaluación."""
+    module = session.module
+    timestamp = retrieved_at or datetime.now(UTC)
+    try:
+        remote_geometry = module.Geometry(mapping(query.geometry_wgs84))
+        collection = (
+            module.ImageCollection(query.source.collection_id)
+            .filterBounds(remote_geometry)
+            .filterDate(query.start_date.isoformat(), query.end_date_exclusive.isoformat())
+        )
+        matched_scene_counts = _shared_event_scene_counts(
+            module=module,
+            collection=collection,
+            events=query.events,
+        )
+        if not any(matched_scene_counts.values()):
+            return CollectedSharedWindowRaster(
+                content=None,
+                matched_scene_counts=matched_scene_counts,
+                retrieved_at=timestamp,
+            )
+        image = _dynamic_world_metrics_image(
+            module=module,
+            collection=collection,
+            minimum_top1_probability=query.minimum_top1_probability,
+        )
+        artifact_path = f"tiffs/evidence/agricultural/_shared/{query.window_id}_dynamic_world.tif"
+        materialized = materialize_ee_image_to_grid(
+            image=image,
+            band_names=DYNAMIC_WORLD_RASTER_BANDS,
+            artifact_path=artifact_path,
+            download_name=f"dynamic_world_shared_{query.window_id}",
+            output_config=output_config,
+            grid_spec=query.grid,
+            output_type="float32",
+            fetch_bytes=fetch_bytes,
+        )
+        return CollectedSharedWindowRaster(
+            content=materialized.content,
+            matched_scene_counts=matched_scene_counts,
+            retrieved_at=timestamp,
+        )
+    except (RasterDownloadError, AgriculturalCollectorRemoteError):
+        raise
+    except Exception as exc:
+        raise AgriculturalCollectorRemoteError("dynamic_world_shared_window_query_failed") from exc
+
+
+def _shared_event_scene_counts(
+    *,
+    module: Any,
+    collection: Any,
+    events: Sequence[DynamicWorldSharedEvent],
+) -> dict[str, int]:
+    features = module.FeatureCollection(
+        [
+            module.Feature(
+                module.Geometry(mapping(event.geometry_wgs84)),
+                {"event_id": event.event_id},
+            )
+            for event in events
+        ]
+    )
+
+    def attach_count(feature: Any) -> Any:
+        candidate = module.Feature(feature)
+        return candidate.set(
+            "matched_scene_count",
+            collection.filterBounds(candidate.geometry()).size(),
+        )
+
+    evaluated = features.map(attach_count).getInfo()
+    raw_features = evaluated.get("features") if isinstance(evaluated, dict) else None
+    if not isinstance(raw_features, list):
+        raise AgriculturalCollectorRemoteError("dynamic_world_shared_scene_counts_invalid")
+    counts: dict[str, int] = {}
+    for raw in raw_features:
+        properties = raw.get("properties") if isinstance(raw, dict) else None
+        event_id = properties.get("event_id") if isinstance(properties, dict) else None
+        count = properties.get("matched_scene_count") if isinstance(properties, dict) else None
+        if not isinstance(event_id, str) or not isinstance(count, int) or count < 0:
+            raise AgriculturalCollectorRemoteError("dynamic_world_shared_scene_counts_invalid")
+        if event_id in counts:
+            raise AgriculturalCollectorRemoteError("dynamic_world_shared_scene_counts_duplicate")
+        counts[event_id] = count
+    if set(counts) != {event.event_id for event in events}:
+        raise AgriculturalCollectorRemoteError("dynamic_world_shared_scene_counts_incomplete")
+    return counts
+
+
+def _dynamic_world_metrics_image(
+    *,
+    module: Any,
+    collection: Any,
+    minimum_top1_probability: float,
+) -> Any:
+    valid_count = collection.select("crops").count().rename(DYNAMIC_WORLD_RASTER_BANDS[0])
+
+    def qualifying_crop(image: Any) -> Any:
+        candidate = module.Image(image)
+        return (
+            candidate.select("label")
+            .eq(4)
+            .And(candidate.select("crops").gte(minimum_top1_probability))
+            .rename("qualifying_crop")
+        )
+
+    qualifying_count = collection.map(qualifying_crop).sum().rename(DYNAMIC_WORLD_RASTER_BANDS[1])
+    mean_probability = collection.select("crops").mean().rename(DYNAMIC_WORLD_RASTER_BANDS[2])
+    observation_fraction = qualifying_count.divide(valid_count).rename(
+        DYNAMIC_WORLD_RASTER_BANDS[3]
+    )
+    return (
+        valid_count.addBands(qualifying_count)
+        .addBands(mean_probability)
+        .addBands(observation_fraction)
+        .updateMask(valid_count.gt(0))
+        .toFloat()
+    )
 
 
 def collect_dynamic_world_window(
@@ -730,6 +979,58 @@ def _monthly_windows(
         windows.append((cursor.strftime("%Y-%m"), cursor, end))
         cursor = end
     return tuple(windows)
+
+
+def _shared_acquisition_plan(
+    events: Sequence[_EventSource],
+    event_windows: Mapping[str, tuple[tuple[str, date, date], ...]],
+) -> tuple[tuple[str, date, date, tuple[_EventSource, ...]], ...]:
+    grouped: dict[tuple[str, date, date], list[_EventSource]] = {}
+    for event in events:
+        for window_id, start_date, end_date_exclusive in event_windows[event.event_id]:
+            grouped.setdefault((window_id, start_date, end_date_exclusive), []).append(event)
+    return tuple(
+        (
+            window_id,
+            start_date,
+            end_date_exclusive,
+            tuple(sorted(participants, key=lambda event: event.event_id)),
+        )
+        for (window_id, start_date, end_date_exclusive), participants in sorted(
+            grouped.items(), key=lambda item: (item[0][1], item[0][2], item[0][0])
+        )
+    )
+
+
+def _extract_shared_raster_to_event_grid(
+    shared_content: bytes,
+    event_grid: RasterGridSpec,
+) -> bytes:
+    destination = np.full(
+        (len(DYNAMIC_WORLD_RASTER_BANDS), event_grid.height, event_grid.width),
+        event_grid.nodata,
+        dtype=np.float32,
+    )
+    with MemoryFile(shared_content) as source_memory:
+        with source_memory.open() as source:
+            for band_index in range(1, len(DYNAMIC_WORLD_RASTER_BANDS) + 1):
+                reproject(
+                    source=rasterio.band(source, band_index),
+                    destination=destination[band_index - 1],
+                    src_transform=source.transform,
+                    src_crs=source.crs,
+                    src_nodata=source.nodata,
+                    dst_transform=rasterio.Affine(*event_grid.transform),
+                    dst_crs=event_grid.target_crs,
+                    dst_nodata=event_grid.nodata,
+                    resampling=Resampling.nearest,
+                )
+    profile = _raster_profile(event_grid, count=len(DYNAMIC_WORLD_RASTER_BANDS))
+    with MemoryFile() as target_memory:
+        with target_memory.open(**profile) as target:
+            target.write(destination)
+            target.descriptions = DYNAMIC_WORLD_RASTER_BANDS
+        return bytes(target_memory.read())
 
 
 def _event_footprint(geometry_wgs84: BaseGeometry, grid: RasterGridSpec) -> _Footprint:

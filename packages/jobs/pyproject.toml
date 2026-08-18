@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deforestation-jobs"
+version = "0.1.0"
+description = "Contratos y persistencia local de jobs de análisis EUDR."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deforestation_jobs"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-cov>=6.2,<7",
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--cov=deforestation_jobs",
+    "--cov-report=term-missing",
+    "--cov-fail-under=90",
+]
+testpaths = ["tests"]

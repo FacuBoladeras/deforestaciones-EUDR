@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deforestation-worker"
+version = "0.1.0"
+description = "Worker separado para ejecutar análisis EUDR encolados."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "deforestation-jobs",
+    "deforestation-pipeline",
+]
+
+[project.scripts]
+deforestation-worker = "deforestation_worker.__main__:main"
+
+[tool.uv.sources]
+deforestation-jobs = { workspace = true }
+deforestation-pipeline = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deforestation_worker"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-cov>=6.2,<7",
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--cov=deforestation_worker",
+    "--cov-report=term-missing",
+    "--cov-fail-under=90",
+]
+testpaths = ["tests"]

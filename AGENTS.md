@@ -34,90 +34,74 @@ El MVP termina en la generación de evidencia geoespacial por establecimiento.
 No incluye todavía la gestión completa de trazabilidad animal ni la
 presentación de declaraciones en sistemas de la Unión Europea.
 
-### 2.1 Checkpoint auditado del MVP — 10 de agosto de 2026
+### 2.1 Checkpoint operativo — 17 de agosto de 2026
 
-Este checkpoint resulta de contrastar el código, configuraciones, tests, runs
-locales y las páginas metodológicas 8–10 y 13–14 del Protocolo VISEC. Debe
-usarse como contexto de partida antes de proponer nuevos incrementos.
+- La CLI `scripts/run_complete_analysis.py` orquesta en un solo run: pipeline
+  principal, Hampel diagnóstico, RF 2020–2024, recolección agrícola,
+  persistencia y atribución post-cambio.
+- El collector agrícola `1.1.0` comparte adquisiciones mensuales entre eventos
+  y conserva rasters, grillas, áreas, `nodata`, hashes y linaje individuales.
+  Un micro-smoke real de una ventana sobre 58 eventos fue válido; aún falta
+  repetir el run remoto completo de seis componentes.
+- `report_assets` `2.0.0` organiza figuras generales y por evento, datos
+  principales, anexos y `report_dataset.json` para un futuro PDF/DOCX, sin
+  alterar los bundles científicos.
+- El último gate local aprobado contiene 596 tests, cobertura total 90,62 %,
+  Ruff, formato, Mypy y `git diff --check` verdes. No hubo build.
+- Los Incrementos 1–4 de la **API interna asíncrona** están implementados en el
+  monorepo; API, jobs y worker integran el `uv workspace`, mientras el cliente
+  conserva su toolchain Node aislado. La capa Python cubre validación GeoJSON,
+  jobs SQLite idempotentes, worker separado, resultados verificados, descargas
+  allowlisted, cancelación y retención local. Sus 32 pruebas modulares no
+  consultan GEE y mantienen cobertura por paquete superior a 90 %.
+- `apps/web` agrega el cliente React/TypeScript minimalista: carga o dibujo,
+  validación, creación, polling, cancelación y lectura básica de resultados.
+  Tiene trece pruebas Vitest, typecheck estricto y auditoría productiva verde.
+  El progreso es estimado y limitado hasta que la API confirma el terminal; el
+  `analysis_id` persiste en la URL para reanudar polling después de recargar.
+- Un gate multiproceso sintético verifica API HTTP → SQLite → worker →
+  `report_assets` → endpoints/ZIP sin GEE. El runner falso vive sólo bajo
+  `tests/integration`; no existe un modo fake en producción.
+- La lectura se comprobó contra un expediente real preservado con 41 assets y
+  cuatro eventos. No se ejecutó un nuevo análisis remoto ni se modificó el run.
+- El preflight de `prueba-viale.geojson` confirmó una única geometría Polygon
+  válida de 1.438,42 ha; el cliente ya normaliza su `FeatureCollection` de una
+  feature. Sigue pendiente el smoke GEE real antes de contenerizar API y worker.
 
-| Capacidad | Estado verificado | Alcance y brecha principal |
-| --- | --- | --- |
-| Ingesta territorial | Parcial alto | Valida geometrías y CRS, pero el análisis ambiental operativo requiere `Polygon` o `MultiPolygon`; un punto no permite medir eventos. |
-| Área y grilla | Completo | Repara geometría, selecciona CRS métrico y calcula superficie; supera el conteo fijo de píxeles. |
-| HLS S30/L30 v002 y Fmask | Completo | Es el benchmark óptico VISEC a 30 m y conserva QA por píxel. |
-| Índices VISEC | Completo | NDVI, EVI2, NMDI, LSWI, NIRv y kNDVI están implementados; NBR y NDMI son variables adicionales declaradas. |
-| Espacios temporales VISEC | Parcial | Hay DJF, MAM, JJA y SON. No existe todavía el espacio mensual ni el período julio–junio del protocolo. |
-| Hampel | Parcial, no equivalente | Opera sobre medianas estacionales ya agregadas y sólo como diagnóstico. VISEC lo aplica antes de agregar escenas. No afirmar réplica metodológica. |
-| Clasificación forestal | Parcial | Existe un RF bosque/no bosque multianual proxy. No existen el GTB ni las tres clasificaciones VISEC con convergencia dos de tres. |
-| Línea base 2020 | Parcial sólido | Integra JRC, ESA, Hansen y RF con desacuerdo explícito. MapBiomas intervino en pseudolabels y no debe presentarse como validación independiente del RF. |
-| Detección robusta poscorte | Implementado | Calcula anomalías, persistencia y soporte; falta validación temática independiente suficiente. |
-| CCDC | Implementado como benchmark | Conserva `changeProb` en su escala y no lo llama probabilidad de deforestación. |
-| Convergencia de detectores | Implementado, diferente de VISEC | Converge detector robusto y CCDC preservando desacuerdo; esto no sustituye el ensamble RF/GTB de VISEC. |
-| Eventos y 0,5 ha | Completo | Segmenta con ocho vecinos, calcula área métrica y conserva también eventos menores al umbral. |
-| Evidencia materializada | Parcial alto | Produce TIFF, PNG, CSV, JSON y GeoJSON con manifests y hashes. Todavía no genera informe PDF ni API. |
-| Reproducibilidad | Alta con dependencia externa explícita | El release RF registra hashes y verifica joblib/modelo. `outputs/models/rf_forest_multiyear_2020_2024_v1/` es hoy dependencia de inferencia local; los CSV de entrenamiento deben restaurarse externamente o regenerarse. |
-| Validación independiente | Insuficiente | La adjudicación anterior sólo logró 56 % de casos adjudicables y no validó adecuadamente bosque abierto. |
-| Atribución post-cambio | Inicial | La v0 separa recuperación, cosecha, perturbación temporal, agricultura probable y desconocido, pero todavía no recolecta evidencia agrícola espacial y temporal por sí misma. |
-| Certificación o confirmación legal | Ausente por diseño | Ningún resultado automático puede emitir `conversion_confirmed`, habilitación ni certificación EUDR. |
+### 2.2 Límites científicos y operativos vigentes
 
-### 2.2 Estado operativo comprobado
+- No afirmar estabilidad operativa cloud hasta cerrar un smoke real posterior
+  al collector compartido y `report_assets` 2.0.
+- Hampel sigue siendo diagnóstico estacional y no equivalente metodológicamente
+  a VISEC; su indisponibilidad justificada no bloquea los demás componentes.
+- El RF sólo soporta transferencia 2020–2024 y no está calibrado como
+  probabilidad. No extender años ni semántica sin validación.
+- La validación temática independiente continúa siendo insuficiente,
+  especialmente en bosque abierto; agricultura usa Dynamic World como única
+  fuente temporal operativa del MVP.
+- Ninguna salida automática puede emitir `conversion_confirmed`, certificación
+  o conclusión legal EUDR.
+- Conservar modelos y runs científicos canónicos: los outputs están ignorados
+  por Git y no son recuperables mediante rollback.
 
-- El detector completo corrió sobre el caso Viale y generó 481 artefactos,
-  cuatro eventos persistentes, dos mayores a 0,5 ha y 17,28 ha candidatas.
-  La evidencia permanece en
-  `outputs/runs/viale-completo__20260810T205334422162Z__86de3ecd.failed/`.
-- El envelope superior quedó `partial`: Hampel falló con
-  `hampel_insufficient_strict_stable_controls` antes de RF y atribución. Aunque
-  está configurado como diagnóstico no activado, actualmente es bloqueante en
-  `complete_analysis.py`. Esto debe corregirse antes de considerar estable el
-  run único.
-- El atribuidor v0 sí fue ejecutado de forma independiente sobre costa-uru:
-  37 eventos, seis compatibles con `managed_harvest`, 31 `unknown`, cero
-  `conversion_likely` y cero `conversion_confirmed`. El caso es una plantación
-  forestal y funciona como control de cosecha/recuperación, no como positivo de
-  conversión agrícola. El bundle canónico está en
-  `outputs/local_tests/costa-uru-attribution-v0__20260810T213849356631Z__dbf211dc/`.
-- La CLI de cuatro componentes existe en `scripts/run_complete_analysis.py`,
-  pero aún no existe una ejecución real exitosa de punta a punta posterior a la
-  integración del atribuidor.
-- La cobertura RF soportada sigue cerrada en 2020–2024. No extender a 2025 o
-  2026 sin predictores compatibles y validación explícita.
+### 2.3 Orden de avance actual
 
-### 2.3 Brecha prioritaria y regla de avance
+1. completar por la web el smoke real de los seis componentes;
+2. contenerizar API y worker por separado;
+3. desplegar gradualmente en AWS con almacenamiento privado, cola, identidad,
+   observabilidad y límites de concurrencia.
 
-El bloqueo científico principal ya no es generar otra señal de pérdida. Es
-demostrar **uso agrícola o ganadero posterior** con evidencia independiente,
-espacial, temporal y reproducible. El siguiente incremento debe:
+La API es un adaptador: debe invocar `run_complete_analysis()` y no duplicar
+reglas científicas ni acoplar el núcleo a FastAPI, AWS o React.
 
-1. versionar un contrato de evidencia agrícola con fuente, dataset, versión,
-   licencia, fecha de acceso, geometría, resolución, ventana temporal, calidad
-   y hash;
-2. derivar independencia mediante una política de fuentes, no aceptar un
-   booleano arbitrario del llamador;
-3. medir por evento cobertura atribuida y persistencia postcambio;
-4. integrar la evidencia al orquestador único y conservar `unknown` o
-   `review_required` cuando sea insuficiente;
-5. calcular `likely_conversion_area_ha` sólo sobre la fracción simultáneamente
-   forestal al corte, perdida, persistente y atribuida a uso agrícola.
+### 2.4 Documentos canónicos de contexto
 
-MapBiomas no puede actuar como evidencia independiente del mismo RF si participó
-en sus pseudolabels. Una clase de una sola fecha tampoco demuestra persistencia.
-Antes de sumar GTB, mensualidad u otros detectores, completar este gate de
-atribución para el MVP acotado.
+- `README.md`: capacidades implementadas, ejecución y evidencia de gates.
+- `NEXT_STEPS.md`: roadmap científico y validación pendiente.
+- `API_CONTEXT.md`: contrato, tecnologías y evolución de API/cliente/AWS.
 
-### 2.4 Política de limpieza derivada de la auditoría
-
-- Los 47 archivos de tests, 520 casos ejecutados y cobertura total de 90,48 %
-  protegen módulos activos. No borrarlos en bloque ni por ahorro de espacio:
-  pesan aproximadamente 0,56 MiB.
-- Conservar `outputs/models/rf_forest_multiyear_2020_2024_v1/`; no es un run
-  descartable mientras el preflight local dependa del joblib.
-- Conservar runs científicos canónicos o útiles para validación. Al estar
-  ignorados por Git, no pueden recuperarse con `rollback`.
-- Sólo eliminar código, tests, configs o schemas después de comprobar ausencia
-  de imports, referencias runtime, uso documental y valor de auditoría.
-- Caches, `__pycache__` y extracciones temporales del PDF son regenerables y
-  deben mantenerse fuera del expediente.
+No agregar nuevos documentos históricos por incremento. Actualizar estos tres
+cuando cambien arquitectura, capacidad operativa o prioridad.
 
 ## 3. Alcance autorizado
 
@@ -588,8 +572,11 @@ justificación medible.
 .
 ├── AGENTS.md
 ├── README.md                  # referencia canónica del estado actual
-├── NEXT_STEPS.md              # único roadmap
+├── NEXT_STEPS.md              # roadmap científico y operativo
+├── API_CONTEXT.md             # arquitectura de API, cliente web y AWS
 ├── pyproject.toml
+├── apps/
+│   └── web/                   # cliente React + TypeScript + MapLibre
 ├── configs/
 │   └── default.yml
 ├── data/
@@ -607,8 +594,9 @@ justificación medible.
 
 No fragmentar el estado del proyecto en documentos por pasos históricos.
 Actualizar `README.md` cuando cambie la capacidad implementada y
-`NEXT_STEPS.md` cuando cambie el orden de trabajo. No crear directorios vacíos
-por anticipado; incorporarlos cuando una tarea los necesite.
+`NEXT_STEPS.md` cuando cambie el orden científico. Actualizar `API_CONTEXT.md`
+cuando cambie el contrato o la arquitectura de integración. No crear
+directorios vacíos por anticipado; incorporarlos cuando una tarea los necesite.
 
 ## 13. Configuración y reproducibilidad
 

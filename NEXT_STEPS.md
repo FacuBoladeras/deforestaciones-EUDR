@@ -1,10 +1,11 @@
 # Próximos pasos: evidencia agrícola post-cambio
 
-Este archivo es el único roadmap vigente. Parte de la auditoría del
+Este archivo es el roadmap científico vigente. Parte de la auditoría del
 `2026-08-10`: la detección de perturbaciones está avanzada y el bloque de
 agricultura por cultivo ya se ejecuta desde el mismo run. La brecha siguiente
 es validarlo con casos reales y ampliar evidencia independiente sin convertir
-el MVP en un LULC nacional.
+el MVP en un LULC nacional. El contrato y la evolución de API, worker, cliente
+web y AWS viven en `API_CONTEXT.md`.
 
 El objetivo del siguiente bloque es cerrar esa brecha sin ampliar el MVP hacia
 un LULC completo, otra familia de detectores o una certificación automática.
@@ -29,10 +30,53 @@ Antes de evaluar evidencia agrícola mediante el orquestador:
 - [x] recolectar las figuras principales manifestadas en
   `report_assets/figures/`, con copias byte a byte, orden estable e índice
   reversible; conservar también lo ya producido en runs `partial` o `.failed`;
+- [x] estructurar `report_assets/` para informe: figuras generales y por evento,
+  datos principales, anexos espaciales/tabulares/metodológicos y
+  `report_dataset.json` normalizado, todo con hashes y sin mover los originales;
 - [ ] mantener RF en 2020–2024 hasta disponer de un año adicional compatible.
 
 **Criterio de salida:** un polígono llega hasta atribución aunque Hampel no
 encuentre controles, y el manifest conserva esa limitación sin ocultarla.
+
+**Intento real `2026-08-13`:** `costa-uru-mvp-smoke` completó pipeline
+principal, Hampel y RF, y verificó 1.025 artefactos hijos sin faltantes ni
+diferencias de tamaño o SHA-256. Produjo 58 eventos —20 de al menos 0,5 ha— y
+133,92 ha de perturbaciones candidatas. El collector agrícola se detuvo antes
+de consultar Dynamic World: las ventanas pos-onset requieren 2.686 consultas
+evento-mes frente al presupuesto versionado de 500. Persistencia y atribución
+quedaron correctamente `skipped`; el run es `partial`, pero **no** satisface el
+criterio de salida porque no llegó a atribución. No elevar el presupuesto a
+ciegas: el próximo incremento operativo debe agrupar o cachear consultas
+mensuales compartidas entre eventos y conservar los mismos rasters/áreas por
+evento. La colección `report_assets` también quedó `unavailable` en ese cierre
+fallido, aunque la misma selección de 15 figuras funciona después sobre una
+copia sellada del expediente; registrar el error secundario exacto antes de
+repetir el smoke.
+
+**Reparación operativa `2026-08-13`:** el collector dejó de descargar cada
+mes por separado para cada evento. La configuración `1.1.0` agrupa eventos por
+ventana, descarga una grilla mensual común, obtiene en una sola evaluación los
+conteos de escenas específicos de cada evento y recorta localmente el mismo
+raster alineado a cada grilla evento. Para costa-uru, el plan baja de 2.686
+productos evento-mes a **55 adquisiciones mensuales** (`48,84×` de reúso); la
+grilla común es 438 × 286, 125.268 píxeles, bajo el tope versionado de
+1.000.000. Se mantienen los 2.686 rasters evento-mes, footprints, áreas,
+`nodata`, hashes y contratos downstream. Un micro-smoke real sobre noviembre
+de 2025 contó seis escenas en cada uno de los 58 eventos y descargó un GeoTIFF
+de cuatro bandas válido, 517.630 bytes, sin persistir URL. Aún falta repetir
+el run completo para cerrar el criterio de salida.
+
+El `2026-08-17` se cerró por separado el plumbing local de producto con un gate
+multiproceso sintético: API HTTP, SQLite, worker, `report_assets`, assets y ZIP.
+No consulta GEE y por lo tanto **no marca** el checkbox del smoke científico.
+El preflight del caso real `prueba-viale.geojson` confirmó un Polygon único de
+1.438,42 ha, válido y sin reparación; el cliente normaliza su wrapper
+`FeatureCollection` de una sola feature. El siguiente run remoto puede entrar
+por la web sin cambiar el contrato científico.
+
+El cierre fallido ahora conserva además `error_type` y código sanitizado del
+recolector de `report_assets`; no persiste el mensaje arbitrario de una
+excepción secundaria.
 
 ## 1. Contrato v1 de evidencia agrícola
 

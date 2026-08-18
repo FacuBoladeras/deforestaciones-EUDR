@@ -17,7 +17,7 @@ dominio y de desarrollo que deben respetar humanos y agentes viven en
 
 ## Checkpoint actual
 
-**Fecha del checkpoint:** 10 de agosto de 2026.
+**Fecha del checkpoint:** 17 de agosto de 2026.
 
 La etapa de detección de perturbaciones está implementada de extremo a extremo
 para rangos estacionales HLS. El pipeline puede:
@@ -46,6 +46,9 @@ para rangos estacionales HLS. El pipeline puede:
     opcional habilitada por política y explicaciones alternativas declaradas;
 17. publicar la atribución v1 por evento en CSV, JSON, GeoJSON y PNG, con hashes
     de sus bundles fuente y sin emitir confirmación automática.
+18. validar polígonos mediante una API interna `/api/v1`, registrar solicitudes
+    idempotentes en SQLite y ejecutarlas con un worker local separado del
+    proceso HTTP.
 
 La frontera actual es deliberada:
 
@@ -59,6 +62,119 @@ La frontera actual es deliberada:
 - **evaluación automática final:** no generada;
 - **confirmación de conversión o certificación legal:** fuera de la capacidad
   automática actual.
+
+### API interna local
+
+Los Incrementos 1–4 de [`API_CONTEXT.md`](API_CONTEXT.md) están implementados
+como proyectos independientes dentro del monorepo; los paquetes Python forman
+el `uv workspace` y el cliente mantiene su toolchain Node aislado:
+
+```text
+apps/web/          # React + TypeScript: carga/dibujo, polling y resultados
+packages/jobs/     # contrato y repositorio SQLite compartido
+services/api/      # FastAPI: health, validación y registro/consulta de jobs
+services/worker/   # consumidor secuencial que invoca run_complete_analysis()
+```
+
+La API publica:
+
+- `GET /health`;
+- `POST /api/v1/geometries/validate`;
+- `POST /api/v1/analyses` con `Idempotency-Key` y respuesta `202`;
+- `GET /api/v1/analyses/{analysis_id}`;
+- `GET /api/v1/analyses/{analysis_id}/report`;
+- `GET /api/v1/analyses/{analysis_id}/events` con paginación;
+- `GET /api/v1/analyses/{analysis_id}/assets` y descarga por ID opaco;
+- `GET /api/v1/analyses/{analysis_id}/download` para el ZIP verificable;
+- `POST /api/v1/analyses/{analysis_id}/cancel` best-effort.
+
+El proceso HTTP nunca ejecuta GEE. Persiste el GeoJSON bajo una clave generada
+por el servidor y el worker lo consume fuera del request, con adquisición
+condicional del job, concurrencia uno y recuperación local después de un
+reinicio. La frontera jurisdiccional de screening se deriva de `ign:pais` del
+IGN, está versionada bajo `data/boundaries/` y no sustituye evidencia catastral
+ni revisión de casos cercanos a límites.
+
+Los resultados sólo se publican desde `report_assets`: dataset, inventario y
+archivos se verifican por tamaño y SHA-256. El worker crea el ZIP determinístico
+en almacenamiento privado antes de completar el job; FastAPI no empaqueta ni
+ejecuta ciencia dentro del request. La expiración local responde `410`, impide
+adquirir jobs vencidos y limpia únicamente objetos privados, nunca los runs
+científicos.
+
+Para desarrollo local:
+
+```powershell
+uv run --package deforestation-api deforestation-api
+uv run --package deforestation-worker deforestation-worker
+```
+
+La API escucha sólo en `127.0.0.1:8000` por defecto. El worker reutiliza
+`credentials.json` si existe; las rutas y credenciales se configuran mediante
+variables de entorno y nunca llegan al contrato HTTP.
+
+El cliente web minimalista permite cargar un `Polygon`/`MultiPolygon` GeoJSON o
+dibujar un `Polygon`, validarlo, crear el job, consultar su estado, cancelar en
+modo best-effort y visualizar el resumen, eventos y figuras disponibles. Una
+`FeatureCollection` se normaliza únicamente cuando contiene exactamente una
+`Feature` poligonal; las colecciones vacías o múltiples se rechazan para
+conservar la regla un establecimiento–una geometría. El cliente no reimplementa
+reglas geoespaciales: la habilitación de la solicitud depende de la respuesta de
+`/api/v1/geometries/validate`.
+
+Durante una ejecución, la interfaz muestra una barra deliberadamente etiquetada
+como **estimada**: avanza lentamente mientras el estado sea activo, se limita al
+92 % y sólo llega al 100 % cuando la API confirma `completed` o `partial`. Un
+fallo o cancelación nunca se presenta como finalización. El `analysis_id` queda
+en `?analysis=<uuid>`, por lo que recargar o compartir esa URL reanuda el polling
+sin reconstruir estado científico en el navegador.
+
+El toolchain web actual requiere Node 20.19 o posterior; `.nvmrc` fija Node
+22.12.0. Para ejecutarlo junto a API y worker:
+
+```powershell
+uv run --package deforestation-api deforestation-api
+uv run --package deforestation-worker deforestation-worker
+
+cd apps/web
+# Primero instalar/activar Node 22.12 o posterior.
+node --version
+npx pnpm@11.19.0 install
+npx pnpm@11.19.0 dev
+```
+
+Vite publica el cliente en `127.0.0.1:5173` y redirige `/api` y `/health` a
+`127.0.0.1:8000`, por lo que este incremento no abre CORS. El mapa local usa
+teselas públicas de OpenStreetMap con atribución; el navegador solicita el
+viewport al proveedor, pero no le envía el GeoJSON. Antes de producción debe
+definirse un proveedor y una política de teselas propios.
+
+El gate local de integración levanta una API HTTP descartable y un worker
+one-shot en procesos separados. Comparten sólo SQLite y almacenamiento temporal,
+usan un runner sintético y verifican estado, reporte, eventos, asset y ZIP sin
+consultar GEE:
+
+```powershell
+uv run --all-packages pytest -o addopts='' `
+  tests/integration/test_api_worker_flow.py -q
+```
+
+Antes del smoke real desde la web, verificar las rutas sin iniciar Earth Engine:
+
+```powershell
+$input = "C:\Users\Facu\Desktop\prueba-viale.geojson"
+$credentials = "C:\Users\Facu\Desktop\deforestaciones-EUDR\credentials.json"
+$outputRoot = "C:\Users\Facu\Desktop\deforestaciones-EUDR\outputs\runs"
+
+if (-not (Test-Path -LiteralPath $input -PathType Leaf)) { throw "Falta GeoJSON" }
+if (-not (Test-Path -LiteralPath $credentials -PathType Leaf)) { throw "Faltan credenciales" }
+$env:DEFORESTATION_GEE_CREDENTIALS = $credentials
+$env:DEFORESTATION_ANALYSIS_OUTPUT_ROOT = $outputRoot
+```
+
+Con esas variables en la terminal del worker, levantar API, worker y web en tres
+terminales, cargar `$input` y usar `establecimiento-2`. Ese submit sí ejecuta
+`run_complete_analysis()` y consume recursos GEE; el gate sintético anterior no.
 
 ## Arquitectura ejecutable
 
@@ -439,6 +555,15 @@ El bundle atómico publica `agricultural_evidence.csv`,
 con hashes y referencias al bundle fuente. La salida cruda **no** afirma
 persistencia ni conversión. El componente de persistencia consume este bundle
 sin reinterpretar una observación mensual como uso permanente.
+
+Desde la configuración del collector `1.1.0`, los eventos que comparten un mes
+reutilizan una única adquisición Dynamic World sobre una grilla común acotada.
+Los conteos de escenas se calculan por evento en una evaluación vectorizada y
+el GeoTIFF común se recorta localmente, con alineación `nearest`, a cada grilla
+de evento. Esto reduce consultas remotas sin fusionar eventos: cada evento
+conserva raster, footprint, área, `nodata`, grid hash y registro de la
+adquisición compartida que lo originó. Los límites versionados controlan tanto
+cantidad de adquisiciones como píxeles de la grilla común.
 
 Cuando existe al menos un período con soporte espacial válido, también publica
 una lámina `agricultural_monthly_evidence_<event-id>.png` por evento. La lámina
@@ -892,11 +1017,12 @@ Versiones vigentes:
 | bundle local | `3.1.0` |
 | bundle derivado con benchmark Hampel | `3.2.0` |
 | bundle experimental de deltas RF multianuales | `3.4.0` |
-| envelope del análisis completo | `2.2.0` |
+| envelope del análisis completo | `2.3.0` |
 | índice de figuras para informe / política de selección | `1.0.0` |
 | atribución post-cambio por evento | `3.0.0` |
 | evidencia agrícola / política de independencia | `1.0.0` |
-| recolección agrícola mensual por evento | `1.0.0` |
+| documento de recolección agrícola mensual | `1.0.0` |
+| bundle de recolección agrícola compartida / configuración | `1.1.0` |
 | persistencia agrícola por evento | `1.0.0` |
 | catálogo de fuentes | `2.1.0` |
 | resumen de análisis | `1.0.0` |
@@ -1050,6 +1176,57 @@ Mypy y `git diff --check` también aprobaron. La colección copia únicamente PN
 declarados y hasheados por los manifests hijos; no renderiza de nuevo ni mueve
 los productos científicos originales.
 
+La reparación de escala del collector del `2026-08-13` aprobó el gate completo
+con **593 pruebas** y **90,52 % de cobertura total**. Ruff, formato, Mypy y
+`git diff --check` también aprobaron. El gate incluye planificación compartida,
+recorte a grillas de evento, compatibilidad con persistencia/atribución y
+diagnóstico sanitizado de `report_assets`; el micro-smoke remoto se limitó a
+una ventana mensual y no sustituye la repetición del run completo.
+
+La estructuración del paquete editorial del `2026-08-13` aprobó el gate
+completo con **595 pruebas** y **90,62 % de cobertura total**. Ruff, formato,
+Mypy y `git diff --check` también aprobaron. Además se materializó la política
+sobre una copia temporal del expediente `establecimiento-2`: seleccionó dos
+eventos prioritarios, 16 figuras y 41 archivos curados, sin modificar el run
+histórico ni ejecutar GEE. Esta verificación prueba organización, hashes y
+linaje; no constituye una nueva evaluación científica del establecimiento.
+
+Los Incrementos 1–2 de API local del `2026-08-17` agregaron suites modulares
+sin GEE: **3 pruebas** para `deforestation-jobs` con 91,43 % de cobertura,
+**8 pruebas** para `deforestation-api` con 91,92 % y **11 pruebas** para
+`deforestation-worker` con 96,06 %. Verifican validación Polygon/MultiPolygon,
+jurisdicción y área métrica; idempotencia; adquisición condicional; reinicio;
+publicación `complete/partial`; hashes; límites sobre bytes realmente recibidos;
+rechazo de rutas inseguras y errores sanitizados. Estas pruebas operativas no
+reemplazan el smoke remoto pendiente.
+
+El Incremento 3 amplió las suites modulares a **6 pruebas** para
+`deforestation-jobs` con 95,27 % de cobertura, **13 pruebas** para
+`deforestation-api` con 90,36 % y **13 pruebas** para
+`deforestation-worker` con 91,47 %. El gate científico independiente conservó
+sus **595 pruebas** y 90,62 %. Ruff, formato, Mypy y `git diff --check`
+aprobaron; no hubo build ni ejecución remota GEE. Además, una integración de
+lectura sobre el expediente real preservado `establecimiento-nuevo` verificó
+41 assets y el inventario completo de cuatro eventos sin modificar el run.
+
+El cliente web minimalista del `2026-08-17` agrega **13 pruebas Vitest** para
+normalización GeoJSON, errores HTTP, idempotencia, flujo de validación/creación,
+progreso estimado honesto y reanudación del seguimiento por URL.
+El chequeo estricto `tsc --noEmit` y la auditoría de dependencias productivas
+aprobaron sin vulnerabilidades conocidas. También se verificaron visualmente la
+vista desktop, el layout móvil, el dibujo de un polígono y una validación contra
+la API local. Una prueba de configuración protege además la exclusión de
+MapLibre del prebundle de Vite, necesaria para cargar su worker de forma estable
+en Windows. No se ejecutó build ni un nuevo análisis GEE.
+
+El gate de integración multiproceso del `2026-08-17` elevó el gate raíz a
+**596 pruebas** y conservó **90,62 % de cobertura total**. La prueba levanta
+FastAPI sobre TCP y un worker one-shot separado, encola por HTTP, publica un
+`report_assets` sintético y verifica estado, reporte, evento, asset hasheado y
+ZIP. Las suites modulares, Ruff, formato, Mypy y `git diff --check` permanecen
+verdes. Este gate demuestra el plumbing local, NO la validez científica ni el
+smoke GEE de seis componentes.
+
 El primer run remoto conservado expuso una incompatibilidad concreta de
 transporte: Earth Engine no interpreta el alias literal `EPSG:6933` en
 `getDownloadURL`, aunque sí acepta la definición equivalente WKT1_GDAL. El
@@ -1097,22 +1274,40 @@ components/agricultural_collection/<bundle>
 components/agricultural_persistence/<bundle>
 components/post_change_attribution/<bundle>
 report_assets/index.json
-report_assets/figures/*.png
+report_assets/report_dataset.json
+report_assets/figures/main/*.png
+report_assets/figures/events/<event-id>/*.png
+report_assets/data/main/*.{json,csv}
+report_assets/annex/spatial/*.geojson
+report_assets/annex/tables/*.csv
+report_assets/annex/methodology/*.json
+report_assets/annex/provenance/*_component_status.json
 ```
 
-`report_assets/figures/` reúne copias byte a byte de las láminas más útiles
-para armar el informe sin obligar a navegar cada bundle. La política `1.0.0`
-selecciona, cuando existen: línea base y screening 2020; timeline RGB, índices y
-cobertura observacional; detección y fichas de eventos; diagnóstico Hampel;
-timeline y comparación RF; evidencia agrícola mensual y persistente; atribución
-post-cambio y mapas de conjunción. Los prefijos numéricos fijan un orden de
-lectura, pero los originales permanecen intactos y son la fuente autoritativa.
+`report_assets/` es un paquete editorial versionado y no un nuevo bundle
+científico. La política `2.0.0` reúne copias byte a byte de las figuras y datos
+más útiles sin obligar a navegar cada componente. `figures/main/` contiene la
+secuencia general; `figures/events/<event-id>/` agrupa perturbación, agricultura,
+persistencia y conjunción del mismo evento; `data/main/` conserva los JSON y CSV
+que alimentarán texto, indicadores y tablas; `annex/` separa geometrías, tablas
+extensas y metadatos metodológicos. Los originales permanecen intactos y son la
+fuente autoritativa.
 
-`report_assets/index.json` registra para cada copia componente, motivo de
-selección, ruta y SHA-256 del PNG original, manifest hijo y ruta/hash de la
-copia. También conserva el estado de componentes sin figura. Por eso un run
-`partial` o `.failed` puede reunir de forma auditable todo lo producido antes
-del fallo, sin fabricar imágenes para componentes ausentes o sin soporte.
+Las fichas priorizan todos los eventos `conversion_likely` y después los
+`review_required` que alcanzan el umbral de área, hasta completar diez fichas;
+si atribución no está disponible se usan los cinco eventos de perturbación de
+mayor superficie. El inventario completo siempre queda disponible en los JSON,
+CSV y GeoJSON seleccionados, aunque un evento no tenga ficha gráfica.
+
+`report_assets/report_dataset.json` expone una interfaz normalizada para un
+futuro PDF o DOCX: identificación, estado, métricas principales, eventos
+seleccionados, estado de componentes, limitaciones y rutas internas. No emite
+una conclusión legal ni duplica series raster. `report_assets/index.json`
+registra para cada copia categoría, componente, motivo, evento cuando aplica,
+ruta y SHA-256 del original, manifest hijo y ruta/hash de destino. También
+hashea el dataset normalizado y conserva el estado de componentes ausentes.
+Por eso un run `partial` o `.failed` puede reunir de forma auditable lo producido
+antes del fallo, sin fabricar evidencia para componentes sin soporte.
 
 Cuando un componente no puede publicar un bundle porque queda
 `diagnostic_unavailable`, `failed` o `skipped`, su carpeta contiene
@@ -1157,7 +1352,11 @@ Todavía falta:
   píxeles y casos que cruzan zonas UTM;
 - ejecutar un smoke remoto completo de los seis componentes; ya se validó de
   forma acotada el primer evento/mes Dynamic World contra un bundle científico
-  preservado, pero no la cadena completa;
+  preservado, pero no la cadena completa. El intento real costa-uru del
+  `2026-08-13` completó HLS, Hampel y RF, pero el collector antiguo planificó
+  2.686 consultas evento-mes frente al máximo operativo de 500. La reparación
+  posterior agrupa esas salidas en 55 adquisiciones mensuales y su micro-smoke
+  real de 58 eventos × un mes aprobó; todavía falta repetir la cadena completa;
 - sumar una segunda fuente temporal para medir desacuerdo cross-source, hoy
   declarado explícitamente como no evaluado;
 - validar la persistencia y la integración agrícola sobre casos reales sin perder

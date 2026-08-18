@@ -14,11 +14,18 @@ import pytest
 import rasterio
 from rasterio.io import MemoryFile
 from shapely.geometry import shape
+from shapely.ops import unary_union
 
 from deforestation_pipeline.agricultural_collector import (
     DYNAMIC_WORLD_RASTER_BANDS,
-    CollectedWindowRaster,
+    CollectedSharedWindowRaster,
+    DynamicWorldSharedEvent,
+    DynamicWorldSharedWindowQuery,
     DynamicWorldWindowQuery,
+    _monthly_windows,
+    _parse_events,
+    _shared_acquisition_plan,
+    collect_dynamic_world_shared_window,
     collect_dynamic_world_window,
     load_agricultural_collector_config,
     materialize_agricultural_evidence_collection,
@@ -29,6 +36,7 @@ from deforestation_pipeline.catalog import (
 )
 from deforestation_pipeline.config import load_config
 from deforestation_pipeline.gee import GeeSession
+from deforestation_pipeline.raster_grid import derive_raster_grid_spec
 from deforestation_pipeline.raster_products import RasterDownloadError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,17 +44,22 @@ CREATED = datetime(2026, 8, 11, 15, tzinfo=UTC)
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_agricultural_collector.py"
 
 
-def _event_feature(*, event_id: str = "PDE-1", onset: bool = True) -> dict[str, Any]:
+def _event_feature(
+    *,
+    event_id: str = "PDE-1",
+    onset: bool = True,
+    longitude_offset: float = 0.0,
+) -> dict[str, Any]:
     return {
         "type": "Feature",
         "geometry": {
             "type": "Polygon",
             "coordinates": [
                 [
-                    [-60.0000, -31.0000],
-                    [-59.9990, -31.0000],
-                    [-59.9990, -30.9992],
-                    [-60.0000, -31.0000],
+                    [-60.0000 + longitude_offset, -31.0000],
+                    [-59.9990 + longitude_offset, -31.0000],
+                    [-59.9990 + longitude_offset, -30.9992],
+                    [-60.0000 + longitude_offset, -31.0000],
                 ]
             ],
         },
@@ -86,7 +99,9 @@ def _event_bundle(tmp_path: Path, features: list[dict[str, Any]]) -> Path:
     return bundle
 
 
-def _raster_bytes(query: DynamicWorldWindowQuery, *, mode: str) -> bytes:
+def _raster_bytes(
+    query: DynamicWorldWindowQuery | DynamicWorldSharedWindowQuery, *, mode: str
+) -> bytes:
     height, width = query.grid.height, query.grid.width
     nodata = query.grid.nodata
     values = np.full((4, height, width), nodata, dtype=np.float32)
@@ -139,27 +154,31 @@ def _run(
 def test_production_collector_config_is_versioned_and_bounded() -> None:
     config = load_agricultural_collector_config(PROJECT_ROOT / "configs/agricultural-collector.yml")
 
-    assert config.schema_version == "1.0.0"
+    assert config.schema_version == "1.1.0"
     assert config.source_id == "dynamic_world_v1"
     assert config.target_crs == "EPSG:6933"
     assert config.resolution_m == 10
     assert config.temporal_cadence == "calendar_month"
     assert config.maximum_events <= 100
     assert config.maximum_windows_per_event <= 72
+    assert config.maximum_remote_acquisitions == 500
+    assert config.maximum_shared_grid_pixels == 1_000_000
     assert config.minimum_top1_probability == pytest.approx(0.6)
 
 
 def test_collector_queries_only_post_onset_months_and_materializes_auditable_bundle(
     tmp_path: Path,
 ) -> None:
-    queries: list[DynamicWorldWindowQuery] = []
+    queries: list[DynamicWorldSharedWindowQuery] = []
 
-    def provider(query: DynamicWorldWindowQuery) -> CollectedWindowRaster:
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
         queries.append(query)
         mode = "crop" if query.window_id == "2022-06" else "nodata"
-        return CollectedWindowRaster(
+        return CollectedSharedWindowRaster(
             content=_raster_bytes(query, mode=mode),
-            matched_scene_count=4 if mode == "crop" else 0,
+            matched_scene_counts={
+                event.event_id: 4 if mode == "crop" else 0 for event in query.events
+            },
             retrieved_at=CREATED,
         )
 
@@ -201,6 +220,8 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     )
     assert metadata["spatial_method"]["resampling"] == "nearest"
     assert metadata["query_count"] == 2
+    assert metadata["remote_acquisition_count"] == 2
+    assert metadata["event_window_reuse_ratio"] == pytest.approx(1.0)
     assert metadata["signed_urls_persisted"] is False
 
     geojson = json.loads(
@@ -209,13 +230,14 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert len(geojson["features"]) == 1
     assert geojson["features"][0]["properties"]["collection_status"] == "collected"
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
+    assert manifest["schema_version"] == "1.1.0"
     assert manifest["source_event_bundle"]["input_sha256"] == "c" * 64
     assert manifest["remote_data_accessed"] is True
     assert all((output / item["path"]).is_file() for item in manifest["artifacts"])
     assert any(
         item["path"].endswith("event_footprint_fraction.tif") for item in manifest["artifacts"]
     )
-    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 2
+    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 4
     pngs = [
         item
         for item in manifest["artifacts"]
@@ -227,10 +249,74 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert manifest["visualizations"][0]["source_rasters"]
 
 
-def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> None:
-    calls: list[DynamicWorldWindowQuery] = []
+def test_collector_shares_remote_monthly_acquisitions_across_events(
+    tmp_path: Path,
+) -> None:
+    acquisitions: list[DynamicWorldSharedWindowQuery] = []
 
-    def provider(query: DynamicWorldWindowQuery) -> CollectedWindowRaster:
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+        acquisitions.append(query)
+        return CollectedSharedWindowRaster(
+            content=_raster_bytes(query, mode="crop"),
+            matched_scene_counts={event.event_id: 4 for event in query.events},
+            retrieved_at=CREATED,
+        )
+
+    output = _run(
+        tmp_path,
+        provider,
+        features=[
+            _event_feature(event_id="PDE-1"),
+            _event_feature(event_id="PDE-2", longitude_offset=0.003),
+        ],
+    )
+
+    assert [query.window_id for query in acquisitions] == ["2022-06", "2022-07"]
+    assert all(
+        {event.event_id for event in query.events} == {"PDE-1", "PDE-2"} for query in acquisitions
+    )
+    metadata = json.loads(
+        (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
+    )
+    assert metadata["query_count"] == 4
+    assert metadata["remote_acquisition_count"] == 2
+    assert metadata["event_window_reuse_ratio"] == pytest.approx(2.0)
+    assert len(metadata["shared_acquisitions"]) == 2
+    payload = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
+    assert metadata["spatial_method"]["shared_acquisition_grid"]["width"] > max(
+        event["grid"]["width"] for event in payload["events"]
+    )
+    manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
+    assert manifest["query_count"] == 4
+    assert manifest["remote_acquisition_count"] == 2
+    assert (
+        sum(
+            item["path"].startswith("tiffs/evidence/agricultural/_shared/")
+            for item in manifest["artifacts"]
+        )
+        == 2
+    )
+    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 6
+
+
+def test_shared_plan_budgets_unique_months_not_event_month_products() -> None:
+    features = [_event_feature(event_id=f"PDE-{index:03d}") for index in range(100)]
+    events = _parse_events({"type": "FeatureCollection", "features": features})
+    windows = {
+        event.event_id: _monthly_windows(event.onset_end, date(2025, 12, 31)) for event in events
+    }
+
+    plan = _shared_acquisition_plan(events, windows)
+
+    assert sum(len(items) for items in windows.values()) == 4_300
+    assert len(plan) == 43
+    assert all(len(participants) == 100 for *_, participants in plan)
+
+
+def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> None:
+    calls: list[DynamicWorldSharedWindowQuery] = []
+
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
         calls.append(query)
         raise AssertionError("no debe consultar un evento sin onset")
 
@@ -244,7 +330,7 @@ def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> N
 
 
 def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None:
-    def provider(query: DynamicWorldWindowQuery) -> CollectedWindowRaster:
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
         content = _raster_bytes(query, mode="crop")
         with MemoryFile(content) as source_memory:
             with source_memory.open() as source:
@@ -255,9 +341,9 @@ def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None
             with target_memory.open(**profile) as target:
                 target.write(values)
             broken = bytes(target_memory.read())
-        return CollectedWindowRaster(
+        return CollectedSharedWindowRaster(
             content=broken,
-            matched_scene_count=4,
+            matched_scene_counts={event.event_id: 4 for event in query.events},
             retrieved_at=CREATED,
         )
 
@@ -266,7 +352,7 @@ def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None
 
 
 def test_collector_rejects_impossible_dynamic_world_counts(tmp_path: Path) -> None:
-    def provider(query: DynamicWorldWindowQuery) -> CollectedWindowRaster:
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
         height, width = query.grid.height, query.grid.width
         values = np.zeros((4, height, width), dtype=np.float32)
         values[0] = 2.0
@@ -287,7 +373,11 @@ def test_collector_rejects_impossible_dynamic_world_counts(tmp_path: Path) -> No
             with memory.open(**profile) as dataset:
                 dataset.write(values)
             content = bytes(memory.read())
-        return CollectedWindowRaster(content=content, matched_scene_count=2, retrieved_at=CREATED)
+        return CollectedSharedWindowRaster(
+            content=content,
+            matched_scene_counts={event.event_id: 2 for event in query.events},
+            retrieved_at=CREATED,
+        )
 
     with pytest.raises(ValueError, match="dynamic_world_raster_values_invalid"):
         _run(tmp_path, provider)
@@ -387,6 +477,35 @@ class _Collection:
         return _Image(f"{self.expression}.sum()")
 
 
+class _Feature:
+    def __init__(self, geometry: object, properties: dict[str, Any]) -> None:
+        self._geometry = geometry
+        self.properties = dict(properties)
+
+    def geometry(self) -> object:
+        return self._geometry
+
+    def set(self, name: str, value: object) -> _Feature:
+        resolved = value.value if isinstance(value, _Scalar) else value
+        return _Feature(self._geometry, {**self.properties, name: resolved})
+
+
+class _FeatureCollection:
+    def __init__(self, features: list[_Feature]) -> None:
+        self.features = features
+
+    def map(self, function: Any) -> _FeatureCollection:
+        return _FeatureCollection([function(feature) for feature in self.features])
+
+    def getInfo(self) -> dict[str, object]:
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": feature.properties} for feature in self.features
+            ],
+        }
+
+
 class _FakeEe:
     def __init__(self, scene_count: int = 3) -> None:
         self.scene_count = scene_count
@@ -405,6 +524,15 @@ class _FakeEe:
     def Image(self, image: _Image) -> _Image:
         return image
 
+    def Feature(self, geometry: object, properties: dict[str, Any] | None = None) -> _Feature:
+        if isinstance(geometry, _Feature):
+            return geometry
+        assert properties is not None
+        return _Feature(geometry, properties)
+
+    def FeatureCollection(self, features: list[_Feature]) -> _FeatureCollection:
+        return _FeatureCollection(features)
+
 
 def _dynamic_world_query() -> DynamicWorldWindowQuery:
     feature = _event_feature()
@@ -413,8 +541,6 @@ def _dynamic_world_query() -> DynamicWorldWindowQuery:
     source = build_agricultural_evidence_source_plan(
         load_source_catalog(PROJECT_ROOT / "data/catalog.yml")
     ).candidate_source
-    from deforestation_pipeline.raster_grid import derive_raster_grid_spec
-
     grid = derive_raster_grid_spec(
         aoi_wgs84=geometry,
         target_crs=config.target_crs,
@@ -428,6 +554,34 @@ def _dynamic_world_query() -> DynamicWorldWindowQuery:
         end_date_exclusive=date(2022, 7, 1),
         geometry_wgs84=geometry,
         grid=grid,
+        source=source,
+        minimum_top1_probability=0.6,
+    )
+
+
+def _dynamic_world_shared_query() -> DynamicWorldSharedWindowQuery:
+    first = shape(_event_feature(event_id="PDE-1")["geometry"])
+    second = shape(_event_feature(event_id="PDE-2")["geometry"])
+    config = load_agricultural_collector_config(PROJECT_ROOT / "configs/agricultural-collector.yml")
+    source = build_agricultural_evidence_source_plan(
+        load_source_catalog(PROJECT_ROOT / "data/catalog.yml")
+    ).candidate_source
+    union = unary_union([first, second])
+    return DynamicWorldSharedWindowQuery(
+        window_id="2022-06",
+        start_date=date(2022, 6, 1),
+        end_date_exclusive=date(2022, 7, 1),
+        geometry_wgs84=union,
+        grid=derive_raster_grid_spec(
+            aoi_wgs84=union,
+            target_crs=config.target_crs,
+            resolution_m=float(config.resolution_m),
+            nodata=config.raster_nodata,
+        ),
+        events=(
+            DynamicWorldSharedEvent("PDE-1", first),
+            DynamicWorldSharedEvent("PDE-2", second),
+        ),
         source=source,
         minimum_top1_probability=0.6,
     )
@@ -464,6 +618,35 @@ def test_gee_provider_filters_event_and_builds_top1_crop_support(
     assert captured["band_names"] == DYNAMIC_WORLD_RASTER_BANDS
     assert captured["grid_spec"].grid_sha256 == _dynamic_world_query().grid.grid_sha256
     assert cast(_Image, captured["image"]).expression.endswith(".toFloat()")
+
+
+def test_gee_shared_provider_downloads_month_once_and_counts_each_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    module = _FakeEe()
+    captured: list[dict[str, Any]] = []
+
+    def materialize(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return type("Result", (), {"content": b"normalized"})()
+
+    monkeypatch.setattr(collector_module, "materialize_ee_image_to_grid", materialize)
+    result = collect_dynamic_world_shared_window(
+        query=_dynamic_world_shared_query(),
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+
+    assert result.content == b"normalized"
+    assert result.matched_scene_counts == {"PDE-1": 3, "PDE-2": 3}
+    assert len(captured) == 1
+    assert captured[0]["artifact_path"] == (
+        "tiffs/evidence/agricultural/_shared/2022-06_dynamic_world.tif"
+    )
+    assert captured[0]["grid_spec"].grid_sha256 == _dynamic_world_shared_query().grid.grid_sha256
 
 
 def test_gee_provider_skips_download_when_month_has_no_scenes(
