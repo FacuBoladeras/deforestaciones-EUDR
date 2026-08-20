@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deforestation_domain.types import AreaCrsStrategy as AreaCrsStrategy
 from deforestation_pipeline.change_detection import DisturbanceDetectionConfig
 from deforestation_pipeline.disturbance_events import DisturbanceEventConfig
 from deforestation_pipeline.forest_baseline import ForestBaselineConfig
@@ -33,13 +34,6 @@ class StrictConfigModel(BaseModel):
     """Base inmutable que rechaza parámetros desconocidos."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class AreaCrsStrategy(StrEnum):
-    """Estrategias admitidas para seleccionar un CRS de superficie."""
-
-    AUTO_EQUAL_AREA = "auto_equal_area"
-    LOCAL_UTM = "local_utm"
 
 
 class SpectralIndex(StrEnum):

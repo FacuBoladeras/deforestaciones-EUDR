@@ -12,9 +12,9 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from deforestation_api.models import ApiFeature, ApiGeometry
-from deforestation_pipeline.area import measure_area
-from deforestation_pipeline.geometry import GeometryValidationError, validate_geometry
-from deforestation_pipeline.schemas import GeoJSONGeometry
+from deforestation_domain.area import measure_area
+from deforestation_domain.geometry import GeometryValidationError, validate_geometry
+from deforestation_domain.schemas import GeoJSONGeometry
 
 
 class GeometryComplexityError(ValueError):

@@ -40,7 +40,6 @@ def _settings(tmp_path: Path) -> ApiSettings:
     return ApiSettings(
         database_path=tmp_path / "private" / "jobs.sqlite3",
         storage_root=tmp_path / "private" / "objects",
-        output_root=tmp_path / "outputs",
         jurisdiction_boundary_path=boundary,
         owner_id="local-internal",
     )
@@ -68,7 +67,7 @@ def _job(*, expires_at: datetime | None = None) -> AnalysisJob:
 
 
 def _completed_bundle(settings: ApiSettings) -> tuple[SQLiteJobRepository, Path]:
-    result = settings.output_root / "synthetic-result"
+    result = settings.storage_root / "analyses" / ANALYSIS_ID / "results"
     report_root = result / "report_assets"
     dataset_path = report_root / "report_dataset.json"
     events_path = report_root / "data" / "main" / "030_disturbance_events.json"
@@ -121,6 +120,19 @@ def _completed_bundle(settings: ApiSettings) -> tuple[SQLiteJobRepository, Path]
     )
     manifest_path = result / "run_manifest.json"
     _write_json(manifest_path, {"overall_status": "complete"})
+    client_report = result / "client_report" / "informe-tecnico.pdf"
+    client_report.parent.mkdir(parents=True, exist_ok=True)
+    client_report.write_bytes(b"%PDF-1.4\nsynthetic report\n")
+    _write_json(
+        result / "client_report" / "report.json",
+        {
+            "media_type": "application/pdf",
+            "path": "client_report/informe-tecnico.pdf",
+            "schema_version": "1.0.0",
+            "sha256": _sha256(client_report),
+            "size_bytes": client_report.stat().st_size,
+        },
+    )
 
     repository = SQLiteJobRepository(settings.database_path)
     repository.initialize()
@@ -153,6 +165,7 @@ def test_report_events_assets_and_allowlisted_asset_download(tmp_path: Path) -> 
         assets = client.get(f"/api/v1/analyses/{ANALYSIS_ID}/assets?page=1&page_size=10")
         image = next(item for item in assets.json()["items"] if item["media_type"] == "image/png")
         downloaded = client.get(image["download_url"])
+        pdf = client.get(f"/api/v1/analyses/{ANALYSIS_ID}/report.pdf")
 
     assert report.status_code == 200
     assert report.json()["analysis"]["analysis_id"] == ANALYSIS_ID
@@ -169,6 +182,12 @@ def test_report_events_assets_and_allowlisted_asset_download(tmp_path: Path) -> 
     assert downloaded.status_code == 200
     assert downloaded.content == b"synthetic-png"
     assert downloaded.headers["etag"] == f'"{image["sha256"]}"'
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.headers["content-disposition"].endswith(
+        'filename="informe-tecnico-synthetic-establishment-aaaaaaaa.pdf"'
+    )
+    assert pdf.content.startswith(b"%PDF-")
 
 
 def test_results_reject_unready_expired_and_tampered_bundles(tmp_path: Path) -> None:
@@ -234,7 +253,7 @@ def test_startup_purges_only_expired_private_objects(tmp_path: Path) -> None:
     expired_private = settings.storage_root / "analyses" / ANALYSIS_ID
     expired_private.mkdir(parents=True)
     (expired_private / "input.geojson").write_text("sensitive", encoding="utf-8")
-    scientific = settings.output_root / "must-remain.txt"
+    scientific = tmp_path / "outputs" / "must-remain.txt"
     scientific.parent.mkdir(parents=True)
     scientific.write_text("preserve", encoding="utf-8")
 
@@ -257,3 +276,40 @@ def test_missing_allowlisted_asset_and_package_return_stable_errors(tmp_path: Pa
     assert asset.json()["error"]["code"] == "asset_not_found"
     assert package.status_code == 409
     assert package.json()["error"]["code"] == "download_not_ready"
+
+
+def test_client_report_download_rejects_missing_and_tampered_pdf(tmp_path: Path) -> None:
+    missing_settings = _settings(tmp_path / "missing")
+    _completed_bundle(missing_settings)
+    (
+        missing_settings.storage_root
+        / "analyses"
+        / ANALYSIS_ID
+        / "results"
+        / "client_report"
+        / "informe-tecnico.pdf"
+    ).unlink()
+
+    with TestClient(create_app(missing_settings)) as client:
+        missing = client.get(f"/api/v1/analyses/{ANALYSIS_ID}/report.pdf")
+
+    assert missing.status_code == 409
+    assert missing.json()["error"]["code"] == "report_pdf_not_ready"
+
+    tampered_settings = _settings(tmp_path / "tampered-pdf")
+    _completed_bundle(tampered_settings)
+    pdf = (
+        tampered_settings.storage_root
+        / "analyses"
+        / ANALYSIS_ID
+        / "results"
+        / "client_report"
+        / "informe-tecnico.pdf"
+    )
+    pdf.write_bytes(b"%PDF-1.4\ntampered\n")
+
+    with TestClient(create_app(tampered_settings)) as client:
+        tampered = client.get(f"/api/v1/analyses/{ANALYSIS_ID}/report.pdf")
+
+    assert tampered.status_code == 409
+    assert tampered.json()["error"]["code"] == "report_pdf_not_ready"

@@ -15,6 +15,10 @@ REPORT_FIGURE_COLLECTION_SCHEMA_VERSION = "2.0.0"
 REPORT_FIGURE_SELECTION_POLICY_VERSION = "2.0.0"
 REPORT_DATASET_SCHEMA_VERSION = "1.0.0"
 _MAX_REVIEW_EVENT_SHEETS = 10
+_SUPERSEDED_FULL_PIPELINE_LIMITATIONS_AFTER_ATTRIBUTION = {
+    "Se detectaron señales de perturbación sin atribuir su causa o uso posterior.",
+    "No se ejecutó atribución de conversión ni se generó una conclusión final.",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,6 +688,13 @@ def _build_report_dataset(
         )
         for item in files
     }
+    inherited_limitations = _string_list(full.get("limitations"))
+    if attribution:
+        inherited_limitations = [
+            limitation
+            for limitation in inherited_limitations
+            if limitation not in _SUPERSEDED_FULL_PIPELINE_LIMITATIONS_AFTER_ATTRIBUTION
+        ]
     return {
         "schema_version": REPORT_DATASET_SCHEMA_VERSION,
         "recorded_at": recorded_at,
@@ -720,7 +731,7 @@ def _build_report_dataset(
         "limitations": [
             "Resultado técnico automático sujeto a revisión humana.",
             "No constituye certificación ni confirmación legal EUDR.",
-            *_string_list(full.get("limitations")),
+            *inherited_limitations,
         ],
     }
 

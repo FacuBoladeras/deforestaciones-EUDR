@@ -42,7 +42,6 @@ def _settings(
     return ApiSettings(
         database_path=tmp_path / "private" / "jobs.sqlite3",
         storage_root=tmp_path / "private" / "objects",
-        output_root=tmp_path / "outputs",
         jurisdiction_boundary_path=_write_boundary(tmp_path / "boundary.geojson"),
         max_vertices=max_vertices,
         max_request_bytes=max_request_bytes,
@@ -76,10 +75,11 @@ def test_health_and_openapi_expose_versioned_contract(tmp_path: Path) -> None:
         schema = client.get("/openapi.json").json()
 
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "service": "deforestation-api", "version": "0.1.0"}
+    assert health.json() == {"status": "ok", "service": "deforestation-api", "version": "0.2.0"}
     assert "/api/v1/geometries/validate" in schema["paths"]
     assert "/api/v1/analyses" in schema["paths"]
     assert "/api/v1/analyses/{analysis_id}" in schema["paths"]
+    assert "/api/v1/analyses/{analysis_id}/report.pdf" in schema["paths"]
 
 
 def test_validate_geometry_uses_domain_rules_and_metric_area(tmp_path: Path) -> None:

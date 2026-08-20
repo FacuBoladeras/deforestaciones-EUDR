@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,6 +40,7 @@ from deforestation_api.models import (
 from deforestation_api.results import (
     ResultCatalog,
     ResultIntegrityError,
+    client_report_download,
     packaged_download,
     purge_expired_private_objects,
 )
@@ -65,7 +67,7 @@ class ApiError(RuntimeError):
 def create_app(settings: ApiSettings | None = None) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
     repository = SQLiteJobRepository(active_settings.database_path)
-    result_catalog = ResultCatalog(active_settings.output_root)
+    result_catalog = ResultCatalog(active_settings.storage_root)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
@@ -211,6 +213,33 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
             raise _result_integrity_api_error(error) from error
 
     @app.get(
+        "/api/v1/analyses/{analysis_id}/report.pdf",
+        response_class=FileResponse,
+        responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+        tags=["results"],
+    )
+    def analysis_report_pdf(analysis_id: UUID) -> FileResponse:
+        job = _ready_job(repository, active_settings, analysis_id)
+        try:
+            report, digest = client_report_download(
+                active_settings.storage_root,
+                job.analysis_id,
+            )
+        except ResultIntegrityError as error:
+            raise ApiError(
+                409,
+                "report_pdf_not_ready",
+                "El informe PDF no está disponible o no supera integridad",
+            ) from error
+        establishment = _safe_filename_component(job.establishment_id)
+        return FileResponse(
+            report,
+            media_type="application/pdf",
+            filename=f"informe-tecnico-{establishment}-{job.analysis_id[:8]}.pdf",
+            headers={"ETag": f'"{digest}"', "Cache-Control": "private, immutable"},
+        )
+
+    @app.get(
         "/api/v1/analyses/{analysis_id}/events",
         response_model=EventPageResponse,
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
@@ -346,6 +375,11 @@ def _ready_job(
         )
         raise ApiError(409, "analysis_not_ready", message)
     return job
+
+
+def _safe_filename_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-_")
+    return normalized[:80] or "establecimiento"
 
 
 def _paginate(items: list[Any], page: int, page_size: int) -> tuple[list[Any], int | None]:

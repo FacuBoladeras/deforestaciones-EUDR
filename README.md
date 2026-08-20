@@ -17,7 +17,7 @@ dominio y de desarrollo que deben respetar humanos y agentes viven en
 
 ## Checkpoint actual
 
-**Fecha del checkpoint:** 17 de agosto de 2026.
+**Fecha del checkpoint:** 18 de agosto de 2026.
 
 La etapa de detección de perturbaciones está implementada de extremo a extremo
 para rangos estacionales HLS. El pipeline puede:
@@ -48,7 +48,10 @@ para rangos estacionales HLS. El pipeline puede:
     de sus bundles fuente y sin emitir confirmación automática.
 18. validar polígonos mediante una API interna `/api/v1`, registrar solicitudes
     idempotentes en SQLite y ejecutarlas con un worker local separado del
-    proceso HTTP.
+    proceso HTTP;
+19. construir un modelo editorial acotado desde `report_assets` verificados y
+    renderizar un informe PDF técnico determinístico, sin reinterpretar la
+    evidencia científica.
 
 La frontera actual es deliberada:
 
@@ -71,7 +74,9 @@ el `uv workspace` y el cliente mantiene su toolchain Node aislado:
 
 ```text
 apps/web/          # React + TypeScript: carga/dibujo, polling y resultados
+packages/domain/   # geometría, CRS y medición de área sin stack científico
 packages/jobs/     # contrato y repositorio SQLite compartido
+packages/reporting/ # contrato editorial y renderer PDF sin GEE ni HTTP
 services/api/      # FastAPI: health, validación y registro/consulta de jobs
 services/worker/   # consumidor secuencial que invoca run_complete_analysis()
 ```
@@ -85,6 +90,7 @@ La API publica:
 - `GET /api/v1/analyses/{analysis_id}/report`;
 - `GET /api/v1/analyses/{analysis_id}/events` con paginación;
 - `GET /api/v1/analyses/{analysis_id}/assets` y descarga por ID opaco;
+- `GET /api/v1/analyses/{analysis_id}/report.pdf` para el informe cliente;
 - `GET /api/v1/analyses/{analysis_id}/download` para el ZIP verificable;
 - `POST /api/v1/analyses/{analysis_id}/cancel` best-effort.
 
@@ -95,12 +101,53 @@ reinicio. La frontera jurisdiccional de screening se deriva de `ign:pais` del
 IGN, está versionada bajo `data/boundaries/` y no sustituye evidencia catastral
 ni revisión de casos cercanos a límites.
 
-Los resultados sólo se publican desde `report_assets`: dataset, inventario y
-archivos se verifican por tamaño y SHA-256. El worker crea el ZIP determinístico
-en almacenamiento privado antes de completar el job; FastAPI no empaqueta ni
-ejecuta ciencia dentro del request. La expiración local responde `410`, impide
-adquirir jobs vencidos y limpia únicamente objetos privados, nunca los runs
-científicos.
+Los resultados científicos sólo se publican desde `report_assets`: dataset,
+inventario y archivos se verifican por tamaño y SHA-256. Después de esa
+verificación, el worker genera el PDF cliente como postproceso, sella su tamaño
+y SHA-256, y lo agrega sin modificar la allowlist científica. Antes de completar
+el job crea tanto el ZIP determinístico como una copia curada bajo
+`storage_root/analyses/{analysis_id}/results`. FastAPI lee únicamente esa copia
+privada durable: `output_prefix` queda como procedencia y la desaparición del
+workspace científico no rompe `/report`, `/events` ni `/assets`. La expiración
+local responde `410`, impide adquirir jobs vencidos y limpia únicamente objetos
+privados, nunca los runs científicos.
+
+### Informe técnico PDF - versión cliente
+
+`packages/reporting` `0.6.0`, con contrato editorial `2.3.0`, implementa el
+informe como una frontera independiente. Verifica el tamaño y SHA-256 de
+`report_assets/index.json`, su dataset y todos los assets allowlisted; luego
+proyecta JSON, CSV y GeoJSON verificados a un modelo Pydantic editorial. También
+recupera la geometría declarada desde el `input.geojson` sellado por el
+`run_manifest.json`; una diferencia de tamaño o hash invalida el render. El
+cuerpo cliente conserva métricas, eventos, condiciones de evidencia, calidad,
+fuentes, limitaciones y trazabilidad, pero excluye comparaciones internas de
+modelos, votos candidatos y diagnósticos crudos sin interpretación.
+
+El renderer ReportLab produce de forma atómica y determinística un PDF A4 con
+índice en portada, introducciones de lectura, resumen ejecutivo, distribución
+de cobertura 2020, mapa e inventario completo de eventos, matrices de
+condiciones, trayectorias forestales, soporte
+agrícola, sensibilidad, calidad, fuentes y descargo legal. El resumen usa una
+tabla técnica compacta, no tarjetas de dashboard. La selección GIS incorpora la
+cobertura RF anual 2020-2024 con pérdidas candidatas, el timeline RGB estacional
+y la evidencia espectral de cada evento detallado. Los mapas vectoriales agregan
+perímetro declarado, grilla WGS 84, norte, escala aproximada y un localizador del
+evento. Las fichas detalladas suman contexto vectorial OpenStreetMap al 50 % de
+opacidad, con atribución visible; se consultan extensiones pequeñas mediante
+Overpass y se cachea la respuesta normalizada junto al PDF. El mapa base sólo
+orienta y no participa en la detección, atribución o medición científica. Una
+repetición con el mismo cache conserva el render determinístico. P0 frente a multianual,
+votos candidatos, desacuerdos de clase y diagnósticos crudos permanecen fuera
+del cuerpo, pero siguen verificados y disponibles en el bundle técnico.
+
+El rediseño cliente se validó contra el expediente real preservado: 41 assets,
+cuatro eventos y dos fichas detalladas. Su PDF final tiene quince páginas -nueve
+verticales y seis apaisadas- inspeccionadas una por una. El worker `0.2.0`
+invoca el renderer fuera del pipeline científico y fuera del request HTTP,
+publica `client_report/informe-tecnico.pdf` con metadatos verificables y lo
+incluye en el ZIP. La API `0.2.0` sirve el archivo sólo para jobs publicables y
+el cliente web `0.2.0` ofrece una descarga directa junto al expediente completo.
 
 Para desarrollo local:
 
@@ -115,7 +162,8 @@ variables de entorno y nunca llegan al contrato HTTP.
 
 El cliente web minimalista permite cargar un `Polygon`/`MultiPolygon` GeoJSON o
 dibujar un `Polygon`, validarlo, crear el job, consultar su estado, cancelar en
-modo best-effort y visualizar el resumen, eventos y figuras disponibles. Una
+modo best-effort, descargar el informe PDF y visualizar el resumen, eventos y
+figuras disponibles. Una
 `FeatureCollection` se normaliza únicamente cuando contiene exactamente una
 `Feature` poligonal; las colecciones vacías o múltiples se rechazan para
 conservar la regla un establecimiento–una geometría. El cliente no reimplementa
@@ -151,15 +199,16 @@ definirse un proveedor y una política de teselas propios.
 
 El gate local de integración levanta una API HTTP descartable y un worker
 one-shot en procesos separados. Comparten sólo SQLite y almacenamiento temporal,
-usan un runner sintético y verifican estado, reporte, eventos, asset y ZIP sin
-consultar GEE:
+usan un runner sintético y verifican estado, reporte JSON, PDF, eventos, asset y
+ZIP sin consultar GEE:
 
 ```powershell
 uv run --all-packages pytest -o addopts='' `
   tests/integration/test_api_worker_flow.py -q
 ```
 
-Antes del smoke real desde la web, verificar las rutas sin iniciar Earth Engine:
+Para repetir un análisis real desde la web, verificar primero las rutas sin
+iniciar Earth Engine:
 
 ```powershell
 $input = "C:\Users\Facu\Desktop\prueba-viale.geojson"
@@ -1227,6 +1276,83 @@ ZIP. Las suites modulares, Ruff, formato, Mypy y `git diff --check` permanecen
 verdes. Este gate demuestra el plumbing local, NO la validez científica ni el
 smoke GEE de seis componentes.
 
+El endurecimiento previo a contenedores del `2026-08-18` elevó el gate raíz a
+**598 pruebas** y **90,67 % de cobertura total**. Las suites modulares aprobaron
+con **35 pruebas** del dominio geoespacial (90,03 %), **6** de jobs (95,27 %),
+**14** de API (90,66 %) y **17** de worker (90,30 %); el gate multiproceso
+también permaneció verde. Ruff, formato, Mypy sobre 139 archivos y
+`git diff --check` aprobaron. El cambio corrige limitaciones de atribución
+obsoletas en reportes nuevos, publica resultados curados durables y elimina la
+dependencia de la API sobre el paquete científico completo.
+
+El Incremento 1 del informe PDF del `2026-08-18` elevó el gate raíz a
+**605 pruebas** y conservó **90,67 % de cobertura total**. El paquete
+`deforestation-reporting` agrega **7 pruebas** con **93,67 % de cobertura** para
+contrato editorial, integridad de assets, lenguaje legal, determinismo byte a
+byte y escritura atómica. Ruff, formato sobre 144 archivos, Mypy y
+`git diff --check` aprobaron. También se renderizaron e inspeccionaron las seis
+páginas de un expediente sintético representativo; no hubo build, integración
+HTTP ni ejecución GEE.
+
+El Incremento 2 del informe PDF del `2026-08-18` elevó el gate raíz a
+**606 pruebas** y mantuvo **90,67 % de cobertura total**. Las **8 pruebas** de
+`deforestation-reporting` alcanzaron **94,00 %**. El PDF real quedó en 21
+páginas A4, con cinco páginas apaisadas para figuras ultrapanorámicas y 16
+verticales; su contenido se verificó con PyPDF/PDFPlumber y todas las páginas
+se renderizaron con Poppler para QA visual. El expediente fuente permaneció
+intacto y no se ejecutó GEE ni build.
+
+El rediseño cliente `0.3.0` del `2026-08-18` mantiene el gate raíz en **606
+pruebas** y **90,67 % de cobertura total**. Las **8 pruebas** de
+`deforestation-reporting` alcanzan **91,62 %** tras ampliar el contrato a datos
+estructurados verificados. El PDF real quedó en nueve páginas A4 verticales con
+mapa e inventario completo, condiciones por evento, trayectorias forestales,
+soporte agrícola, sensibilidad, calidad y fuentes. Ruff, formato sobre 146
+archivos, Mypy sobre 145 archivos y `git diff --check` aprobaron. Las figuras
+internas permanecen en el expediente técnico y no se ejecutó GEE ni build.
+
+El ajuste editorial `0.4.0` del `2026-08-18` conserva **606 pruebas** y **90,67
+% de cobertura total**. Las **8 pruebas** de `deforestation-reporting` alcanzan
+**91,84 %**. El mismo expediente real ahora produce trece páginas -nueve A4
+verticales y cuatro apaisadas- con cobertura RF anual, timeline RGB y evidencia
+espectral por evento, mientras el resumen abandona las tarjetas de dashboard en
+favor de una tabla sobria. Ruff, formato, Mypy y `git diff --check` aprobaron;
+no se ejecutó GEE ni build.
+
+El ajuste cartográfico y narrativo `0.5.0` del `2026-08-20` eleva el gate a
+**607 pruebas** y conserva **90,67 % de cobertura total**. Las **9 pruebas** de
+`deforestation-reporting` alcanzan **90,32 %** e incluyen la verificación de la
+geometría declarada. El expediente real produce quince páginas -nueve A4
+verticales y seis apaisadas- con índice, texto interpretativo, RF y RGB
+recompuestos sin superposiciones y mapas con grilla WGS 84, norte, escala y
+localizador. Ruff, formato sobre 146 archivos, Mypy sobre 145 archivos y
+`git diff --check` aprobaron; las 15 páginas se inspeccionaron con Poppler. No se
+ejecutó GEE ni build.
+
+El ajuste de contexto cartográfico `0.6.0` del `2026-08-20` eleva el gate a
+**609 pruebas** y conserva **90,67 % de cobertura total**. Las **11 pruebas** de
+`deforestation-reporting` alcanzan **90,15 %** e incluyen caché, atribución,
+opacidad fija y degradación no bloqueante del contexto OSM. La portada presenta
+un índice explícito y explica el carácter científico del informe; los mapas de
+eventos componen vectores OpenStreetMap al 50 % sin usar automáticamente el
+servidor comunitario de teselas. Ruff, formato sobre 147 archivos, Mypy sobre
+146 archivos y `git diff --check` aprobaron; no se ejecutó GEE ni build.
+
+La integración operativa del PDF del `2026-08-20` eleva el gate raíz a **610
+pruebas** y mantiene **90,67 % de cobertura total**. Reporting aprueba **12
+pruebas** con **90,15 %**, el worker **20 pruebas** con **90,62 %**, la API **15
+pruebas** con **90,47 %** y el cliente web **15 pruebas Vitest** más typecheck
+estricto. El gate multiproceso confirma HTTP → SQLite → worker → PDF → API/ZIP
+sin GEE. Ruff, formato sobre 147 archivos, Mypy sobre 146 archivos y
+`git diff --check` aprobaron. No se ejecutó un nuevo análisis remoto ni se
+construyó el frontend o una imagen de contenedor.
+
+El smoke web real `c938a1c0-ca33-42a4-94b3-81c7276a3ef8` terminó `partial` por
+la indisponibilidad diagnóstica y no bloqueante de Hampel; los otros cinco
+componentes completaron y dejaron cuatro eventos y 41 assets verificables. Su
+copia privada fue migrada sin alterar el expediente para comprobar que la API
+puede leer reporte, eventos y assets aunque ya no exista `outputs/runs`.
+
 El primer run remoto conservado expuso una incompatibilidad concreta de
 transporte: Earth Engine no interpreta el alias literal `EPSG:6933` en
 `getDownloadURL`, aunque sí acepta la definición equivalente WKT1_GDAL. El
@@ -1299,9 +1425,9 @@ si atribución no está disponible se usan los cinco eventos de perturbación de
 mayor superficie. El inventario completo siempre queda disponible en los JSON,
 CSV y GeoJSON seleccionados, aunque un evento no tenga ficha gráfica.
 
-`report_assets/report_dataset.json` expone una interfaz normalizada para un
-futuro PDF o DOCX: identificación, estado, métricas principales, eventos
-seleccionados, estado de componentes, limitaciones y rutas internas. No emite
+`report_assets/report_dataset.json` expone una interfaz normalizada para el
+renderer PDF y un futuro DOCX: identificación, estado, métricas principales,
+eventos seleccionados, estado de componentes, limitaciones y rutas internas. No emite
 una conclusión legal ni duplica series raster. `report_assets/index.json`
 registra para cada copia categoría, componente, motivo, evento cuando aplica,
 ruta y SHA-256 del original, manifest hijo y ruta/hash de destino. También

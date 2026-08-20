@@ -7,13 +7,18 @@ cliente web sin acoplar la lógica científica a HTTP, AWS o una interfaz.
 Complementa `AGENTS.md`, `README.md` y `NEXT_STEPS.md`; no reemplaza los
 contratos científicos ni constituye un registro histórico de pasos.
 
-**Estado al 17 de agosto de 2026:** los Incrementos 1–4 están implementados
+**Estado al 18 de agosto de 2026:** los Incrementos 1–4 y su endurecimiento
+previo a contenedores están implementados
 localmente: validación GeoJSON, contrato `/api/v1`, registro SQLite idempotente,
 worker separado con concurrencia uno, resultados verificables y cliente web.
 Un gate multiproceso sin GEE ya verifica HTTP → SQLite → worker →
-`report_assets` → HTTP. La API todavía no debe considerarse operativamente
-estable hasta completar un nuevo smoke real de los seis componentes con el
-collector agrícola compartido y `report_assets` 2.0.
+`report_assets` → publicación privada → HTTP. El smoke web real completó los
+componentes obligatorios y terminó `partial` sólo por Hampel diagnóstico no
+bloqueante. Además, los Incrementos PDF 1-2 ya aportan un renderer determinístico
+independiente y validado contra el expediente real, todavía sin integración en
+worker/API/web. Antes de contenerizar se completará su publicación. Esto no
+demuestra todavía estabilidad cloud, escalado concurrente ni validez temática
+independiente.
 
 ## 2. Función principal de la API
 
@@ -68,8 +73,9 @@ probados.
 3. **Los jobs son idempotentes.** Reintentos de red no crean dos análisis.
 4. **El filesystem no es una API.** Ningún endpoint acepta rutas locales ni
    devuelve paths absolutos.
-5. **Los bundles científicos son autoritativos.** La web consume
-   `report_assets` y nunca reinterpreta TIFF o reglas por su cuenta.
+5. **Los bundles científicos son autoritativos.** El worker verifica y publica
+   una copia curada durable de `report_assets`; la web la consume sin
+   reinterpretar TIFF ni reglas por su cuenta.
 6. **La incertidumbre se conserva.** `partial`, `review_required` e
    `insufficient_data` son resultados visibles.
 7. **Privacidad por defecto.** Geometrías, identificadores y resultados son
@@ -189,6 +195,9 @@ POST /api/v1/analyses/{analysis_id}/cancel
   el archivo;
 - `/download` sirve el ZIP determinístico que preparó el worker desde la misma
   allowlist, con hash y tamaño en un sidecar privado;
+- `/report`, `/events` y `/assets` leen exclusivamente
+  `storage_root/analyses/{analysis_id}/results`; no dependen de que sobreviva el
+  workspace científico registrado en `output_prefix`;
 - en el prototipo local las URLs son internas y directas; en AWS se reemplazan
   por URLs firmadas y breves sin cambiar el catálogo lógico;
 - `cancel` es best-effort y nunca finge que una tarea GEE ya enviada fue
@@ -234,12 +243,12 @@ en `running`.
 flowchart LR
     C[Cliente web] --> A[FastAPI]
     A --> D[(SQLite - jobs)]
-    A --> F[Almacenamiento local privado]
+    A --> F[Resultados privados durables]
     W[Worker separado] --> D
     W --> P[run_complete_analysis]
     P --> G[Google Earth Engine]
-    P --> F
-    A --> R[report_assets]
+    P --> O[Workspace científico]
+    W --> F
 ```
 
 El primer prototipo utiliza dos procesos separados:
@@ -253,13 +262,17 @@ web reinicia, se pierde el trabajo y su ownership.
 La implementación vive en un `uv workspace` modular:
 
 ```text
+packages/domain/src/deforestation_domain # geometría y área sin GEE/raster
 packages/jobs/src/deforestation_jobs     # estados y repositorio SQLite
+packages/reporting/src/deforestation_reporting # contrato y renderer PDF
 services/api/src/deforestation_api       # adaptador HTTP
 services/worker/src/deforestation_worker # ejecución científica separada
 ```
 
-Los tres proyectos comparten `uv.lock`, pero conservan `pyproject.toml`, código
-y pruebas propios. El límite jurisdiccional local se deriva de la capa oficial
+Los cinco proyectos Python comparten `uv.lock`, pero conservan `pyproject.toml`,
+código y pruebas propios. La API depende de `deforestation-domain`, no de
+`deforestation-pipeline`; así su futura imagen no arrastra Earth Engine, geemap,
+rasterio ni el resto del runtime científico. El límite jurisdiccional local se deriva de la capa oficial
 `ign:pais` del IGN y se conserva con hash y transformación documentada en
 `data/boundaries/`. Es un filtro operativo, no evidencia legal o catastral.
 
@@ -428,13 +441,16 @@ concurrencia uno; el smoke GEE completo sigue pendiente.
 
 **Salida:** la API cubre el ciclo solicitud–estado–resultado.
 
-**Estado:** implementado localmente. La lectura valida rutas bajo el output root,
-tamaños y SHA-256; los eventos provienen del inventario completo; los assets se
-exponen sólo por ID opaco. El worker crea el ZIP fuera del request HTTP y la
+**Estado:** implementado localmente. El worker copia únicamente el manifest,
+dataset, índice y allowlist verificados a un prefijo privado durable antes de
+marcar el job terminal. La lectura valida allí rutas, tamaños y SHA-256; los
+eventos provienen del inventario completo y los assets se exponen sólo por ID
+opaco. `output_prefix` queda como procedencia, no como dependencia operativa.
+El worker crea el ZIP fuera del request HTTP y la
 cancelación usa transiciones condicionales. Los jobs vencidos no se adquieren y
 la retención borra únicamente objetos privados. La compatibilidad se comprobó
 en lectura contra un expediente real preservado: 41 assets y cuatro eventos,
-sin modificarlo ni ejecutar GEE.
+incluso después de desaparecer su workspace científico.
 
 ### Incremento 4 — Cliente web local
 
@@ -454,7 +470,7 @@ dibujar un Polygon, validar superficie y warnings, crear un análisis, hacer
 polling, cancelar y leer resumen, eventos, figuras y descarga. El proxy de Vite
 mantiene la API same-origin en desarrollo.
 
-El gate web contiene trece pruebas Vitest, `tsc --noEmit` estricto y auditoría
+El gate web contiene quince pruebas Vitest, `tsc --noEmit` estricto y auditoría
 de dependencias productivas sin vulnerabilidades conocidas. Requiere Node
 20.19+ y recomienda Node 22.12 mediante `.nvmrc`; MapLibre queda fuera del
 prebundle de Vite para evitar la pérdida de su worker en Windows.
@@ -477,18 +493,72 @@ terminal publicable llega a 100 %. El `analysis_id` se conserva como query
 parameter validado para reanudar polling luego de una recarga, sin usar la URL
 como fuente de verdad científica.
 
-### Gate de integración local previo al Incremento 5
+### Gate de integración local cerrado antes del Incremento 5
 
 `tests/integration/test_api_worker_flow.py` ejecuta API y worker en procesos
 separados, compartiendo únicamente SQLite y objetos temporales. El runner falso
 vive bajo `tests/integration/support/`, nunca en el runtime productivo. El gate
-crea el análisis por HTTP y verifica el ciclo completo hasta reporte, eventos,
-asset y ZIP. Esto prueba fronteras operativas locales, no ciencia ni GEE.
+crea el análisis por HTTP y verifica el ciclo completo hasta reporte JSON, PDF,
+eventos, asset y ZIP. Esto prueba fronteras operativas locales, no ciencia ni
+GEE.
 
-El preflight del archivo real `prueba-viale.geojson` detectó una única Feature
-Polygon, 1.438,42 ha, sin reparación ni warnings, y confirmó la presencia local
-de credenciales. La ejecución remota todavía requiere autorización operativa y
-sigue siendo el gate científico pendiente antes de contenerizar.
+El smoke real iniciado desde la web para `prueba-viale.geojson` creó el análisis
+`c938a1c0-ca33-42a4-94b3-81c7276a3ef8`. Terminó `partial` porque Hampel quedó
+`diagnostic_unavailable`, degradación explícita y no bloqueante; pipeline
+principal, RF, agricultura, persistencia y atribución completaron. La API
+verificó cuatro eventos y 41 assets desde la publicación privada. Este gate
+habilita el Incremento 5, pero no sustituye validación temática independiente.
+
+### Bloque previo - Informe técnico PDF
+
+**Incremento PDF 1 - implementado.** `packages/reporting` verifica
+`report_dataset.json` y las figuras declaradas en `report_assets/index.json`,
+los proyecta a un view-model Pydantic acotado y genera un PDF A4 determinístico
+y atómico. El documento incluye métricas, componentes, eventos, figuras,
+limitaciones, hashes y un descargo legal explícito. No lee rasters, no depende
+de GEE, FastAPI o React, y no transporta las series mensuales crudas al layout.
+
+**Incremento PDF 2 - implementado.** `deforestation-reporting` `0.2.0` validó
+el expediente real preservado con 41
+assets, diez figuras generales, dos eventos priorizados y seis figuras de
+evento. El renderer selecciona A4 apaisado para figuras con aspecto extremo y
+A4 vertical para portada, tablas, mapas y fichas; el resultado tiene 21 páginas
+inspeccionadas visualmente. La vista editorial elimina dos limitaciones de
+detección obsoletas sólo cuando `post_change_attribution` está verificado como
+`completed`, conservando intactos dataset, índice y hashes de origen.
+
+**Incremento PDF 3 editorial - implementado.** `deforestation-reporting`
+`0.6.0`, con contrato editorial `2.3.0`, reemplaza el cuerpo dominado por
+figuras científicas por una proyección cliente de JSON, CSV y GeoJSON
+verificados. El informe usa nueve páginas A4
+verticales para resumen, línea base, mapa e inventario de los cuatro eventos,
+condiciones de evidencia y trayectoria por evento priorizado, soporte agrícola,
+sensibilidad, calidad, fuentes y limitaciones. Agrega seis páginas apaisadas
+para cobertura RF anual y pérdidas candidatas, timeline RGB dividido en dos
+páginas legibles y evidencia espectral de los dos eventos detallados. No
+muestra P0 frente a multianual,
+votos candidatos, desacuerdos de clase ni paneles crudos de detectores; esos
+assets siguen hasheados y disponibles en el bundle técnico. El resumen usa una
+tabla técnica compacta en lugar de tarjetas estilo dashboard. La portada agrega
+un índice y cada apartado incorpora una introducción interpretativa. El loader
+verifica además el `input.geojson` declarado mediante `run_manifest.json`; los
+mapas usan ese perímetro, grilla WGS 84, norte, escala aproximada y un recuadro
+localizador. Las fichas de evento agregan contexto vectorial OpenStreetMap al
+50 % de opacidad, con atribución ODbL visible. El renderer no automatiza el tile
+server comunitario: consulta pocos vectores mediante Overpass, normaliza la
+respuesta y la cachea por extensión junto al PDF. El contexto no interviene en
+la evidencia científica. Para producción debe usarse un proveedor autorizado o
+servicio propio y revisar la exposición del bounding box de geometrías privadas.
+
+**Incremento PDF 4 - implementado.** El worker `0.2.0` invoca el renderer como
+postproceso después de validar `report_assets`, pasándole explícitamente el
+GeoJSON privado sellado para no depender de la disposición del workspace
+científico. Publica el PDF y su metadato de integridad dentro del prefijo privado
+y los incluye en el ZIP determinístico. La API `0.2.0` expone
+`GET /api/v1/analyses/{analysis_id}/report.pdf`; verifica esquema, tipo, tamaño,
+cabecera PDF y SHA-256 antes de responder. El cliente web `0.2.0` muestra la
+descarga directa sólo cuando el job terminó `completed` o `partial`. El request
+HTTP nunca renderiza el documento.
 
 ### Incremento 5 — Contenerización
 
@@ -540,7 +610,7 @@ sigue siendo el gate científico pendiente antes de contenerizar.
 - webhooks firmados;
 - ejecución por lotes acotados;
 - comparación de runs y versiones;
-- informe PDF/DOCX generado desde `report_dataset.json`;
+- evolución DOCX opcional y versionado editorial avanzado;
 - métricas operativas y revisión humana documentada.
 
 **Salida:** API interna completa, todavía separada de certificación y

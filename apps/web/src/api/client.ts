@@ -121,6 +121,10 @@ export class ApiClient {
     return this.url(`/api/v1/analyses/${analysisId}/download`);
   }
 
+  reportPdfUrl(analysisId: string): string {
+    return this.url(`/api/v1/analyses/${analysisId}/report.pdf`);
+  }
+
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(this.url(path), init);
     const contentType = response.headers.get("Content-Type") ?? "";

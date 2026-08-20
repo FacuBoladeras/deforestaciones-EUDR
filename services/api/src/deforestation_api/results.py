@@ -45,17 +45,17 @@ class VerifiedAsset:
 class ResultCatalog:
     """Proyecta sólo archivos declarados por ``report_assets/index.json``."""
 
-    def __init__(self, output_root: Path) -> None:
-        self.output_root = output_root.resolve()
+    def __init__(self, storage_root: Path) -> None:
+        self.storage_root = storage_root.resolve()
 
     def report(self, job: AnalysisJob) -> dict[str, Any]:
-        _root, index = self._index(job)
-        dataset_path = self._verified_dataset_path(job, index)
+        root, index = self._index(job)
+        dataset_path = self._verified_dataset_path(root, job, index)
         return _load_object(dataset_path)
 
     def events(self, job: AnalysisJob) -> list[dict[str, Any]]:
         root, index = self._index(job)
-        dataset = _load_object(self._verified_dataset_path(job, index))
+        dataset = _load_object(self._verified_dataset_path(root, job, index))
         selection = dataset.get("event_selection")
         if not isinstance(selection, dict):
             raise ResultIntegrityError("event_selection_missing")
@@ -82,18 +82,16 @@ class ResultCatalog:
         return next((item for item in self.assets(job) if item.asset_id == asset_id), None)
 
     def _index(self, job: AnalysisJob) -> tuple[Path, dict[str, Any]]:
-        if not job.output_prefix:
-            raise ResultIntegrityError("output_prefix_missing")
-        root = _safe_descendant(self.output_root, job.output_prefix)
+        root = _published_result_root(self.storage_root, job.analysis_id)
         index_path = _safe_descendant(root, "report_assets/index.json")
         return root, _load_object(index_path)
 
-    def _verified_dataset_path(self, job: AnalysisJob, index: dict[str, Any]) -> Path:
+    def _verified_dataset_path(self, root: Path, job: AnalysisJob, index: dict[str, Any]) -> Path:
         dataset_relative = index.get("dataset_path")
         index_digest = index.get("dataset_sha256")
         if not isinstance(dataset_relative, str) or not _is_sha256(index_digest):
             raise ResultIntegrityError("report_dataset_contract_invalid")
-        path = _safe_descendant(_result_root(self.output_root, job), dataset_relative)
+        path = _safe_descendant(root, dataset_relative)
         actual = _sha256(path)
         if actual != index_digest or (
             job.report_dataset_sha256 is not None and actual != job.report_dataset_sha256
@@ -154,6 +152,34 @@ def packaged_download(storage_root: Path, analysis_id: str) -> tuple[Path, str]:
     return package, expected_digest
 
 
+def client_report_download(storage_root: Path, analysis_id: str) -> tuple[Path, str]:
+    root = _published_result_root(storage_root, analysis_id)
+    metadata = _load_object(_safe_descendant(root, "client_report/report.json"))
+    if (
+        metadata.get("schema_version") != "1.0.0"
+        or metadata.get("media_type") != "application/pdf"
+        or metadata.get("path") != "client_report/informe-tecnico.pdf"
+    ):
+        raise ResultIntegrityError("client_report_metadata_invalid")
+    expected_digest = metadata.get("sha256")
+    expected_size = metadata.get("size_bytes")
+    if not _is_sha256(expected_digest) or not isinstance(expected_size, int) or expected_size <= 5:
+        raise ResultIntegrityError("client_report_metadata_invalid")
+    report = _safe_descendant(root, "client_report/informe-tecnico.pdf")
+    try:
+        with report.open("rb") as source:
+            header = source.read(5)
+    except OSError as error:
+        raise ResultIntegrityError("client_report_unreadable") from error
+    if (
+        header != b"%PDF-"
+        or report.stat().st_size != expected_size
+        or _sha256(report) != expected_digest
+    ):
+        raise ResultIntegrityError("client_report_integrity_mismatch")
+    return report, expected_digest
+
+
 def purge_expired_private_objects(storage_root: Path, analysis_ids: list[str]) -> int:
     """Borra sólo prefijos privados por UUID; los bundles científicos no se tocan."""
     root = storage_root.resolve()
@@ -167,10 +193,9 @@ def purge_expired_private_objects(storage_root: Path, analysis_ids: list[str]) -
     return removed
 
 
-def _result_root(output_root: Path, job: AnalysisJob) -> Path:
-    if not job.output_prefix:
-        raise ResultIntegrityError("output_prefix_missing")
-    return _safe_descendant(output_root.resolve(), job.output_prefix)
+def _published_result_root(storage_root: Path, analysis_id: str) -> Path:
+    UUID(analysis_id)
+    return _safe_descendant(storage_root.resolve(), f"analyses/{analysis_id}/results")
 
 
 def _verified_allowlisted_path(root: Path, entry: dict[str, Any]) -> Path:

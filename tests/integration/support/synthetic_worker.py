@@ -84,9 +84,24 @@ def synthetic_runner(request: CompleteAnalysisRequest, *, analysis_id: UUID) -> 
     return result
 
 
+def synthetic_report_renderer(
+    _result_root: Path,
+    output_path: Path,
+    _input_path: Path,
+) -> Path:
+    """Emula sólo el renderer en el gate E2E; producción no tiene modo sintético."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"%PDF-1.4\nsynthetic integration report\n")
+    return output_path
+
+
 def main() -> None:
     settings = WorkerSettings.from_environment()
-    worker = AnalysisWorker(settings, runner=synthetic_runner)
+    worker = AnalysisWorker(
+        settings,
+        runner=synthetic_runner,
+        report_renderer=synthetic_report_renderer,
+    )
     worker.initialize()
     if not worker.run_once():
         raise RuntimeError("synthetic_e2e_job_missing")

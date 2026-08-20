@@ -280,9 +280,14 @@ function ResultsPanel({
           <h2>Resumen técnico</h2>
           <p>Estado científico: {scientificStatus}</p>
         </div>
-        <a className="button button-primary" href={api.packageUrl(analysisId)}>
-          Descargar evidencia
-        </a>
+        <div className="download-actions">
+          <a className="button button-primary" href={api.reportPdfUrl(analysisId)}>
+            Descargar informe PDF
+          </a>
+          <a className="button button-secondary" href={api.packageUrl(analysisId)}>
+            Descargar evidencia
+          </a>
+        </div>
       </div>
 
       {metrics && (

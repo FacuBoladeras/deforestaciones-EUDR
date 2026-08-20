@@ -19,10 +19,18 @@ from deforestation_pipeline.complete_analysis import (
     CompleteAnalysisRequest,
     run_complete_analysis,
 )
-from deforestation_worker.package import create_evidence_package
+from deforestation_reporting import load_report_package, render_technical_report
+from deforestation_worker.package import create_evidence_package, publish_curated_results
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 AnalysisRunner = Callable[..., Path]
+ReportRenderer = Callable[[Path, Path, Path], Path]
+
+
+def render_client_report(result_root: Path, output_path: Path, input_path: Path) -> Path:
+    """Proyecta el contrato curado a PDF fuera del núcleo científico."""
+    package = load_report_package(result_root, input_path=input_path)
+    return render_technical_report(package, output_path).path
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,10 +89,12 @@ class AnalysisWorker:
         *,
         repository: SQLiteJobRepository | None = None,
         runner: AnalysisRunner = run_complete_analysis,
+        report_renderer: ReportRenderer = render_client_report,
     ) -> None:
         self.settings = settings
         self.repository = repository or SQLiteJobRepository(settings.database_path)
         self.runner = runner
+        self.report_renderer = report_renderer
 
     def initialize(self) -> int:
         self.repository.initialize()
@@ -121,9 +131,9 @@ class AnalysisWorker:
                     return True
                 raise
             result = self.runner(request, analysis_id=UUID(job.analysis_id))
-            self._publish_result(job.analysis_id, result)
+            self._publish_result(job, result)
         except CompleteAnalysisError as error:
-            self._handle_complete_analysis_error(job.analysis_id, error)
+            self._handle_complete_analysis_error(job, error)
         except Exception:
             self.repository.fail(job.analysis_id, safe_error_code="analysis_execution_failed")
         return True
@@ -160,7 +170,8 @@ class AnalysisWorker:
             declared_context_source=job.declared_context_source,
         )
 
-    def _publish_result(self, analysis_id: str, result: Path) -> None:
+    def _publish_result(self, job: AnalysisJob, result: Path) -> None:
+        analysis_id = job.analysis_id
         resolved_result = result.resolve()
         output_root = self.settings.output_root.resolve()
         if not resolved_result.is_relative_to(output_root):
@@ -171,12 +182,35 @@ class AnalysisWorker:
         if status_value not in {"complete", "partial"}:
             raise ValueError("analysis_manifest_status_invalid")
         public_status = JobStatus.COMPLETED if status_value == "complete" else JobStatus.PARTIAL
-        report_dataset = resolved_result / "report_assets" / "report_dataset.json"
-        create_evidence_package(
-            resolved_result,
-            self.settings.storage_root,
-            analysis_id,
-        )
+        report_staging = _client_report_staging_path(self.settings.storage_root, analysis_id)
+        report_staging.parent.mkdir(parents=True, exist_ok=True)
+        report_staging.unlink(missing_ok=True)
+        input_path = _safe_path(self.settings.storage_root, job.input_object_key)
+        try:
+            client_report = self.report_renderer(
+                resolved_result,
+                report_staging,
+                input_path,
+            ).resolve()
+            if client_report != report_staging.resolve() or not client_report.is_file():
+                raise ValueError("client_report_output_invalid")
+            published = publish_curated_results(
+                resolved_result,
+                self.settings.storage_root,
+                analysis_id,
+                client_report=client_report,
+            )
+            package = create_evidence_package(
+                resolved_result,
+                self.settings.storage_root,
+                analysis_id,
+                client_report=client_report,
+            )
+        finally:
+            report_staging.unlink(missing_ok=True)
+        if published is None or package is None:
+            raise ValueError("analysis_report_assets_missing")
+        report_dataset = published / "report_assets" / "report_dataset.json"
         self.repository.complete(
             analysis_id,
             status=public_status,
@@ -186,8 +220,9 @@ class AnalysisWorker:
         )
 
     def _handle_complete_analysis_error(
-        self, analysis_id: str, error: CompleteAnalysisError
+        self, job: AnalysisJob, error: CompleteAnalysisError
     ) -> None:
+        analysis_id = job.analysis_id
         try:
             manifest = _load_manifest(error.failure_path / "run_manifest.json")
         except (FileNotFoundError, ValueError, json.JSONDecodeError):
@@ -195,8 +230,8 @@ class AnalysisWorker:
             return
         if manifest.get("overall_status") == "partial":
             try:
-                self._publish_result(analysis_id, error.failure_path)
-            except (OSError, ValueError, json.JSONDecodeError):
+                self._publish_result(job, error.failure_path)
+            except Exception:
                 self.repository.fail(analysis_id, safe_error_code="analysis_execution_failed")
         else:
             self.repository.fail(analysis_id, safe_error_code="analysis_execution_failed")
@@ -209,6 +244,15 @@ def _safe_path(storage_root: Path, object_key: str) -> Path:
     if relative.is_absolute() or ".." in relative.parts or not candidate.is_relative_to(root):
         raise ValueError("analysis_input_object_key_unsafe")
     return candidate
+
+
+def _client_report_staging_path(storage_root: Path, analysis_id: str) -> Path:
+    UUID(analysis_id)
+    root = storage_root.resolve()
+    analysis_root = (root / "analyses" / analysis_id).resolve()
+    if not analysis_root.is_relative_to(root):  # pragma: no cover - UUID lo impide
+        raise ValueError("analysis_id_unsafe")
+    return analysis_root / ".client-report.tmp.pdf"
 
 
 def _sha256(path: Path) -> str:

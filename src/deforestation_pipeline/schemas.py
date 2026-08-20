@@ -10,9 +10,12 @@ from math import isclose, isfinite
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pyproj import CRS
 from pyproj.exceptions import CRSError
+
+from deforestation_domain.schemas import GeoJSONGeometry as GeoJSONGeometry
+from deforestation_domain.schemas import StrictModel as StrictModel
 
 EUDR_CUTOFF_DATE = date(2020, 12, 31)
 SUMMARY_SCHEMA_VERSION = "1.0.0"
@@ -28,12 +31,6 @@ AffineTransform = tuple[float, float, float, float, float, float]
 RasterBounds = tuple[float, float, float, float]
 RasterGridAlignment = Literal["projected_crs_origin_outward_snap"]
 RasterPixelOrientation = Literal["north_up"]
-
-
-class StrictModel(BaseModel):
-    """Base inmutable que impide campos silenciosos fuera del contrato."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
 
 class GeometrySource(StrEnum):
@@ -64,13 +61,6 @@ class PostChangeLandUse(StrEnum):
     WATER = "water"
     FIRE_OR_TEMPORARY_DISTURBANCE = "fire_or_temporary_disturbance"
     UNKNOWN = "unknown"
-
-
-class GeoJSONGeometry(StrictModel):
-    """Estructura GeoJSON admitida antes de la validación espacial."""
-
-    type: Literal["Point", "Polygon", "MultiPolygon"]
-    coordinates: Annotated[list[Any], Field(min_length=1)]
 
 
 class EstablishmentInput(StrictModel):

@@ -34,7 +34,7 @@ El MVP termina en la generación de evidencia geoespacial por establecimiento.
 No incluye todavía la gestión completa de trazabilidad animal ni la
 presentación de declaraciones en sistemas de la Unión Europea.
 
-### 2.1 Checkpoint operativo — 17 de agosto de 2026
+### 2.1 Checkpoint operativo — 18 de agosto de 2026
 
 - La CLI `scripts/run_complete_analysis.py` orquesta en un solo run: pipeline
   principal, Hampel diagnóstico, RF 2020–2024, recolección agrícola,
@@ -44,29 +44,47 @@ presentación de declaraciones en sistemas de la Unión Europea.
   Un micro-smoke real de una ventana sobre 58 eventos fue válido; aún falta
   repetir el run remoto completo de seis componentes.
 - `report_assets` `2.0.0` organiza figuras generales y por evento, datos
-  principales, anexos y `report_dataset.json` para un futuro PDF/DOCX, sin
-  alterar los bundles científicos.
-- El último gate local aprobado contiene 596 tests, cobertura total 90,62 %,
-  Ruff, formato, Mypy y `git diff --check` verdes. No hubo build.
+  principales, anexos y `report_dataset.json`, sin alterar los bundles
+  científicos. `packages/reporting` `0.6.0`, con contrato editorial `2.3.0`,
+  verifica sus assets y el `input.geojson` declarado, y proyecta JSON, CSV y
+  GeoJSON a un PDF cliente determinístico y atómico. El expediente real produjo
+  quince páginas inspeccionadas desde 41 assets: nueve verticales y seis
+  apaisadas para RF anual, RGB y evidencia espectral de eventos. El informe suma
+  índice, narrativa científica de portada y mapas con perímetro, grilla WGS 84,
+  norte, escala, localizador y contexto vectorial OSM al 50 %, cacheado por
+  extensión y con atribución ODbL. El mapa base es presentación, no evidencia.
+  Las figuras internas no seleccionadas permanecen en el bundle técnico y el
+  worker `0.2.0` ya genera el PDF como postproceso, lo publica con metadatos de
+  integridad y lo incorpora al ZIP. La API `0.2.0` y el cliente web `0.2.0`
+  exponen su descarga sin renderizar dentro del request HTTP.
+- El último gate local aprobado contiene 610 tests, cobertura total 90,67 %,
+  Ruff, formato sobre 147 archivos, Mypy sobre 146 archivos y
+  `git diff --check` verdes. No se construyó frontend ni imagen de contenedor.
 - Los Incrementos 1–4 de la **API interna asíncrona** están implementados en el
   monorepo; API, jobs y worker integran el `uv workspace`, mientras el cliente
   conserva su toolchain Node aislado. La capa Python cubre validación GeoJSON,
   jobs SQLite idempotentes, worker separado, resultados verificados, descargas
-  allowlisted, cancelación y retención local. Sus 32 pruebas modulares no
+  allowlisted, cancelación y retención local. Sus 75 pruebas modulares no
   consultan GEE y mantienen cobertura por paquete superior a 90 %.
 - `apps/web` agrega el cliente React/TypeScript minimalista: carga o dibujo,
   validación, creación, polling, cancelación y lectura básica de resultados.
-  Tiene trece pruebas Vitest, typecheck estricto y auditoría productiva verde.
+  Tiene quince pruebas Vitest, typecheck estricto y auditoría productiva verde.
   El progreso es estimado y limitado hasta que la API confirma el terminal; el
   `analysis_id` persiste en la URL para reanudar polling después de recargar.
 - Un gate multiproceso sintético verifica API HTTP → SQLite → worker →
-  `report_assets` → endpoints/ZIP sin GEE. El runner falso vive sólo bajo
+  `report_assets` → PDF → endpoints/ZIP sin GEE. El runner y renderer falsos viven sólo bajo
   `tests/integration`; no existe un modo fake en producción.
+- El worker publica primero el contrato curado y verificado bajo almacenamiento
+  privado durable; `/report`, `/events` y `/assets` ya no dependen de conservar
+  el workspace científico. `packages/domain` concentra geometría y superficies,
+  por lo que la API no instala el pipeline GEE completo.
 - La lectura se comprobó contra un expediente real preservado con 41 assets y
   cuatro eventos. No se ejecutó un nuevo análisis remoto ni se modificó el run.
-- El preflight de `prueba-viale.geojson` confirmó una única geometría Polygon
-  válida de 1.438,42 ha; el cliente ya normaliza su `FeatureCollection` de una
-  feature. Sigue pendiente el smoke GEE real antes de contenerizar API y worker.
+- El smoke web real `c938a1c0-ca33-42a4-94b3-81c7276a3ef8` procesó el Polygon de
+  1.438,42 ha y terminó `partial` por Hampel `diagnostic_unavailable`; pipeline,
+  RF, agricultura, persistencia y atribución completaron. Publicó 41 assets y
+  cuatro eventos verificables. La copia durable permite leerlos aun sin el
+  workspace científico original.
 
 ### 2.2 Límites científicos y operativos vigentes
 
@@ -86,8 +104,8 @@ presentación de declaraciones en sistemas de la Unión Europea.
 
 ### 2.3 Orden de avance actual
 
-1. completar por la web el smoke real de los seis componentes;
-2. contenerizar API y worker por separado;
+1. contenerizar API y worker por separado;
+2. ejecutar un smoke local con Compose, volúmenes privados y límites explícitos;
 3. desplegar gradualmente en AWS con almacenamiento privado, cola, identidad,
    observabilidad y límites de concurrencia.
 
@@ -577,6 +595,13 @@ justificación medible.
 ├── pyproject.toml
 ├── apps/
 │   └── web/                   # cliente React + TypeScript + MapLibre
+├── packages/
+│   ├── domain/                # geometría/área compartidas sin stack GEE
+│   ├── jobs/                  # contrato y repositorio SQLite
+│   └── reporting/             # contrato editorial y renderer PDF
+├── services/
+│   ├── api/                   # adaptador HTTP liviano
+│   └── worker/                # ejecución del pipeline científico
 ├── configs/
 │   └── default.yml
 ├── data/

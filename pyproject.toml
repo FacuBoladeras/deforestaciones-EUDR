@@ -9,6 +9,7 @@ description = "Pipeline reproducible de evidencia geoespacial para cadenas bovin
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "deforestation-domain",
     "earthengine-api>=1.7.35,<1.8",
     "geopandas>=1.1,<2",
     "geemap>=0.36,<1",
@@ -38,6 +39,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/deforestation_pipeline"]
 
+[tool.uv.sources]
+deforestation-domain = { workspace = true }
+
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]
 
@@ -59,6 +63,10 @@ module = [
     "pyogrio.*",
     "rasterio",
     "rasterio.*",
+    "reportlab",
+    "reportlab.*",
+    "pypdf",
+    "pypdf.*",
     "sklearn",
     "sklearn.*",
 ]
@@ -70,7 +78,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-fail-under=90",
 ]
-testpaths = ["tests"]
+testpaths = ["tests", "packages/domain/tests", "packages/reporting/tests"]
 
 [tool.ruff]
 target-version = "py312"
@@ -80,6 +88,10 @@ src = [
     "tests",
     "packages/jobs/src",
     "packages/jobs/tests",
+    "packages/domain/src",
+    "packages/domain/tests",
+    "packages/reporting/src",
+    "packages/reporting/tests",
     "services/api/src",
     "services/api/tests",
     "services/worker/src",

@@ -5,7 +5,14 @@ Este archivo es el roadmap científico vigente. Parte de la auditoría del
 agricultura por cultivo ya se ejecuta desde el mismo run. La brecha siguiente
 es validarlo con casos reales y ampliar evidencia independiente sin convertir
 el MVP en un LULC nacional. El contrato y la evolución de API, worker, cliente
-web y AWS viven en `API_CONTEXT.md`.
+web, informe PDF y AWS viven en `API_CONTEXT.md`. El bloque PDF previo a
+contenedores no modifica este orden científico: el bloque editorial ya está
+implementado y validado contra el expediente real en una versión cliente de
+quince páginas que combina GIS, estadísticas y evidencia, con índice, narrativa
+y mapas orientados mediante geometría declarada verificada y contexto vectorial
+OSM al 50 %. Su generación y publicación ya están integradas como postproceso
+del worker, con descarga verificada desde API y cliente web. El siguiente bloque
+operativo es contenerizar API y worker por separado.
 
 El objetivo del siguiente bloque es cerrar esa brecha sin ampliar el MVP hacia
 un LULC completo, otra familia de detectores o una certificación automática.
@@ -20,7 +27,7 @@ Antes de evaluar evidencia agrícola mediante el orquestador:
   atribución;
 - [x] incorporar a `run_complete_analysis.py` la entrada versionada de evidencia
   agrícola y su política de linaje;
-- [ ] ejecutar un smoke real de los seis componentes y verificar publicación
+- [x] ejecutar un smoke real de los seis componentes y verificar publicación
   `complete` o una degradación `partial` científicamente justificada;
 - [x] aislar y validar el primer request Dynamic World real: el transporte de
   EPSG:6933 usa WKT1_GDAL porque Earth Engine no interpreta el alias EPSG,
@@ -73,6 +80,14 @@ El preflight del caso real `prueba-viale.geojson` confirmó un Polygon único de
 1.438,42 ha, válido y sin reparación; el cliente normaliza su wrapper
 `FeatureCollection` de una sola feature. El siguiente run remoto puede entrar
 por la web sin cambiar el contrato científico.
+
+El smoke web real `c938a1c0-ca33-42a4-94b3-81c7276a3ef8` cerró la precondición:
+terminó `partial` únicamente porque Hampel quedó `diagnostic_unavailable`, una
+degradación prevista y no bloqueante. Pipeline principal, RF, colección
+agrícola, persistencia y atribución completaron; el expediente expone cuatro
+eventos y 41 assets hasheados. El endurecimiento del `2026-08-18` publica esa
+selección curada en almacenamiento privado durable antes de completar el job,
+sin convertirla en una conclusión legal ni alterar el bundle científico.
 
 El cierre fallido ahora conserva además `error_type` y código sanitizado del
 recolector de `report_assets`; no persiste el mensaje arbitrario de una

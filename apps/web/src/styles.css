@@ -133,7 +133,8 @@ h3 {
 }
 
 .map-actions,
-.button-row {
+.button-row,
+.download-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

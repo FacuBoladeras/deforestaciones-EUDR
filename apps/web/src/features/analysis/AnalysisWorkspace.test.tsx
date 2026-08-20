@@ -167,4 +167,42 @@ describe("AnalysisWorkspace", () => {
     );
     expect(screen.getByText(/El 100 % sólo se confirma/)).toBeInTheDocument();
   });
+
+  it("ofrece el informe PDF cuando el worker terminó de publicarlo", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?analysis=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      const payload = url.endsWith("/report")
+        ? { analysis: { status: "review_required" }, headline_metrics: {} }
+        : url.includes("/events") || url.includes("/assets")
+          ? { items: [], page: 1, page_size: 100, total: 0, next_page: null }
+          : {
+              analysis_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              status: "completed",
+              stage: "completed",
+              created_at: "2026-08-17T00:00:00Z",
+              started_at: "2026-08-17T00:00:01Z",
+              updated_at: "2026-08-17T00:01:00Z",
+              completed_at: "2026-08-17T00:01:00Z",
+              attempt: 1,
+              safe_error_code: null,
+            };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    renderWorkspace();
+
+    const link = await screen.findByRole("link", { name: "Descargar informe PDF" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/v1/analyses/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/report.pdf",
+    );
+  });
 });

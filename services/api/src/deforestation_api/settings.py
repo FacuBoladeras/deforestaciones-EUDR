@@ -15,7 +15,6 @@ class ApiSettings:
 
     database_path: Path
     storage_root: Path
-    output_root: Path
     jurisdiction_boundary_path: Path
     max_vertices: int = 50_000
     max_request_bytes: int = 2_000_000
@@ -42,12 +41,6 @@ class ApiSettings:
                 os.environ.get(
                     "DEFORESTATION_API_STORAGE",
                     private_root / "objects",
-                )
-            ),
-            output_root=Path(
-                os.environ.get(
-                    "DEFORESTATION_ANALYSIS_OUTPUT_ROOT",
-                    PROJECT_ROOT / "outputs" / "runs",
                 )
             ),
             jurisdiction_boundary_path=Path(

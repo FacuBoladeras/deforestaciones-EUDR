@@ -29,6 +29,7 @@ credentials.json
 
 # Geospatial and generated outputs
 outputs/
+/output/
 /tmp/
 *.aux.xml
 *.ovr

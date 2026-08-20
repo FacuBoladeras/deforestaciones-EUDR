@@ -114,6 +114,9 @@ def test_api_and_worker_complete_a_synthetic_analysis_across_processes(
 
         image = next(item for item in assets["items"] if item["media_type"] == "image/png")
         assert _request_bytes(f"{base_url}{image['download_url']}") == b"synthetic-png"
+        assert _request_bytes(f"{base_url}/api/v1/analyses/{analysis_id}/report.pdf").startswith(
+            b"%PDF-"
+        )
 
         package_path = tmp_path / "download.zip"
         package_path.write_bytes(
@@ -122,6 +125,8 @@ def test_api_and_worker_complete_a_synthetic_analysis_across_processes(
         with zipfile.ZipFile(package_path) as archive:
             assert {
                 "run_manifest.json",
+                "client_report/informe-tecnico.pdf",
+                "client_report/report.json",
                 "report_assets/index.json",
                 "report_assets/report_dataset.json",
                 "report_assets/data/main/events.json",

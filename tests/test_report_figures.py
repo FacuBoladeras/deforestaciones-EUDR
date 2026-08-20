@@ -231,7 +231,15 @@ def test_builds_structured_report_package_and_selects_priority_events(
                     "establishment_id": "farm-1",
                     "analysis_end_date": "2025-11-30",
                     "area": {"total_area_ha": 100.0},
-                    "limitations": ["full limitation"],
+                    "limitations": [
+                        "full limitation",
+                        (
+                            "Se detectaron señales de perturbación sin atribuir su causa "
+                            "o uso posterior."
+                        ),
+                        "No se ejecutó atribución de conversión ni se generó una conclusión final.",
+                        "No se determinó deforestación.",
+                    ],
                 },
                 "json/evidence/forest_baseline_2020.json": {
                     "screening": {"metrics": {"automated_forest_area_ha": 60.0}}
@@ -354,6 +362,12 @@ def test_builds_structured_report_package_and_selects_priority_events(
         "conversion_likely_count": 1,
         "automatic_final_assessment_generated": False,
     }
+    assert dataset["limitations"] == [
+        "Resultado técnico automático sujeto a revisión humana.",
+        "No constituye certificación ni confirmación legal EUDR.",
+        "full limitation",
+        "No se determinó deforestación.",
+    ]
     assert [event["event_id"] for event in dataset["selected_events"]] == [
         "PDE-A",
         "PDE-B",

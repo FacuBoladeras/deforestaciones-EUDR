@@ -4,13 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deforestation-api"
-version = "0.1.0"
+version = "0.2.0"
 description = "API interna asíncrona para el pipeline de evidencia EUDR."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "deforestation-domain",
     "deforestation-jobs",
-    "deforestation-pipeline",
     "fastapi>=0.141,<1",
+    "pydantic>=2.12,<3",
+    "shapely>=2.1,<3",
     "uvicorn>=0.52,<1",
 ]
 
@@ -18,8 +20,8 @@ dependencies = [
 deforestation-api = "deforestation_api.__main__:main"
 
 [tool.uv.sources]
+deforestation-domain = { workspace = true }
 deforestation-jobs = { workspace = true }
-deforestation-pipeline = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deforestation_api"]

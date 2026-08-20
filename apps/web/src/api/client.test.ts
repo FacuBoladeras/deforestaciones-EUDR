@@ -89,4 +89,12 @@ describe("ApiClient", () => {
       } satisfies Partial<ApiError>),
     );
   });
+
+  it("construye la descarga directa del informe PDF", () => {
+    const api = new ApiClient("http://127.0.0.1:8000/");
+
+    expect(api.reportPdfUrl("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toBe(
+      "http://127.0.0.1:8000/api/v1/analyses/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/report.pdf",
+    );
+  });
 });
