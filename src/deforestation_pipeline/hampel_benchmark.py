@@ -447,11 +447,11 @@ def _analyze_source_bundle(
         grid=grid,
         config=screening_config,
     )
-    disturbance_state = _read_named_raster(
+    disturbance_state, first_anomalous_period_index = _read_named_raster(
         source_bundle / "tiffs/evidence/disturbance_summary.tif",
-        band_names=("disturbance_state_code",),
+        band_names=("disturbance_state_code", "first_anomalous_period_index"),
         grid=grid,
-    )[0]
+    )
     persistent = np.isfinite(disturbance_state) & (
         disturbance_state == int(DisturbanceStateCode.PERSISTENT_CANDIDATE)
     )
@@ -466,7 +466,16 @@ def _analyze_source_bundle(
         automated_forest_mask=np.asarray(screening.automated_forest, dtype=np.bool_),
         grid_spec=grid,
         connectivity=8,
-        area_threshold_ha=_required_float(event_config, "area_threshold_ha"),
+        area_threshold_ha=_required_float(
+            event_config,
+            "visec_operational_event_area_threshold_ha",
+        ),
+        first_anomalous_period_index=first_anomalous_period_index,
+        maximum_onset_period_difference=_required_int(
+            event_config,
+            "maximum_onset_period_difference",
+        ),
+        missing_onset_policy="separate_unknown_episode",
     )
     published_events = _read_json(source_bundle / evidence_json("disturbance_events.json"))
     published_ids = tuple(

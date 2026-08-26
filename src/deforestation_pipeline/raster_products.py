@@ -36,7 +36,11 @@ matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
 FetchBytes = Callable[[str, int], bytes]
-AllNodataBandPolicy = Literal["reject", "allow_for_missing_period"]
+AllNodataBandPolicy = Literal[
+    "reject",
+    "allow_for_missing_period",
+    "defer_to_band_groups",
+]
 DOWNLOAD_TRANSFER_MAX_ATTEMPTS = 2
 DOWNLOAD_TRANSFER_RETRY_DELAY_SECONDS = 1.0
 DOWNLOAD_TRANSFER_TIMEOUT_SECONDS = 180
@@ -155,12 +159,16 @@ class HlsRasterMaterialization:
     validations: tuple[RasterValidation, ...]
     visualizations: tuple[VisualizationRecord, ...]
     grid_spec: RasterGridSpec
+    transport_strategy: str = "individual_geotiffs"
+    transport_request_count: int = 5
 
     def metadata_payload(self) -> dict[str, object]:
         return {
             "download_method": "ee.Image.getDownloadURL",
             "signed_urls_persisted": False,
             "resolution_degraded": False,
+            "transport_strategy": self.transport_strategy,
+            "transport_request_count": self.transport_request_count,
             "grid": self.grid_spec.model_dump(mode="json"),
             "estimates": [estimate.model_dump(mode="json") for estimate in self.estimates],
             "raster_validations": [
@@ -362,6 +370,7 @@ def materialize_ee_image_to_grid(
     grid_spec: RasterGridSpec,
     output_type: Literal["float32", "int16"],
     fetch_bytes: FetchBytes | None = None,
+    all_nodata_band_policy: AllNodataBandPolicy = "reject",
 ) -> SingleRasterMaterialization:
     """Descarga una imagen GEE arbitraria sin relajar grilla ni presupuesto."""
     product_name = download_name
@@ -440,11 +449,69 @@ def materialize_ee_image_to_grid(
         expected_band_names=band_names,
         artifact_path=artifact_path,
         product=product_name,
+        all_nodata_band_policy=all_nodata_band_policy,
     )
     return SingleRasterMaterialization(
         content=normalized,
         estimate=estimate,
         validation=validation,
+    )
+
+
+def extract_geotiff_band_group(
+    content: bytes,
+    *,
+    band_names: tuple[str, ...],
+    artifact_path: str,
+    product: str,
+    output_type: Literal["float32", "int16"],
+    expected_grid: RasterGridSpec,
+    all_nodata_band_policy: AllNodataBandPolicy = "reject",
+) -> tuple[bytes, RasterValidation]:
+    """Extrae bandas de un transporte multibanda sin conservar el contenedor remoto."""
+    dtype = "float32" if output_type == "float32" else "int16"
+    try:
+        with MemoryFile(content) as source_memory:
+            with source_memory.open() as source:
+                descriptions = tuple(description or "" for description in source.descriptions)
+                if len(descriptions) != len(set(descriptions)):
+                    raise RasterDownloadError("geotiff_band_names_duplicated")
+                missing = tuple(name for name in band_names if name not in descriptions)
+                if missing:
+                    raise RasterDownloadError("geotiff_band_names_mismatch")
+                indexes = tuple(descriptions.index(name) + 1 for name in band_names)
+                values = source.read(indexes).astype(dtype)
+                profile = {
+                    "driver": "GTiff",
+                    "width": source.width,
+                    "height": source.height,
+                    "count": len(band_names),
+                    "dtype": dtype,
+                    "crs": source.crs,
+                    "transform": source.transform,
+                    "nodata": expected_grid.nodata,
+                    "compress": "deflate",
+                }
+        with MemoryFile() as target_memory:
+            with target_memory.open(**profile) as target:
+                target.write(values)
+                target.descriptions = band_names
+            extracted = bytes(target_memory.read())
+    except RasterDownloadError as error:
+        raise error.with_context(artifact_path=artifact_path, product=product) from None
+    except Exception:
+        raise RasterDownloadError(
+            "geotiff_band_extraction_failed",
+            artifact_path=artifact_path,
+            product=product,
+        ) from None
+    return validate_geotiff_bytes(
+        extracted,
+        expected_grid=expected_grid,
+        expected_band_names=band_names,
+        artifact_path=artifact_path,
+        product=product,
+        all_nodata_band_policy=all_nodata_band_policy,
     )
 
 
@@ -457,7 +524,7 @@ def materialize_hls_raster_products(
     fetch_bytes: FetchBytes | None = None,
     artifact_kind: Literal["annual", "period"] = "annual",
 ) -> HlsRasterMaterialization:
-    """Descarga cinco GeoTIFF sobre una grilla exacta y genera PNG locales."""
+    """Descarga un transporte multibanda, lo separa y genera PNG locales."""
     if not math.isclose(
         grid_spec.nodata,
         output_config.raster_nodata,
@@ -468,8 +535,9 @@ def materialize_hls_raster_products(
             artifact_path="<hls_bundle>",
             product=f"hls_{artifact_kind}",
         )
-    effective_fetch = fetch_bytes or _fetch_url_bytes
-    raster_specs = (
+    raster_specs: tuple[
+        tuple[str, str, Any, tuple[str, ...], int, Literal["float32", "int16"]], ...
+    ] = (
         (
             f"tiffs/hls_{artifact_kind}_reflectance.tif",
             f"hls_{artifact_kind}_reflectance",
@@ -514,91 +582,78 @@ def materialize_hls_raster_products(
     files: dict[str, bytes] = {}
     estimates: list[DirectDownloadEstimate] = []
     validations: list[RasterValidation] = []
-
-    for (
-        artifact_path,
-        download_name,
-        image,
-        band_names,
-        bytes_per_sample,
-        output_type,
-    ) in raster_specs:
-        try:
-            estimate = validate_direct_download(
-                estimate_fixed_grid_download(
-                    grid_spec=grid_spec,
-                    band_count=len(band_names),
-                    bytes_per_sample=bytes_per_sample,
-                ),
-                maximum_bytes=output_config.maximum_direct_download_bytes,
-                maximum_dimension=output_config.maximum_direct_download_dimension,
-            )
-        except RasterDownloadError as error:
-            raise error.with_context(
-                artifact_path=artifact_path,
-                product=download_name,
-            ) from None
-        estimates.append(estimate)
-        prepared = image.toFloat() if output_type == "float32" else image.toInt16()
-        prepared = prepared.unmask(output_config.raster_nodata, False)
-        parameters = {
-            "name": download_name,
-            "bands": list(band_names),
-            "crs": grid_spec.target_crs,
-            "crs_transform": list(grid_spec.transform),
-            "dimensions": [grid_spec.width, grid_spec.height],
-            "format": "GEO_TIFF",
-        }
-        try:
-            url = prepared.getDownloadURL(parameters)
-        except Exception as error:
-            raise RasterDownloadError(
-                _remote_download_error_code(error),
-                artifact_path=artifact_path,
-                product=download_name,
-            ) from None
-        if not isinstance(url, str) or urlparse(url).scheme != "https":
-            raise RasterDownloadError(
-                "download_url_invalid",
-                artifact_path=artifact_path,
-                product=download_name,
-            )
-        try:
-            raw_content = effective_fetch(
-                url,
-                output_config.maximum_direct_download_bytes,
-            )
-        except RasterDownloadError as error:
-            raise error.with_context(
-                artifact_path=artifact_path,
-                product=download_name,
-            ) from None
-        except Exception:
-            raise RasterDownloadError(
-                "download_transfer_failed",
-                artifact_path=artifact_path,
-                product=download_name,
-            ) from None
-        if len(raw_content) > output_config.maximum_direct_download_bytes:
-            raise RasterDownloadError(
-                "download_response_too_large",
-                artifact_path=artifact_path,
-                product=download_name,
-            )
-        normalized, validation = validate_geotiff_bytes(
-            raw_content,
-            expected_grid=grid_spec,
-            expected_band_names=band_names,
-            artifact_path=artifact_path,
-            product=download_name,
-            all_nodata_band_policy=(
-                "allow_for_missing_period"
-                if artifact_kind == "period" and output_type == "float32"
-                else "reject"
+    transport_band_names = tuple(
+        name for *_, names, _bytes, _type in raster_specs for name in names
+    )
+    transport_strategy = "single_multiband_geotiff"
+    try:
+        validate_direct_download(
+            estimate_fixed_grid_download(
+                grid_spec=grid_spec,
+                band_count=len(transport_band_names),
+                bytes_per_sample=4,
             ),
+            maximum_bytes=output_config.maximum_direct_download_bytes,
+            maximum_dimension=output_config.maximum_direct_download_dimension,
         )
-        files[artifact_path] = normalized
-        validations.append(validation)
+    except RasterDownloadError as error:
+        if error.code != "direct_download_limit_exceeded":
+            raise
+        transport_strategy = "individual_geotiff_fallback"
+
+    if transport_strategy == "single_multiband_geotiff":
+        transport_image = product.reflectance.addBands(product.indices)
+        transport_image = transport_image.addBands(product.valid_observation_count)
+        transport_image = transport_image.addBands(product.valid_observation_count_l30)
+        transport_image = transport_image.addBands(product.valid_observation_count_s30)
+        transport = materialize_ee_image_to_grid(
+            image=transport_image,
+            band_names=transport_band_names,
+            artifact_path=f"internal/hls_{artifact_kind}_transport.tif",
+            download_name=f"hls_{artifact_kind}_transport",
+            output_config=output_config,
+            grid_spec=grid_spec,
+            output_type="float32",
+            fetch_bytes=fetch_bytes,
+            all_nodata_band_policy="defer_to_band_groups",
+        )
+        estimates.append(transport.estimate)
+        for artifact_path, download_name, _image, band_names, _bytes, output_type in raster_specs:
+            normalized, validation = extract_geotiff_band_group(
+                transport.content,
+                band_names=band_names,
+                artifact_path=artifact_path,
+                product=download_name,
+                output_type=output_type,
+                expected_grid=grid_spec,
+                all_nodata_band_policy=(
+                    "allow_for_missing_period"
+                    if artifact_kind == "period" and output_type == "float32"
+                    else "reject"
+                ),
+            )
+            files[artifact_path] = normalized
+            validations.append(validation)
+    else:
+        for artifact_path, download_name, image, band_names, _bytes, output_type in raster_specs:
+            materialized = materialize_ee_image_to_grid(
+                image=image,
+                band_names=band_names,
+                artifact_path=artifact_path,
+                download_name=download_name,
+                output_config=output_config,
+                grid_spec=grid_spec,
+                output_type=output_type,
+                fetch_bytes=fetch_bytes,
+                all_nodata_band_policy=(
+                    "allow_for_missing_period"
+                    if artifact_kind == "period" and output_type == "float32"
+                    else "reject"
+                ),
+            )
+            files[artifact_path] = materialized.content
+            estimates.append(materialized.estimate)
+            validations.append(materialized.validation)
 
     reflectance_path = f"tiffs/hls_{artifact_kind}_reflectance.tif"
     indices_path = f"tiffs/hls_{artifact_kind}_indices.tif"
@@ -621,6 +676,8 @@ def materialize_hls_raster_products(
         validations=tuple(validations),
         visualizations=visualization_records,
         grid_spec=grid_spec,
+        transport_strategy=transport_strategy,
+        transport_request_count=len(estimates),
     )
 
 
@@ -696,9 +753,13 @@ def _inspect_normalized_geotiff(
                 empty_band_indices = tuple(
                     index for index, valid in enumerate(valid_masks) if not np.any(valid)
                 )
-                if empty_band_indices and (
-                    all_nodata_band_policy == "reject"
-                    or len(empty_band_indices) != len(expected_band_names)
+                if (
+                    empty_band_indices
+                    and all_nodata_band_policy != "defer_to_band_groups"
+                    and (
+                        all_nodata_band_policy == "reject"
+                        or len(empty_band_indices) != len(expected_band_names)
+                    )
                 ):
                     raise RasterDownloadError(
                         "geotiff_band_has_no_valid_pixels",

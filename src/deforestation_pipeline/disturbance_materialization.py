@@ -211,6 +211,13 @@ def materialize_disturbance_detection(
         raise ValueError("baseline_evidence_fraction_shape_mismatch")
     post_counts = counts[post_selector]
     robust_z = _finite_max(diagnostics.standardized_magnitude, axes=(0, 1))
+    robust_scale_floor = _finite_max(diagnostics.scale_floor, axes=(0, 1))
+    robust_scale_stabilization_count = np.count_nonzero(
+        np.isfinite(diagnostics.standardization_scale)
+        & np.isfinite(diagnostics.robust_scale)
+        & (diagnostics.standardization_scale > diagnostics.robust_scale),
+        axis=(0, 1),
+    )
     ccdc_magnitude = _finite_max(ccdc_result.decrease_positive_magnitude, axes=(0,))
     ccdc_day_offset = _fractional_year_day_offsets(
         ccdc_result.first_post_cutoff_break_fractional_year,
@@ -237,6 +244,8 @@ def materialize_disturbance_detection(
         (
             robust.maximum_multi_index_support_count,
             robust_z,
+            robust_scale_floor,
+            robust_scale_stabilization_count,
             ccdc_day_offset,
             ccdc_magnitude,
             recovery,

@@ -94,6 +94,7 @@ def events_overview_map(
     events: tuple[EventSummary, ...],
     *,
     establishment_geometry: GeometryRings = (),
+    label_candidate_ids: frozenset[str] | None = None,
     width: float,
     height: float,
 ) -> Drawing:
@@ -139,7 +140,8 @@ def events_overview_map(
         for ring in event.event_geometry:
             drawing.add(_ring_path(ring, transform, fill=color, stroke=_TEXT, stroke_width=0.7))
         centroid = _centroid(event.event_geometry)
-        if centroid is not None:
+        should_label = label_candidate_ids is None or event.candidate_id in label_candidate_ids
+        if centroid is not None and should_label:
             x, y = transform(*centroid)
             label_x, label_y = _non_overlapping_label_position(
                 x,
@@ -165,14 +167,15 @@ def events_overview_map(
                 String(
                     label_x,
                     label_y - 2.5,
-                    f"E{event.ordinal}",
+                    ("E" if event.record_type == "conversion_likely_event" else "C")
+                    + str(event.ordinal),
                     textAnchor="middle",
                     fontName=_FONT_BOLD,
                     fontSize=6.2,
                     fillColor=_TEXT,
                 )
             )
-    _map_legend(drawing, width, height)
+    _map_legend(drawing, width, height, events)
     return drawing
 
 
@@ -263,7 +266,8 @@ def agricultural_support_map(
 ) -> Drawing:
     """Distingue soporte agrícola y ubica el evento dentro del establecimiento."""
     drawing = Drawing(width, height)
-    if not event.event_geometry:
+    map_geometry = event.candidate_geometry or event.event_geometry
+    if not map_geometry:
         drawing.add(
             String(
                 width / 2,
@@ -279,19 +283,24 @@ def agricultural_support_map(
     map_box = (42.0, 38.0, width - 54.0, height - 49.0)
     transform = _draw_reference_map(
         drawing,
-        event.event_geometry,
+        map_geometry,
         map_box=map_box,
         fill=colors.HexColor("#F8FAFC"),
         stroke=_TEXT,
         basemap=basemap,
     )
-    for ring in event.event_geometry:
+    for ring in map_geometry:
         drawing.add(_ring_path(ring, transform, fill=_LIGHT_GRAY, stroke=_TEXT, stroke_width=1.0))
+    if event.record_type == "conversion_likely_event":
+        for ring in event.event_geometry:
+            drawing.add(_ring_path(ring, transform, fill=_RED, stroke=_TEXT, stroke_width=0.8))
     for ring in event.agricultural_geometry:
         drawing.add(_ring_path(ring, transform, fill=_AMBER, stroke=_RED, stroke_width=0.6))
     _event_locator_inset(drawing, event, establishment_geometry, width=width, height=height)
     drawing.add(Rect(10, 10, 10, 10, fillColor=_LIGHT_GRAY, strokeColor=_TEXT, strokeWidth=0.6))
-    drawing.add(String(25, 12, "Evento detectado", fontName=_FONT, fontSize=7, fillColor=_TEXT))
+    drawing.add(
+        String(25, 12, "Perturbación candidata", fontName=_FONT, fontSize=7, fillColor=_TEXT)
+    )
     if event.agricultural_geometry:
         drawing.add(Rect(112, 10, 10, 10, fillColor=_AMBER, strokeColor=_RED, strokeWidth=0.6))
         label = "Soporte agrícola persistente"
@@ -663,12 +672,27 @@ def _nice_distance(value: float) -> float:
     return float(factor * magnitude)
 
 
-def _map_legend(drawing: Drawing, width: float, height: float) -> None:
-    items = (
-        ("Evidencia compatible con conversión", _RED),
-        ("Revisión requerida", _AMBER),
-        ("Evento menor a 0,5 ha", _GRAY),
-    )
+def _map_legend(
+    drawing: Drawing,
+    width: float,
+    height: float,
+    events: tuple[EventSummary, ...],
+) -> None:
+    items: list[tuple[str, colors.Color]] = []
+    if any(event.record_type == "conversion_likely_event" for event in events):
+        items.append(("Evidencia compatible con conversión", _RED))
+    if any(
+        event.record_type == "disturbance_candidate" and event.human_review_required
+        for event in events
+    ):
+        items.append(("Candidato que requiere revisión", _AMBER))
+    if any(
+        event.record_type == "disturbance_candidate" and not event.human_review_required
+        for event in events
+    ):
+        items.append(("Candidato observado", _GRAY))
+    if not items:
+        return
     drawing.add(
         Rect(
             1,
@@ -681,7 +705,7 @@ def _map_legend(drawing: Drawing, width: float, height: float) -> None:
     )
     y = 11.0
     for index, (label, color) in enumerate(items):
-        x = 10.0 + index * width / 3
+        x = 10.0 + index * width / len(items)
         drawing.add(Rect(x, y - 2, 9, 9, fillColor=color, strokeColor=None))
         drawing.add(String(x + 13, y, label, fontName=_FONT, fontSize=6.5, fillColor=_TEXT))
 
@@ -720,11 +744,11 @@ def _non_overlapping_label_position(
 
 
 def _event_color(event: EventSummary) -> colors.Color:
-    if not event.area_threshold_met:
-        return _GRAY
-    if event.automatic_status == "conversion_likely":
+    if event.record_type == "conversion_likely_event":
         return _RED
-    return _AMBER
+    if event.human_review_required:
+        return _AMBER
+    return _GRAY
 
 
 def _transform(

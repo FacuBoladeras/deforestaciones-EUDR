@@ -1,4 +1,4 @@
-"""Segmentación espacial y evidencia de eventos de perturbación persistente."""
+"""Segmentación espacial de episodios candidatos de perturbación persistente."""
 
 from __future__ import annotations
 
@@ -15,26 +15,36 @@ from typing import Annotated, Any, Literal, cast
 
 import matplotlib
 import numpy as np
+import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from rasterio.features import shapes
+from rasterio.io import MemoryFile
 from rasterio.transform import Affine
 from rasterio.warp import transform_geom
 from shapely.geometry import mapping, shape
 from shapely.ops import unary_union
 
-from deforestation_pipeline.artifact_layout import evidence_figure, evidence_json, evidence_table
+from deforestation_pipeline.artifact_layout import (
+    evidence_figure,
+    evidence_json,
+    evidence_table,
+    evidence_tiff,
+)
 from deforestation_pipeline.change_detection import DetectorConvergenceReasonCode
 from deforestation_pipeline.schemas import EUDR_CUTOFF_DATE, RasterGridSpec
 
 matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
-DISTURBANCE_EVENT_SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
+DISTURBANCE_EVENT_SCHEMA_VERSION: Literal["1.2.0"] = "1.2.0"
 EVENT_TYPE: Literal["persistent_disturbance_event"] = "persistent_disturbance_event"
+CANDIDATE_RECORD_TYPE: Literal["persistent_disturbance_candidate"] = (
+    "persistent_disturbance_candidate"
+)
 PRIMARY_DOMAIN: Literal["automated_forest"] = "automated_forest"
 ONSET_SEMANTICS: Literal["earliest_robust_seasonal_window_not_exact_date"] = (
     "earliest_robust_seasonal_window_not_exact_date"
@@ -43,16 +53,20 @@ EVENT_ONSET_FIGURE_LABEL = "primera ventana anómala robusta estimada"
 
 
 class DisturbanceEventConfig(BaseModel):
-    """Parámetros versionados de agregación; el umbral no elimina eventos."""
+    """Agregación versionada que conserva candidatos y clasifica eventos operacionales."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.0.0"] = DISTURBANCE_EVENT_SCHEMA_VERSION
+    schema_version: Literal["1.2.0"] = DISTURBANCE_EVENT_SCHEMA_VERSION
     connectivity: Literal[8]
-    area_threshold_ha: Annotated[float, Field(gt=0)]
+    visec_operational_event_area_threshold_ha: Annotated[float, Field(gt=0)]
+    visec_area_threshold_relation: Literal["strictly_greater_than"]
+    area_threshold_basis: Literal["candidate_footprint_reference_only_no_event_promotion"]
     area_method: Literal["projected_grid_affine_determinant"]
-    area_threshold_policy: Literal["flag_without_filtering"]
-    event_id_strategy: Literal["grid_and_pixels_sha256_v1"]
+    area_threshold_policy: Literal["preserve_all_candidates_publish_events_only_after_attribution"]
+    maximum_onset_period_difference: Annotated[int, Field(ge=0, le=4, strict=True)]
+    missing_onset_policy: Literal["separate_unknown_episode"]
+    event_id_strategy: Literal["grid_temporal_episode_and_pixels_sha256_v2"]
     ordering_policy: Literal["area_descending_then_event_id"]
     detail_figure_limit: Annotated[int, Field(ge=0, le=20, strict=True)]
     detail_selection_policy: Literal["largest_area_then_event_id"]
@@ -61,6 +75,17 @@ class DisturbanceEventConfig(BaseModel):
     primary_interpretation_domain: Literal["automated_forest"]
     automatic_final_assessment_allowed: Literal[False]
     attribution_allowed: Literal[False]
+
+    @model_validator(mode="after")
+    def fixed_visec_reference_is_not_a_model_hyperparameter(self) -> DisturbanceEventConfig:
+        if self.visec_operational_event_area_threshold_ha != 0.5:
+            raise ValueError("visec_operational_event_area_threshold_ha debe ser 0.5")
+        return self
+
+    @property
+    def area_threshold_ha(self) -> float:
+        """Alias transitorio para consumidores internos previos al contrato 1.2."""
+        return self.visec_operational_event_area_threshold_ha
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,21 +105,26 @@ class EventSegmentation:
 
     events: tuple[SegmentedEvent, ...]
     label_raster: NDArray[np.int32]
+    candidate_mask: NDArray[np.bool_]
+    operational_mask: NDArray[np.bool_]
     outside_primary_domain_pixel_count: int
 
 
 class DisturbanceEvent(BaseModel):
-    """Registro auditable de un componente, sin atribuir uso posterior."""
+    """Candidato auditable; ``event_id`` se conserva como alias técnico legado."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    candidate_id: str
     event_id: str
     event_type: Literal["persistent_disturbance_event"]
+    record_type: Literal["persistent_disturbance_candidate"]
+    interpretation_level: Literal["candidate_episode"]
     primary_interpretation_domain: Literal["automated_forest"]
     pixel_count: Annotated[int, Field(gt=0)]
     area_ha: Annotated[float, Field(gt=0)]
-    area_threshold_ha: Annotated[float, Field(gt=0)]
-    area_threshold_met: bool
+    candidate_area_reference_ha: Annotated[float, Field(gt=0)]
+    candidate_footprint_above_visec_area_reference: bool
     estimated_onset_period_id: str | None
     estimated_onset_window_start: date | None
     estimated_onset_window_end: date | None
@@ -120,7 +150,7 @@ class DisturbanceEventCollection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.2.0"]
     generated_at: datetime
     scientific_parameters_hash: str
     event_type: Literal["persistent_disturbance_event"]
@@ -128,10 +158,11 @@ class DisturbanceEventCollection(BaseModel):
     area_crs: str
     pixel_area_ha: Annotated[float, Field(gt=0)]
     segmentation: DisturbanceEventConfig
+    candidate_count: Annotated[int, Field(ge=0)]
+    above_visec_area_reference_candidate_count: Annotated[int, Field(ge=0)]
+    above_visec_area_reference_candidate_area_ha: Annotated[float, Field(ge=0)]
     event_count: Annotated[int, Field(ge=0)]
     total_event_area_ha: Annotated[float, Field(ge=0)]
-    area_threshold_event_count: Annotated[int, Field(ge=0)]
-    below_area_threshold_event_count: Annotated[int, Field(ge=0)]
     outside_primary_domain_persistent_pixel_count: Annotated[int, Field(ge=0)]
     detail_figure_count: Annotated[int, Field(ge=0)]
     detail_figure_selection_policy: Literal["largest_area_then_event_id"]
@@ -144,11 +175,25 @@ class DisturbanceEventCollection(BaseModel):
     def counts_match_events(self) -> DisturbanceEventCollection:
         if self.event_count != len(self.events):
             raise ValueError("event_count_mismatch")
-        met = sum(event.area_threshold_met for event in self.events)
-        if self.area_threshold_event_count != met:
-            raise ValueError("area_threshold_event_count_mismatch")
-        if self.below_area_threshold_event_count != self.event_count - met:
-            raise ValueError("below_area_threshold_event_count_mismatch")
+        if self.candidate_count != len(self.events):
+            raise ValueError("candidate_count_mismatch")
+        met = sum(event.candidate_footprint_above_visec_area_reference for event in self.events)
+        if self.above_visec_area_reference_candidate_count != met:
+            raise ValueError("above_visec_area_reference_candidate_count_mismatch")
+        operational_area = round(
+            sum(
+                event.area_ha
+                for event in self.events
+                if event.candidate_footprint_above_visec_area_reference
+            ),
+            8,
+        )
+        if not math.isclose(
+            self.above_visec_area_reference_candidate_area_ha,
+            operational_area,
+            abs_tol=1e-8,
+        ):
+            raise ValueError("above_visec_area_reference_candidate_area_ha_mismatch")
         detail_count = sum(event.detail_figure_path is not None for event in self.events)
         if self.detail_figure_count != detail_count:
             raise ValueError("detail_figure_count_mismatch")
@@ -161,6 +206,8 @@ class DisturbanceEventMaterialization:
 
     files: Mapping[str, bytes]
     collection: DisturbanceEventCollection
+    candidate_mask: NDArray[np.bool_]
+    operational_mask: NDArray[np.bool_]
 
 
 def segment_persistent_disturbance_events(
@@ -170,8 +217,11 @@ def segment_persistent_disturbance_events(
     grid_spec: RasterGridSpec,
     connectivity: Literal[8],
     area_threshold_ha: float,
+    first_anomalous_period_index: NDArray[Any] | None = None,
+    maximum_onset_period_difference: int = 0,
+    missing_onset_policy: Literal["separate_unknown_episode"] = "separate_unknown_episode",
 ) -> EventSegmentation:
-    """Agrupa píxeles persistentes en 8 vecinos, exclusivamente dentro del dominio."""
+    """Agrupa candidatos por vecindad y episodios de inicio temporal compatibles."""
     persistent = _boolean_array(persistent_mask, grid_spec=grid_spec, name="persistent_mask")
     automated = _boolean_array(
         automated_forest_mask,
@@ -182,10 +232,12 @@ def segment_persistent_disturbance_events(
         raise ValueError("event_connectivity_must_be_8")
     if not math.isfinite(area_threshold_ha) or area_threshold_ha <= 0:
         raise ValueError("event_area_threshold_invalid")
+    if maximum_onset_period_difference < 0:
+        raise ValueError("event_maximum_onset_period_difference_invalid")
+    if missing_onset_policy != "separate_unknown_episode":
+        raise ValueError("event_missing_onset_policy_invalid")
     target = persistent & automated
     outside_count = int(np.count_nonzero(persistent & ~automated))
-    labels = np.zeros(target.shape, dtype=np.int32)
-    components: list[tuple[tuple[int, int], ...]] = []
     neighbor_offsets = (
         (-1, -1),
         (-1, 0),
@@ -196,50 +248,56 @@ def segment_persistent_disturbance_events(
         (1, 0),
         (1, 1),
     )
-    next_label = 1
-    for row in range(grid_spec.height):
-        for column in range(grid_spec.width):
-            if not target[row, column] or labels[row, column] != 0:
-                continue
-            queue: deque[tuple[int, int]] = deque(((row, column),))
-            labels[row, column] = next_label
-            pixels: list[tuple[int, int]] = []
-            while queue:
-                current_row, current_column = queue.popleft()
-                pixels.append((current_row, current_column))
-                for row_offset, column_offset in neighbor_offsets:
-                    candidate_row = current_row + row_offset
-                    candidate_column = current_column + column_offset
-                    if not (
-                        0 <= candidate_row < grid_spec.height
-                        and 0 <= candidate_column < grid_spec.width
-                    ):
-                        continue
-                    if (
-                        target[candidate_row, candidate_column]
-                        and labels[candidate_row, candidate_column] == 0
-                    ):
-                        labels[candidate_row, candidate_column] = next_label
-                        queue.append((candidate_row, candidate_column))
-            components.append(tuple(sorted(pixels)))
-            next_label += 1
+    onsets = (
+        None
+        if first_anomalous_period_index is None
+        else _numeric_array(
+            first_anomalous_period_index,
+            grid_spec=grid_spec,
+            name="first_anomalous_period_index",
+        )
+    )
+    components = _temporally_coherent_components(
+        target=target,
+        onsets=onsets,
+        maximum_difference=maximum_onset_period_difference,
+        neighbor_offsets=neighbor_offsets,
+    )
+    labels = np.zeros(target.shape, dtype=np.int32)
+    for label, pixels in enumerate(components, start=1):
+        rows, columns = zip(*pixels, strict=True)
+        labels[np.asarray(rows), np.asarray(columns)] = label
 
     pixel_area_ha = _pixel_area_ha(grid_spec)
     events = tuple(
         SegmentedEvent(
-            event_id=_event_id(grid_spec.grid_sha256, pixels),
+            event_id=_event_id(
+                grid_spec.grid_sha256,
+                pixels,
+                onsets=onsets,
+                maximum_onset_period_difference=maximum_onset_period_difference,
+            ),
             pixels=pixels,
             pixel_count=len(pixels),
             area_ha=round(len(pixels) * pixel_area_ha, 8),
-            area_threshold_met=(len(pixels) * pixel_area_ha) >= area_threshold_ha,
+            area_threshold_met=(len(pixels) * pixel_area_ha) > area_threshold_ha,
         )
         for pixels in components
     )
     events = tuple(sorted(events, key=lambda event: (-event.area_ha, event.event_id)))
-    labels.setflags(write=False)
+    operational = np.zeros(target.shape, dtype=np.bool_)
+    for event in events:
+        if not event.area_threshold_met:
+            continue
+        rows, columns = zip(*event.pixels, strict=True)
+        operational[np.asarray(rows), np.asarray(columns)] = True
+    for array in (labels, target, operational):
+        array.setflags(write=False)
     return EventSegmentation(
         events=events,
         label_raster=labels,
+        candidate_mask=target,
+        operational_mask=operational,
         outside_primary_domain_pixel_count=outside_count,
     )
 
@@ -330,6 +388,9 @@ def materialize_persistent_disturbance_events(
         grid_spec=grid_spec,
         connectivity=config.connectivity,
         area_threshold_ha=config.area_threshold_ha,
+        first_anomalous_period_index=normalized["first_anomalous_period_index"],
+        maximum_onset_period_difference=config.maximum_onset_period_difference,
+        missing_onset_policy=config.missing_onset_policy,
     )
     selected_ids = {event.event_id for event in segmentation.events[: config.detail_figure_limit]}
     event_records: list[DisturbanceEvent] = []
@@ -378,13 +439,16 @@ def materialize_persistent_disturbance_events(
         if selected_path is not None:
             detail_paths[event.event_id] = selected_path
         record = DisturbanceEvent(
+            candidate_id=event.event_id,
             event_id=event.event_id,
             event_type=EVENT_TYPE,
+            record_type=CANDIDATE_RECORD_TYPE,
+            interpretation_level="candidate_episode",
             primary_interpretation_domain=PRIMARY_DOMAIN,
             pixel_count=event.pixel_count,
             area_ha=event.area_ha,
-            area_threshold_ha=config.area_threshold_ha,
-            area_threshold_met=event.area_threshold_met,
+            candidate_area_reference_ha=config.area_threshold_ha,
+            candidate_footprint_above_visec_area_reference=event.area_threshold_met,
             estimated_onset_period_id=onset_period_id,
             estimated_onset_window_start=onset_start,
             estimated_onset_window_end=onset_end,
@@ -435,12 +499,20 @@ def materialize_persistent_disturbance_events(
         area_crs=grid_spec.target_crs,
         pixel_area_ha=_pixel_area_ha(grid_spec),
         segmentation=config,
+        candidate_count=len(event_records),
+        above_visec_area_reference_candidate_count=sum(
+            event.candidate_footprint_above_visec_area_reference for event in event_records
+        ),
+        above_visec_area_reference_candidate_area_ha=round(
+            sum(
+                event.area_ha
+                for event in event_records
+                if event.candidate_footprint_above_visec_area_reference
+            ),
+            8,
+        ),
         event_count=len(event_records),
         total_event_area_ha=round(sum(event.area_ha for event in event_records), 8),
-        area_threshold_event_count=sum(event.area_threshold_met for event in event_records),
-        below_area_threshold_event_count=sum(
-            not event.area_threshold_met for event in event_records
-        ),
         outside_primary_domain_persistent_pixel_count=(
             segmentation.outside_primary_domain_pixel_count
         ),
@@ -466,6 +538,11 @@ def materialize_persistent_disturbance_events(
             area_threshold_ha=config.area_threshold_ha,
             dpi=png_dpi,
         ),
+        evidence_tiff("disturbance_event_masks.tif"): _mask_raster_bytes(
+            candidate_mask=segmentation.candidate_mask,
+            operational_mask=segmentation.operational_mask,
+            grid_spec=grid_spec,
+        ),
     }
     event_by_id = {event.event_id: event for event in collection.events}
     for event_id, detail_path in sorted(detail_paths.items()):
@@ -481,7 +558,124 @@ def materialize_persistent_disturbance_events(
             grid_spec=grid_spec,
             dpi=png_dpi,
         )
-    return DisturbanceEventMaterialization(files=files, collection=collection)
+    return DisturbanceEventMaterialization(
+        files=files,
+        collection=collection,
+        candidate_mask=segmentation.candidate_mask,
+        operational_mask=segmentation.operational_mask,
+    )
+
+
+def _mask_raster_bytes(
+    *,
+    candidate_mask: NDArray[np.bool_],
+    operational_mask: NDArray[np.bool_],
+    grid_spec: RasterGridSpec,
+) -> bytes:
+    values = np.stack((candidate_mask, operational_mask), axis=0).astype(np.uint8)
+    with MemoryFile() as memory:
+        with memory.open(
+            driver="GTiff",
+            width=grid_spec.width,
+            height=grid_spec.height,
+            count=2,
+            dtype="uint8",
+            crs=grid_spec.target_crs,
+            transform=rasterio.Affine(*grid_spec.transform),
+            nodata=255,
+            compress="deflate",
+        ) as dataset:
+            dataset.write(values)
+            dataset.descriptions = (
+                "persistent_candidate_mask",
+                "candidate_footprint_above_visec_area_reference",
+            )
+            dataset.update_tags(
+                schema_version=DISTURBANCE_EVENT_SCHEMA_VERSION,
+                product="disturbance_event_masks",
+                grid_sha256=grid_spec.grid_sha256,
+                operational_policy="candidate_reference_only_event_requires_attribution",
+                area_threshold_semantics="strictly_greater_than_projected_candidate_area",
+            )
+        return bytes(memory.read())
+
+
+def _temporally_coherent_components(
+    *,
+    target: NDArray[np.bool_],
+    onsets: NDArray[np.float64] | None,
+    maximum_difference: int,
+    neighbor_offsets: Sequence[tuple[int, int]],
+) -> list[tuple[tuple[int, int], ...]]:
+    """Evita que conectividad transitiva una inicios incompatibles en un episodio."""
+    spatial_components = _connected_components(target, neighbor_offsets=neighbor_offsets)
+    if onsets is None:
+        return spatial_components
+    coherent: list[tuple[tuple[int, int], ...]] = []
+    for spatial in spatial_components:
+        known_values = sorted(
+            {
+                int(onsets[row, column])
+                for row, column in spatial
+                if np.isfinite(onsets[row, column])
+            }
+        )
+        temporal_bands: list[set[int]] = []
+        while known_values:
+            start = known_values[0]
+            band = {value for value in known_values if value <= start + maximum_difference}
+            temporal_bands.append(band)
+            known_values = [value for value in known_values if value not in band]
+        masks: list[NDArray[np.bool_]] = []
+        for band in temporal_bands:
+            band_mask = np.zeros(target.shape, dtype=np.bool_)
+            for row, column in spatial:
+                value = onsets[row, column]
+                if np.isfinite(value) and int(value) in band:
+                    band_mask[row, column] = True
+            masks.append(band_mask)
+        unknown_mask = np.zeros(target.shape, dtype=np.bool_)
+        for row, column in spatial:
+            if not np.isfinite(onsets[row, column]):
+                unknown_mask[row, column] = True
+        if unknown_mask.any():
+            masks.append(unknown_mask)
+        for mask in masks:
+            coherent.extend(_connected_components(mask, neighbor_offsets=neighbor_offsets))
+    return coherent
+
+
+def _connected_components(
+    mask: NDArray[np.bool_],
+    *,
+    neighbor_offsets: Sequence[tuple[int, int]],
+) -> list[tuple[tuple[int, int], ...]]:
+    visited = np.zeros(mask.shape, dtype=np.bool_)
+    components: list[tuple[tuple[int, int], ...]] = []
+    height, width = mask.shape
+    for row in range(height):
+        for column in range(width):
+            if not mask[row, column] or visited[row, column]:
+                continue
+            queue: deque[tuple[int, int]] = deque(((row, column),))
+            visited[row, column] = True
+            pixels: list[tuple[int, int]] = []
+            while queue:
+                current_row, current_column = queue.popleft()
+                pixels.append((current_row, current_column))
+                for row_offset, column_offset in neighbor_offsets:
+                    candidate_row = current_row + row_offset
+                    candidate_column = current_column + column_offset
+                    if not (0 <= candidate_row < height and 0 <= candidate_column < width):
+                        continue
+                    if (
+                        mask[candidate_row, candidate_column]
+                        and not visited[candidate_row, candidate_column]
+                    ):
+                        visited[candidate_row, candidate_column] = True
+                        queue.append((candidate_row, candidate_column))
+            components.append(tuple(sorted(pixels)))
+    return components
 
 
 def disturbance_event_output_paths(*, detail_event_ids: Sequence[str] = ()) -> dict[str, str]:
@@ -535,9 +729,32 @@ def _pixel_area_ha(grid_spec: RasterGridSpec) -> float:
     return area
 
 
-def _event_id(grid_sha256: str, pixels: tuple[tuple[int, int], ...]) -> str:
+def _event_id(
+    grid_sha256: str,
+    pixels: tuple[tuple[int, int], ...],
+    *,
+    onsets: NDArray[np.float64] | None,
+    maximum_onset_period_difference: int,
+) -> str:
     identity = ";".join(f"{row},{column}" for row, column in pixels)
-    digest = hashlib.sha256(f"{grid_sha256}|{identity}".encode()).hexdigest()[:12].upper()
+    temporal_identity = (
+        "legacy_spatial_only"
+        if onsets is None
+        else ";".join(
+            "unknown" if not np.isfinite(onsets[row, column]) else str(int(onsets[row, column]))
+            for row, column in pixels
+        )
+    )
+    digest = (
+        hashlib.sha256(
+            (
+                f"{grid_sha256}|{identity}|{temporal_identity}|"
+                f"max_difference={maximum_onset_period_difference}"
+            ).encode()
+        )
+        .hexdigest()[:12]
+        .upper()
+    )
     return f"PDE-{digest}"
 
 
@@ -654,7 +871,9 @@ def _csv_bytes(events: Sequence[DisturbanceEvent]) -> bytes:
     writer.writeheader()
     for event in events:
         row = event.model_dump(mode="json")
-        row["area_threshold_met"] = str(row["area_threshold_met"]).lower()
+        row["candidate_footprint_above_visec_area_reference"] = str(
+            row["candidate_footprint_above_visec_area_reference"]
+        ).lower()
         row["attribution_generated"] = str(row["attribution_generated"]).lower()
         row["automatic_final_assessment_generated"] = str(
             row["automatic_final_assessment_generated"]
@@ -709,24 +928,29 @@ def _render_event_overview(
     display = np.full(automated_forest.shape, np.nan, dtype=np.float64)
     display[automated_forest] = 0
     for event in events:
-        display[event_masks[event.event_id]] = 2 if event.area_threshold_met else 1
+        display[event_masks[event.event_id]] = (
+            2 if event.candidate_footprint_above_visec_area_reference else 1
+        )
     figure = Figure(figsize=(9.5, 7.2), constrained_layout=True)
     axis = figure.subplots()
     cmap = ListedColormap(("#d9ead3", "#f6b26b", "#cc0000"))
     norm = BoundaryNorm((-0.5, 0.5, 1.5, 2.5), cmap.N)
     axis.imshow(display, cmap=cmap, norm=norm, interpolation="nearest")
-    axis.set_title("Eventos de perturbación persistente dentro de bosque automático")
+    axis.set_title("Episodios candidatos de perturbación persistente en bosque automático")
     axis.set_xlabel(f"Grilla {grid_spec.target_crs}; no implica atribución de uso posterior")
     axis.set_xticks([])
     axis.set_yticks([])
     axis.legend(
         handles=(
-            Patch(color="#d9ead3", label="Bosque automático sin evento persistente"),
+            Patch(color="#d9ead3", label="Bosque automático sin candidato persistente"),
             Patch(
                 color="#f6b26b",
-                label=f"Evento < {area_threshold_ha:g} ha (conservado)",
+                label=f"Candidato <= {area_threshold_ha:g} ha (conservado)",
             ),
-            Patch(color="#cc0000", label=f"Evento >= {area_threshold_ha:g} ha"),
+            Patch(
+                color="#cc0000",
+                label=f"Candidato > {area_threshold_ha:g} ha (aún no es evento)",
+            ),
         ),
         loc="lower left",
         fontsize=8,
@@ -735,7 +959,7 @@ def _render_event_overview(
     axis.text(
         0.01,
         0.99,
-        f"Eventos: {len(events)} | umbral informativo: {area_threshold_ha:g} ha",
+        f"Candidatos: {len(events)} | referencia VISEC estricta: > {area_threshold_ha:g} ha",
         transform=axis.transAxes,
         va="top",
         ha="left",
@@ -827,7 +1051,7 @@ def _render_event_detail(
     tick_positions = np.arange(0, len(all_period_ids), tick_step)
     series_axis.set_xticks(tick_positions, [all_period_ids[index] for index in tick_positions])
     series_axis.tick_params(axis="x", rotation=45, labelsize=7)
-    series_axis.set_title("Serie media del evento")
+    series_axis.set_title("Serie media del candidato")
     series_axis.text(
         0.01,
         0.98,
@@ -842,7 +1066,7 @@ def _render_event_detail(
     series_axis.grid(alpha=0.2)
     series_axis.legend(ncol=2, fontsize=7)
     figure.suptitle(
-        f"{event.event_id} · {event.area_ha:.2f} ha · evento de perturbación persistente\n"
+        f"{event.candidate_id} · {event.area_ha:.2f} ha · candidato de perturbación persistente\n"
         "Comparación estacional; no atribuye deforestación ni uso posterior",
         fontsize=11,
     )

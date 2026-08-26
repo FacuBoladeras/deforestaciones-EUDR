@@ -72,6 +72,13 @@ class OutputFormat(StrEnum):
     GEOTIFF = "geotiff"
 
 
+class ArtifactProfile(StrEnum):
+    """Retención operativa de artefactos sin modificar la ciencia."""
+
+    LEAN = "lean"
+    DEBUG = "debug"
+
+
 class IndexVisualizationRange(StrictConfigModel):
     """Escala fija de presentación para un índice; no altera el raster científico."""
 
@@ -185,6 +192,7 @@ class OutputConfig(StrictConfigModel):
 
     directory: Path
     formats: Annotated[tuple[OutputFormat, ...], Field(min_length=1)]
+    artifact_profile: ArtifactProfile
     raster_nodata: float
     maximum_direct_download_bytes: Annotated[int, Field(gt=0, le=32_000_000)]
     maximum_direct_download_dimension: Annotated[int, Field(gt=0, le=10_000)]
@@ -339,7 +347,7 @@ class ForestRandomForestConfig(StrictConfigModel):
 class PipelineConfig(StrictConfigModel):
     """Configuración raíz del pipeline."""
 
-    schema_version: Literal["1.11.0"]
+    schema_version: Literal["1.13.0"]
     analysis: AnalysisConfig
     spatial: SpatialConfig
     data: DataConfig
@@ -380,11 +388,6 @@ class PipelineConfig(StrictConfigModel):
             raise ValueError(
                 "forest_screening.expected_tree_count debe coincidir con "
                 "forest_model.expected_tree_count"
-            )
-        if self.disturbance_events.area_threshold_ha != self.spatial.forest_definition_min_area_ha:
-            raise ValueError(
-                "disturbance_events.area_threshold_ha debe coincidir con "
-                "spatial.forest_definition_min_area_ha"
             )
         return self
 

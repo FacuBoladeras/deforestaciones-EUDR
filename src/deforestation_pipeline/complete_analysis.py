@@ -31,7 +31,7 @@ from deforestation_pipeline.agricultural_persistence import (
     load_agricultural_persistence_config,
     materialize_agricultural_persistence,
 )
-from deforestation_pipeline.config import load_config, load_forest_model_config
+from deforestation_pipeline.config import ArtifactProfile, load_config, load_forest_model_config
 from deforestation_pipeline.gee import (
     GeeSession,
     authenticate_earth_engine,
@@ -43,7 +43,10 @@ from deforestation_pipeline.hampel_benchmark import (
     materialize_seasonal_hampel_benchmark,
 )
 from deforestation_pipeline.hls_seasonal import HlsSeasonalRequest
-from deforestation_pipeline.local_runner import run_local_vector_pipeline
+from deforestation_pipeline.local_runner import (
+    _rename_directory_with_retry,
+    run_local_vector_pipeline,
+)
 from deforestation_pipeline.post_change_attribution import (
     AttributionContext,
     DeclaredLandUse,
@@ -155,6 +158,8 @@ def run_complete_analysis(
     # Parsear todos los contratos antes de cualquier acceso remoto evita
     # corridas parciales por YAML inválido.
     pipeline_config = config_loader(resolved["config"])
+    output_config = getattr(pipeline_config, "output", None)
+    artifact_profile = getattr(output_config, "artifact_profile", ArtifactProfile.LEAN)
     model_config = model_loader(resolved["model"])
     if getattr(model_config, "schema_version", None) == "1.1.0":
         verify_local_rf_model_release(
@@ -235,7 +240,6 @@ def run_complete_analysis(
         if agricultural_mode == "auto" and active_raster_provider is None:
             if active_session is None:
                 raise ValueError("gee_session_required_for_automatic_agriculture")
-            output_config = getattr(pipeline_config, "output", None)
             if output_config is None:
                 raise ValueError("pipeline_output_config_missing")
             active_raster_provider = agricultural_provider_factory(
@@ -330,6 +334,7 @@ def run_complete_analysis(
                     licenses_path=resolved["licenses"],
                     created_at=started,
                     raster_provider=active_raster_provider,
+                    artifact_profile=artifact_profile,
                 ),
             )
             persistence_bundle = _execute(
@@ -385,7 +390,7 @@ def run_complete_analysis(
         )
         manifest["parameters_hash"] = _parameters_hash(manifest)
         _write_json_atomic(staging / "run_manifest.json", manifest)
-        staging.rename(final)
+        _rename_directory_with_retry(staging, final)
         return final
     except Exception as exc:
         safe_message = _sanitize(
@@ -446,7 +451,7 @@ def run_complete_analysis(
                 }
         manifest["parameters_hash"] = _parameters_hash(manifest)
         _write_json_atomic(staging / "run_manifest.json", manifest)
-        staging.rename(failed)
+        _rename_directory_with_retry(staging, failed)
         raise CompleteAnalysisError(
             f"complete_analysis_{manifest['overall_status']}: {safe_message}", failed
         ) from exc

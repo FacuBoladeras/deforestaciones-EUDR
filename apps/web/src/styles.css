@@ -147,6 +147,58 @@ h3 {
   font-size: 0.82rem;
 }
 
+.geometry-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid #d5ddd3;
+  border-radius: 999px;
+  background: #f4f6f2;
+  color: #68766c;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.geometry-status::before {
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: #8a958d;
+  content: "";
+}
+
+.geometry-status-draft {
+  border-color: #e4c79f;
+  background: #fff7eb;
+  color: #89561f;
+}
+
+.geometry-status-draft::before {
+  background: #d8862c;
+}
+
+.geometry-status-editing {
+  border-color: #e4c79f;
+  background: #fff7eb;
+  color: #89561f;
+}
+
+.geometry-status-editing::before {
+  background: #d8862c;
+}
+
+.geometry-status-accepted {
+  border-color: #b9d8c2;
+  background: #edf7ef;
+  color: #266443;
+}
+
+.geometry-status-accepted::before {
+  background: #3b965d;
+}
+
 .map-note {
   margin: 10px 2px 0;
 }
@@ -234,11 +286,41 @@ h3 {
   font-weight: 500;
 }
 
-.success-line {
+.geometry-feedback {
+  display: grid;
+  gap: 4px;
   margin: 18px 0 0;
+  padding: 13px 14px;
+  border: 1px solid #d6ddd4;
+  border-radius: 11px;
+  background: #f7f9f6;
+  color: #5e6c62;
+  font-size: 0.82rem;
+}
+
+.geometry-feedback strong {
+  color: #35493c;
+  font-size: 0.86rem;
+}
+
+.geometry-feedback-pending,
+.geometry-feedback-validating {
+  border-color: #e5cba5;
+  background: #fff8ed;
+}
+
+.geometry-feedback-pending strong,
+.geometry-feedback-validating strong {
+  color: #86551f;
+}
+
+.geometry-feedback-accepted {
+  border-color: #bddac5;
+  background: #edf7ef;
+}
+
+.geometry-feedback-accepted strong {
   color: #27704a;
-  font-size: 0.84rem;
-  font-weight: 750;
 }
 
 .validation-card {
@@ -465,4 +547,61 @@ h3 {
   .gallery {
     grid-template-columns: 1fr;
   }
+}
+.basemap-switch {
+  align-items: center;
+  background: #eef3f0;
+  border: 1px solid #c7d4cc;
+  border-radius: 999px;
+  color: #29483a;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 700;
+  gap: 0.45rem;
+  padding: 0.35rem 0.55rem;
+}
+
+.basemap-switch input {
+  appearance: none;
+  background: #657a70;
+  border-radius: 999px;
+  cursor: pointer;
+  height: 1.1rem;
+  margin: 0;
+  padding: 0.12rem;
+  transition: background 140ms ease;
+  width: 2rem;
+}
+
+.basemap-switch input::before {
+  background: #ffffff;
+  border-radius: 50%;
+  content: "";
+  display: block;
+  height: 0.86rem;
+  transition: transform 140ms ease;
+  width: 0.86rem;
+}
+
+.basemap-switch input:checked {
+  background: #176b45;
+}
+
+.basemap-switch input:checked::before {
+  transform: translateX(0.9rem);
+}
+
+.basemap-switch input:focus-visible {
+  outline: 3px solid rgba(23, 107, 69, 0.3);
+  outline-offset: 2px;
+}
+
+.basemap-switch input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.map-error {
+  color: #9f2f2f;
+  font-weight: 700;
 }

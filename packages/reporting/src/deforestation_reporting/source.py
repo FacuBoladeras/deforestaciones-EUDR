@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -35,8 +36,16 @@ GateKey = Literal[
     "agricultural_or_livestock_post_use",
     "defensible_area_and_geometry",
     "strong_alternative_explanation_absent",
+    "visec_operational_area_strictly_greater_than_threshold",
 ]
-MainClientFigureKind = Literal["annual_forest_change", "rgb_timeline"]
+MainClientFigureKind = Literal[
+    "annual_forest_change",
+    "rgb_timeline",
+    "spectral_index_timeline",
+    "observation_coverage",
+    "disturbance_detection",
+    "post_change_attribution",
+]
 
 _GATE_KEYS: tuple[GateKey, ...] = (
     "forest_at_cutoff",
@@ -46,6 +55,8 @@ _GATE_KEYS: tuple[GateKey, ...] = (
     "defensible_area_and_geometry",
     "strong_alternative_explanation_absent",
 )
+
+_OPERATIONAL_AREA_GATE: GateKey = "visec_operational_area_strictly_greater_than_threshold"
 
 _SUPERSEDED_DETECTION_LIMITATIONS_AFTER_ATTRIBUTION = {
     "Se detectaron señales de perturbación sin atribuir su causa o uso posterior.",
@@ -195,13 +206,21 @@ def build_report_view_model(package: ReportPackage) -> ReportViewModel:
                 "recorded_at": dataset.get("recorded_at"),
             }
         )
+        disturbance_summary = _verified_object(
+            package, "report_assets/data/main/030_disturbance_events.json"
+        )
         metrics_source = _mapping(dataset.get("headline_metrics"), "headline_metrics_missing")
+        candidate_area, candidate_count, operational_area, operational_count = (
+            _headline_event_metrics(metrics_source, disturbance_summary)
+        )
         metrics = HeadlineMetrics.model_validate(
             {
                 "establishment_area_ha": metrics_source.get("establishment_area_ha"),
                 "forest_area_2020_ha": metrics_source.get("forest_area_2020_ha"),
-                "detected_event_area_ha": metrics_source.get("detected_event_area_ha"),
-                "detected_event_count": metrics_source.get("detected_event_count"),
+                "spectral_candidate_area_ha": candidate_area,
+                "spectral_candidate_count": candidate_count,
+                "candidate_episode_area_ha": operational_area,
+                "candidate_episode_count": operational_count,
                 "likely_conversion_area_ha": metrics_source.get("likely_conversion_area_ha"),
                 "conversion_likely_count": metrics_source.get("conversion_likely_count"),
                 "automatic_final_assessment_generated": metrics_source.get(
@@ -216,24 +235,32 @@ def build_report_view_model(package: ReportPackage) -> ReportViewModel:
         forest_summary = _verified_object(
             package, "report_assets/data/main/020_forest_baseline_2020.json"
         )
-        disturbance_summary = _verified_object(
-            package, "report_assets/data/main/030_disturbance_events.json"
-        )
-        persistence_summary = _verified_object(
-            package, "report_assets/data/main/070_agricultural_persistence.json"
-        )
-        attribution_summary = _verified_object(
-            package, "report_assets/data/main/080_post_change_attribution.json"
-        )
-        agricultural_metadata = _verified_object(
+        persistence_summary = _verified_component_object(
             package,
+            components,
+            "agricultural_persistence",
+            "report_assets/data/main/070_agricultural_persistence.json",
+        )
+        attribution_summary = _verified_component_object(
+            package,
+            components,
+            "post_change_attribution",
+            "report_assets/data/main/080_post_change_attribution.json",
+        )
+        agricultural_metadata = _verified_component_object(
+            package,
+            components,
+            "agricultural_collection",
             "report_assets/annex/methodology/agricultural_evidence_metadata.json",
         )
         disturbance_spatial = _verified_object(
             package, "report_assets/annex/spatial/disturbance_events.geojson"
         )
-        attribution_spatial = _verified_object(
-            package, "report_assets/annex/spatial/post_change_attribution.geojson"
+        attribution_spatial = _verified_component_object(
+            package,
+            components,
+            "post_change_attribution",
+            "report_assets/annex/spatial/post_change_attribution.geojson",
         )
         seasonal_rows = _verified_csv(package, "report_assets/annex/tables/seasonal_summary.csv")
         detection_rows = _verified_csv(
@@ -258,8 +285,12 @@ def build_report_view_model(package: ReportPackage) -> ReportViewModel:
         return ReportViewModel(
             analysis=analysis,
             verified_asset_count=len(package.assets),
-            result_status=_contract_required_string(
-                attribution_summary.get("status"), "result_status_invalid"
+            result_status=(
+                _contract_required_string(
+                    attribution_summary.get("status"), "result_status_invalid"
+                )
+                if attribution_summary
+                else "partial_incomplete_evidence"
             ),
             metrics=metrics,
             geometry=geometry,
@@ -279,6 +310,61 @@ def build_report_view_model(package: ReportPackage) -> ReportViewModel:
         raise ReportContractError("report_dataset_invalid") from error
 
 
+def _headline_event_metrics(
+    metrics: dict[str, Any],
+    disturbance_summary: dict[str, Any],
+) -> tuple[Any, Any, Any, Any]:
+    """Separa métricas candidatas y operativas, incluso para datasets editoriales 1.0."""
+    if "spectral_candidate_area_ha" in metrics and "spectral_candidate_count" in metrics:
+        return (
+            metrics.get("spectral_candidate_area_ha"),
+            metrics.get("spectral_candidate_count"),
+            metrics.get("candidate_episode_area_ha"),
+            metrics.get("candidate_episode_count"),
+        )
+    if "candidate_event_area_ha" in metrics and "candidate_event_count" in metrics:
+        return (
+            metrics.get("candidate_event_area_ha"),
+            metrics.get("candidate_event_count"),
+            metrics.get("detected_event_area_ha"),
+            metrics.get("detected_event_count"),
+        )
+
+    candidate_area = metrics.get("detected_event_area_ha")
+    candidate_count = metrics.get("detected_event_count")
+    events = disturbance_summary.get("events")
+    preserved_events = events if isinstance(events, list) else []
+    operational_events = [
+        event
+        for event in preserved_events
+        if isinstance(event, dict)
+        and (
+            event.get("candidate_footprint_above_visec_area_reference") is True
+            or (
+                disturbance_summary.get("schema_version") != "1.2.0"
+                and event.get("area_threshold_met") is True
+            )
+        )
+    ]
+    operational_count = disturbance_summary.get(
+        "above_visec_area_reference_candidate_count",
+        disturbance_summary.get(
+            "operational_event_count",
+            disturbance_summary.get("area_threshold_event_count", len(operational_events)),
+        ),
+    )
+    operational_area = disturbance_summary.get("above_visec_area_reference_candidate_area_ha")
+    if operational_area is None:
+        operational_area = disturbance_summary.get("operational_event_area_ha")
+    if operational_area is None:
+        operational_area = sum(
+            float(event["area_ha"])
+            for event in operational_events
+            if isinstance(event.get("area_ha"), int | float)
+        )
+    return candidate_area, candidate_count, operational_area, operational_count
+
+
 def _client_figures(
     package: ReportPackage, events: tuple[EventSummary, ...]
 ) -> tuple[ClientFigure, ...]:
@@ -290,6 +376,22 @@ def _client_figures(
             "report_assets/figures/main/200_rf_forest_deltas_timeline.png",
         ),
         ("rgb_timeline", "report_assets/figures/main/030_rgb_timeline.png"),
+        (
+            "spectral_index_timeline",
+            "report_assets/figures/main/040_spectral_index_timeline.png",
+        ),
+        (
+            "observation_coverage",
+            "report_assets/figures/main/050_observation_coverage.png",
+        ),
+        (
+            "disturbance_detection",
+            "report_assets/figures/main/060_disturbance_detection.png",
+        ),
+        (
+            "post_change_attribution",
+            "report_assets/figures/main/500_post_change_attribution.png",
+        ),
     )
     for kind, report_path in main_figure_specs:
         asset = assets_by_path.get(report_path)
@@ -305,13 +407,13 @@ def _client_figures(
     for event in events:
         if not event.selected_for_detail:
             continue
-        report_path = f"report_assets/figures/events/{event.event_id}/disturbance.png"
+        report_path = f"report_assets/figures/events/{event.candidate_id}/disturbance.png"
         asset = assets_by_path.get(report_path)
         if asset is not None:
             selected.append(
                 ClientFigure(
                     kind="event_spectral_evidence",
-                    event_id=event.event_id,
+                    event_id=event.candidate_id,
                     report_path=asset.report_path,
                     absolute_path=asset.absolute_path,
                     sha256=asset.sha256,
@@ -325,16 +427,35 @@ def _components(value: object) -> tuple[ComponentSummary, ...]:
     result: list[ComponentSummary] = []
     for name, payload in sorted(source.items()):
         item = _mapping(payload, "component_status_invalid")
+        status = _contract_required_string(item.get("status"), "component_status_invalid")
         result.append(
             ComponentSummary(
                 name=name,
-                status=_contract_required_string(item.get("status"), "component_status_invalid"),
+                status=status,
+                available=item.get("available", status == "completed"),
+                reason=_optional_string(item.get("reason"), "component_reason_invalid"),
                 selected_figure_count=item.get("selected_figure_count", 0),
             )
         )
     if not result:
         raise ReportContractError("component_statuses_missing")
     return tuple(result)
+
+
+def _verified_component_object(
+    package: ReportPackage,
+    components: tuple[ComponentSummary, ...],
+    component_name: str,
+    report_path: str,
+) -> dict[str, Any]:
+    component = next(
+        (candidate for candidate in components if candidate.name == component_name), None
+    )
+    if component is None:
+        return _verified_object(package, report_path)
+    if not component.available:
+        return {}
+    return _verified_object(package, report_path)
 
 
 def _limitations(value: object, components: tuple[ComponentSummary, ...]) -> tuple[str, ...]:
@@ -450,7 +571,8 @@ def _datasets(
     if not isinstance(raw_sources, list):
         raise ReportContractError("datasets_invalid")
     sources = [_mapping(source, "dataset_invalid") for source in raw_sources]
-    sources.append(_mapping(agricultural_metadata.get("source"), "agricultural_source_invalid"))
+    if agricultural_metadata:
+        sources.append(_mapping(agricultural_metadata.get("source"), "agricultural_source_invalid"))
     unique: dict[str, DatasetSummary] = {}
     for source in sources:
         dataset_id = _contract_required_string(
@@ -478,35 +600,58 @@ def _events(
     disturbance_spatial: dict[str, Any],
     attribution_spatial: dict[str, Any],
 ) -> tuple[EventSummary, ...]:
-    selected_payloads = report_dataset.get("selected_events")
+    selected_payloads = report_dataset.get(
+        "selected_disturbances", report_dataset.get("selected_events")
+    )
     if not isinstance(selected_payloads, list):
         raise ReportContractError("selected_events_invalid")
     for payload in selected_payloads:
         selected = _mapping(payload, "selected_event_invalid")
         selected_attribution = _optional_mapping(selected.get("attribution"))
         _reject_automatic_confirmation(selected_attribution)
-    selection = _optional_mapping(report_dataset.get("event_selection"))
-    selected_ids = set(_string_list(selection.get("selected_event_ids")))
+    selection = _optional_mapping(
+        report_dataset.get("disturbance_selection", report_dataset.get("event_selection"))
+    )
+    selected_ids = set(
+        _string_list(selection.get("selected_candidate_ids", selection.get("selected_event_ids")))
+    )
     if not selected_ids:
         selected_ids = {
             _contract_required_string(
-                _mapping(payload, "selected_event_invalid").get("event_id"),
-                "event_id_invalid",
+                _mapping(payload, "selected_event_invalid").get(
+                    "candidate_id", _mapping(payload, "selected_event_invalid").get("event_id")
+                ),
+                "candidate_id_invalid",
             )
             for payload in selected_payloads
         }
 
     disturbances = _indexed_events(disturbance_summary, "disturbance_events_invalid")
-    persistence = _indexed_events(persistence_summary, "persistence_events_invalid")
-    attributions = _event_list(attribution_summary, "attribution_events_invalid")
+    persistence = (
+        _indexed_events(persistence_summary, "persistence_events_invalid")
+        if persistence_summary
+        else {}
+    )
+    attributions = (
+        _attribution_records(attribution_summary, "attribution_records_invalid")
+        if attribution_summary
+        else [_unattributed_candidate(item) for item in disturbances.values()]
+    )
     event_geometries = _feature_geometries(disturbance_spatial)
-    agricultural_geometries = _agricultural_geometries(attribution_spatial)
+    attribution_geometries = _feature_geometries(attribution_spatial or {"features": []})
+    agricultural_geometries = _agricultural_geometries(attribution_spatial or {"features": []})
     result: list[EventSummary] = []
     for ordinal, attribution in enumerate(attributions, start=1):
         _reject_automatic_confirmation(attribution)
-        event_id = _contract_required_string(attribution.get("event_id"), "event_id_invalid")
-        disturbance = disturbances.get(event_id, {})
-        persistent = persistence.get(event_id, {})
+        candidate_id = _attribution_candidate_id(attribution)
+        record_type = _attribution_record_type(attribution)
+        interpretation_level: Literal["candidate_episode", "event"] = (
+            "event" if record_type == "conversion_likely_event" else "candidate_episode"
+        )
+        interpretation_status = _attribution_interpretation_status(attribution)
+        event_id = candidate_id if record_type == "conversion_likely_event" else None
+        disturbance = disturbances.get(candidate_id, {})
+        persistent = persistence.get(candidate_id, {})
         sensitivity = persistent.get("sensitivity")
         sensitivity_areas = (
             [
@@ -535,16 +680,45 @@ def _events(
                 ]
             )
         )
+        candidate_geometry = _geometry_rings(attribution.get("candidate_geometry")) or (
+            event_geometries.get(candidate_id, ())
+        )
+        likely_geometry = _geometry_rings(
+            attribution.get("likely_conversion_geometry")
+        ) or attribution_geometries.get(candidate_id, ())
+        display_geometry = (
+            likely_geometry
+            if record_type == "conversion_likely_event" and likely_geometry
+            else candidate_geometry
+        )
+        evidence_gates = [
+            EvidenceGate(key=key, passed=_required_bool(gates.get(key), "gate_invalid"))
+            for key in _GATE_KEYS
+        ]
+        if _OPERATIONAL_AREA_GATE in gates:
+            evidence_gates.append(
+                EvidenceGate(
+                    key=_OPERATIONAL_AREA_GATE,
+                    passed=_required_bool(gates.get(_OPERATIONAL_AREA_GATE), "gate_invalid"),
+                )
+            )
         result.append(
             EventSummary(
                 ordinal=ordinal,
+                candidate_id=candidate_id,
                 event_id=event_id,
-                selected_for_detail=event_id in selected_ids,
+                record_type=record_type,
+                interpretation_level=interpretation_level,
+                interpretation_status=interpretation_status,
+                selected_for_detail=candidate_id in selected_ids,
                 automatic_status=_contract_required_string(
                     attribution.get("automatic_status"), "automatic_status_invalid"
                 ),
                 area_ha=_required_float(
-                    attribution.get("area_ha", disturbance.get("area_ha")),
+                    attribution.get(
+                        "candidate_area_ha",
+                        attribution.get("area_ha", disturbance.get("area_ha")),
+                    ),
                     "event_area_invalid",
                 ),
                 area_threshold_ha=_required_float(
@@ -557,6 +731,13 @@ def _events(
                 likely_conversion_area_ha=_required_float(
                     attribution.get("likely_conversion_area_ha", 0.0),
                     "likely_conversion_area_invalid",
+                ),
+                conjunctive_conversion_evidence_area_ha=_required_float(
+                    attribution.get(
+                        "conjunctive_conversion_evidence_area_ha",
+                        attribution.get("likely_conversion_area_ha", 0.0),
+                    ),
+                    "conjunctive_conversion_evidence_area_invalid",
                 ),
                 estimated_onset_period_id=_contract_required_string(
                     attribution.get(
@@ -610,10 +791,7 @@ def _events(
                 pixel_count=_optional_positive_int(
                     disturbance.get("pixel_count"), "pixel_count_invalid"
                 ),
-                gates=tuple(
-                    EvidenceGate(key=key, passed=_required_bool(gates.get(key), "gate_invalid"))
-                    for key in _GATE_KEYS
-                ),
+                gates=tuple(evidence_gates),
                 forest_trajectory=tuple(
                     AnnualForestPoint(
                         year=_required_int(year, "trajectory_year_invalid"),
@@ -622,13 +800,31 @@ def _events(
                     for year, fraction in zip(years, fractions, strict=True)
                 ),
                 quality_flags=quality_flags,
-                event_geometry=event_geometries.get(event_id, ()),
-                agricultural_geometry=agricultural_geometries.get(event_id, ()),
+                event_geometry=display_geometry,
+                candidate_geometry=candidate_geometry,
+                agricultural_geometry=agricultural_geometries.get(candidate_id, ()),
             )
         )
-    if not result:
-        raise ReportContractError("attribution_events_invalid")
+    # Un run limpio sin registros de atribución es un resultado válido: el informe
+    # debe poder documentar la ausencia de perturbaciones detectadas (low_risk).
     return tuple(result)
+
+
+def _unattributed_candidate(disturbance: Mapping[str, Any]) -> dict[str, Any]:
+    candidate_id = disturbance.get("candidate_id", disturbance.get("event_id"))
+    return {
+        "candidate_id": candidate_id,
+        "record_type": "disturbance_candidate",
+        "interpretation_status": "candidate_only",
+        "automatic_status": "review_required",
+        "area_ha": disturbance.get("area_ha"),
+        "estimated_onset_period_id": disturbance.get("estimated_onset_period_id"),
+        "post_change_use": "unknown",
+        "human_review_required": True,
+        "gates": {key: False for key in _GATE_KEYS},
+        "trajectory": {"years": [], "forest_fraction": []},
+        "quality_flags": ["post_change_attribution_unavailable"],
+    }
 
 
 def _reject_automatic_confirmation(attribution: dict[str, Any]) -> None:
@@ -644,6 +840,91 @@ def _event_list(payload: dict[str, Any], code: str) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         raise ReportContractError(code)
     return [_mapping(event, code) for event in events]
+
+
+def _attribution_records(payload: dict[str, Any], code: str) -> list[dict[str, Any]]:
+    """Lee el inventario neutral v4 y conserva compatibilidad con contratos previos."""
+    records = payload.get("records")
+    if records is None:
+        records = payload.get("events")
+    if not isinstance(records, list):
+        raise ReportContractError(code)
+    return [_mapping(record, code) for record in records]
+
+
+def _attribution_candidate_id(attribution: Mapping[str, Any]) -> str:
+    value = attribution.get("candidate_id", attribution.get("event_id"))
+    return _contract_required_string(value, "candidate_id_invalid")
+
+
+def _attribution_record_type(
+    attribution: Mapping[str, Any],
+) -> Literal["disturbance_candidate", "conversion_likely_event"]:
+    value = attribution.get("record_type")
+    interpretation_status = attribution.get("interpretation_status")
+    automatic_status = attribution.get("automatic_status")
+    if value == "disturbance_candidate":
+        return "disturbance_candidate"
+    if value == "conversion_likely_event":
+        if interpretation_status not in {None, "conversion_likely"}:
+            return "disturbance_candidate"
+        if automatic_status not in {None, "conversion_likely"}:
+            return "disturbance_candidate"
+        return "conversion_likely_event"
+    return (
+        "conversion_likely_event"
+        if automatic_status == "conversion_likely"
+        and interpretation_status in {None, "conversion_likely"}
+        else "disturbance_candidate"
+    )
+
+
+def _attribution_interpretation_status(
+    attribution: Mapping[str, Any],
+) -> Literal[
+    "candidate_only",
+    "temporary_or_recovered",
+    "persistent_unattributed",
+    "insufficient_data",
+    "subthreshold_conversion_evidence",
+    "conversion_likely",
+]:
+    value = attribution.get("interpretation_status")
+    allowed = {
+        "candidate_only",
+        "temporary_or_recovered",
+        "persistent_unattributed",
+        "insufficient_data",
+        "subthreshold_conversion_evidence",
+        "conversion_likely",
+    }
+    is_conversion_event = _attribution_record_type(attribution) == "conversion_likely_event"
+    if value in allowed and (value != "conversion_likely" or is_conversion_event):
+        return cast(
+            Literal[
+                "candidate_only",
+                "temporary_or_recovered",
+                "persistent_unattributed",
+                "insufficient_data",
+                "subthreshold_conversion_evidence",
+                "conversion_likely",
+            ],
+            value,
+        )
+    if attribution.get("automatic_status") == "conversion_likely" and is_conversion_event:
+        return "conversion_likely"
+    if attribution.get("automatic_status") == "insufficient_data":
+        return "insufficient_data"
+    if attribution.get("post_change_use") in {
+        "forest_recovery",
+        "managed_harvest",
+        "temporary_disturbance",
+    }:
+        return "temporary_or_recovered"
+    gates = attribution.get("gates")
+    if isinstance(gates, Mapping) and gates.get("persistent_change") is True:
+        return "persistent_unattributed"
+    return "candidate_only"
 
 
 def _indexed_events(payload: dict[str, Any], code: str) -> dict[str, dict[str, Any]]:
@@ -664,8 +945,11 @@ def _feature_geometries(
     for feature in features:
         item = _mapping(feature, "spatial_feature_invalid")
         properties = _mapping(item.get("properties"), "spatial_properties_invalid")
-        event_id = _contract_required_string(properties.get("event_id"), "event_id_invalid")
-        result[event_id] = _geometry_rings(item.get("geometry"))
+        candidate_id = _contract_required_string(
+            properties.get("candidate_id", properties.get("event_id")),
+            "candidate_id_invalid",
+        )
+        result[candidate_id] = _geometry_rings(item.get("geometry"))
     return result
 
 
@@ -679,7 +963,10 @@ def _agricultural_geometries(
     for feature in features:
         item = _mapping(feature, "attribution_spatial_feature_invalid")
         properties = _mapping(item.get("properties"), "attribution_spatial_properties_invalid")
-        event_id = _contract_required_string(properties.get("event_id"), "event_id_invalid")
+        event_id = _contract_required_string(
+            properties.get("candidate_id", properties.get("event_id")),
+            "event_id_invalid",
+        )
         evidence = properties.get("agricultural_use_evidence")
         rings: list[tuple[tuple[float, float], ...]] = []
         if isinstance(evidence, list):

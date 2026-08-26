@@ -63,10 +63,34 @@ def test_baseline_uncertainty_is_propagated_without_inventing_probability() -> N
         np.array([[False, True, True]]),
     )
     np.testing.assert_array_equal(
-        result.quality_flags_bitmask,
-        np.array([[0, baseline_uncertain_bit, baseline_uncertain_bit]], dtype=np.uint16),
+        (result.quality_flags_bitmask & baseline_uncertain_bit) > 0,
+        np.array([[False, True, True]]),
     )
     assert not hasattr(result, "probability")
+
+
+def test_evaluable_domain_boundary_is_flagged_without_excluding_interior() -> None:
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    consensus = np.zeros((5, 5), dtype=np.uint8)
+    consensus[1:4, 1:4] = 1
+
+    result = build_forest_evaluation_domain(
+        source_count=np.full((5, 5), 2, dtype=np.uint8),
+        consensus_forest=consensus,
+        disagreement=np.zeros((5, 5), dtype=np.uint8),
+        config=config.disturbance_detection,
+    )
+
+    edge_bit = np.uint16(1 << DisturbanceQualityBit.EDGE_PIXEL)
+    expected_edge = np.zeros((5, 5), dtype=np.bool_)
+    expected_edge[1:4, 1:4] = True
+    expected_edge[2, 2] = False
+    np.testing.assert_array_equal(
+        (result.quality_flags_bitmask & edge_bit) > 0,
+        expected_edge,
+    )
+    assert result.evaluable[2, 2]
+    assert not (result.quality_flags_bitmask[2, 2] & edge_bit)
 
 
 def test_domain_does_not_mutate_baseline_inputs() -> None:

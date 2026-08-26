@@ -64,6 +64,8 @@ def _diagnostics(
     return RobustSeasonalDiagnostics(
         reference_center=np.zeros(shaped.shape, dtype=np.float64),
         robust_scale=np.ones(shaped.shape, dtype=np.float64),
+        scale_floor=np.ones(shaped.shape, dtype=np.float64),
+        standardization_scale=np.ones(shaped.shape, dtype=np.float64),
         raw_directional_delta=shaped.copy(),
         standardized_magnitude=shaped,
         reference_valid_count=np.full(shaped.shape, 3, dtype=np.uint16),
@@ -101,7 +103,7 @@ def test_default_rule_is_explicit_versioned_and_conservative() -> None:
     detection = load_config(PROJECT_ROOT / "configs" / "default.yml").disturbance_detection
     robust = detection.robust_seasonal
 
-    assert robust.schema_version == "1.1.0"
+    assert robust.schema_version == "1.2.0"
     assert robust.standardized_magnitude_threshold == 3.0
     assert robust.minimum_index_support_count == 2
     assert robust.minimum_consecutive_signal_periods == 2

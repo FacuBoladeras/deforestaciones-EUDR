@@ -1,15 +1,18 @@
-"""Adquisición condicional y ejecución secuencial de jobs locales."""
+"""Adquisición con lease y ejecución observable de jobs locales."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from deforestation_jobs.models import AnalysisJob, JobStatus
@@ -19,12 +22,35 @@ from deforestation_pipeline.complete_analysis import (
     CompleteAnalysisRequest,
     run_complete_analysis,
 )
-from deforestation_reporting import load_report_package, render_technical_report
-from deforestation_worker.package import create_evidence_package, publish_curated_results
+from deforestation_reporting import (
+    ReportContractError,
+    ReportIntegrityError,
+    load_report_package,
+    render_technical_report,
+)
+from deforestation_worker.package import (
+    create_evidence_package,
+    publish_curated_results,
+    retry_filesystem_operation,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+LOGGER = logging.getLogger("deforestation_worker")
 AnalysisRunner = Callable[..., Path]
 ReportRenderer = Callable[[Path, Path, Path], Path]
+_Result = TypeVar("_Result")
+
+
+class _LeaseLostError(RuntimeError):
+    """El intento dejó de ser dueño del job y debe abandonar sin publicar."""
+
+
+@dataclass(frozen=True, slots=True)
+class _StageFailure(Exception):
+    stage: str
+    safe_error_code: str
+    retryable: bool
+    internal_error_class: str | None = None
 
 
 def render_client_report(result_root: Path, output_path: Path, input_path: Path) -> Path:
@@ -42,6 +68,18 @@ class WorkerSettings:
     credentials_path: Path | None
     poll_interval_seconds: float = 2.0
     worker_id: str = "local-worker-1"
+    lease_duration_seconds: float = 300.0
+    heartbeat_interval_seconds: float = 30.0
+    max_attempts: int = 3
+    filesystem_retry_attempts: int = 5
+
+    def __post_init__(self) -> None:
+        if self.lease_duration_seconds <= 0:
+            raise ValueError("worker_lease_duration_invalid")
+        if not 0 < self.heartbeat_interval_seconds < self.lease_duration_seconds:
+            raise ValueError("worker_heartbeat_interval_invalid")
+        if self.max_attempts < 1 or self.filesystem_retry_attempts < 1:
+            raise ValueError("worker_attempt_limit_invalid")
 
     @classmethod
     def from_environment(cls) -> WorkerSettings:
@@ -77,11 +115,90 @@ class WorkerSettings:
             credentials_path=credentials,
             poll_interval_seconds=float(os.environ.get("DEFORESTATION_WORKER_POLL_SECONDS", "2")),
             worker_id=os.environ.get("DEFORESTATION_WORKER_ID", "local-worker-1"),
+            lease_duration_seconds=float(
+                os.environ.get("DEFORESTATION_WORKER_LEASE_SECONDS", "300")
+            ),
+            heartbeat_interval_seconds=float(
+                os.environ.get("DEFORESTATION_WORKER_HEARTBEAT_SECONDS", "30")
+            ),
+            max_attempts=int(os.environ.get("DEFORESTATION_WORKER_MAX_ATTEMPTS", "3")),
+            filesystem_retry_attempts=int(
+                os.environ.get("DEFORESTATION_WORKER_FILESYSTEM_RETRIES", "5")
+            ),
         )
 
 
+class _LeaseGuard:
+    """Renueva el lease durante llamadas bloqueantes y detecta fencing."""
+
+    def __init__(
+        self,
+        repository: SQLiteJobRepository,
+        job: AnalysisJob,
+        settings: WorkerSettings,
+        stage: str,
+    ) -> None:
+        if job.lease_owner_id is None:
+            raise ValueError("claimed_job_without_lease_owner")
+        self.repository = repository
+        self.job = job
+        self.settings = settings
+        self.stage = stage
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"worker-heartbeat-{job.analysis_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.settings.heartbeat_interval_seconds * 2)
+
+    def set_stage(self, stage: str) -> None:
+        with self._lock:
+            self.stage = stage
+        self._heartbeat(stage)
+
+    def ensure_owned(self) -> None:
+        if self._lost.is_set():
+            raise _LeaseLostError("worker_attempt_fenced")
+        with self._lock:
+            stage = self.stage
+        self._heartbeat(stage)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.settings.heartbeat_interval_seconds):
+            with self._lock:
+                stage = self.stage
+            try:
+                self._heartbeat(stage)
+            except _LeaseLostError:
+                self._lost.set()
+                return
+
+    def _heartbeat(self, stage: str) -> None:
+        try:
+            self.repository.heartbeat(
+                self.job.analysis_id,
+                lease_owner_id=self.job.lease_owner_id or "",
+                attempt=self.job.attempt,
+                stage=stage,
+                lease_duration=timedelta(seconds=self.settings.lease_duration_seconds),
+            )
+        except InvalidJobTransitionError as error:
+            self._lost.set()
+            raise _LeaseLostError("worker_attempt_fenced") from error
+
+
 class AnalysisWorker:
-    """Un consumidor; la concurrencia nace agregando procesos deliberadamente."""
+    """Consumidor local con ownership explícito y postproceso reanudable."""
 
     def __init__(
         self,
@@ -104,38 +221,65 @@ class AnalysisWorker:
         return self.repository.recover_active_jobs()
 
     def run_once(self) -> bool:
-        job = self.repository.claim_next(self.settings.worker_id)
+        job = self.repository.claim_next(
+            self.settings.worker_id,
+            lease_duration=timedelta(seconds=self.settings.lease_duration_seconds),
+            max_attempts=self.settings.max_attempts,
+        )
         if job is None:
             return False
         return self.process_claimed(job)
 
     def process_claimed(self, job: AnalysisJob) -> bool:
-        """Procesa una adquisición existente y respeta cancelaciones pre-ejecución."""
+        """Procesa sólo mientras conserva owner+attempt; nunca completa un intento viejo."""
         current = self.repository.get(job.analysis_id)
         if current is not None and current.status is JobStatus.CANCELLING:
-            self.repository.mark_cancelled(job.analysis_id)
+            self._mark_cancelled(job)
             return True
+        guard: _LeaseGuard | None = None
         try:
+            resume = job.output_prefix is not None
             request = self._build_request(job)
+            running_stage = job.stage if resume else "full_pipeline"
             try:
                 self.repository.transition(
                     job.analysis_id,
                     expected=JobStatus.VALIDATING,
                     target=JobStatus.RUNNING,
-                    stage="full_pipeline",
+                    stage=running_stage,
+                    lease_owner_id=job.lease_owner_id or "",
+                    attempt=job.attempt,
                 )
             except InvalidJobTransitionError:
                 raced = self.repository.get(job.analysis_id)
                 if raced is not None and raced.status is JobStatus.CANCELLING:
-                    self.repository.mark_cancelled(job.analysis_id)
+                    self._mark_cancelled(job)
                     return True
-                raise
-            result = self.runner(request, analysis_id=UUID(job.analysis_id))
-            self._publish_result(job, result)
-        except CompleteAnalysisError as error:
-            self._handle_complete_analysis_error(job, error)
+                raise _LeaseLostError("worker_attempt_fenced") from None
+            guard = _LeaseGuard(self.repository, job, self.settings, running_stage)
+            guard.start()
+            if resume:
+                result, public_status = self._load_recorded_science(job)
+            else:
+                result, public_status = self._run_science(job, request, guard)
+                job = self._record_science(job, result, public_status)
+            self._check_cancellation(job, guard)
+            self._postprocess(job, result, public_status, guard)
+        except _StageFailure as failure:
+            if guard is not None:
+                guard.stop()
+            self._record_stage_failure(job, failure)
+        except _LeaseLostError:
+            if guard is not None:
+                guard.stop()
+            self._log("worker_attempt_fenced", job, stage=job.stage)
         except Exception:
-            self.repository.fail(job.analysis_id, safe_error_code="analysis_execution_failed")
+            if guard is not None:
+                guard.stop()
+            self._record_pipeline_failure(job)
+        else:
+            if guard is not None:
+                guard.stop()
         return True
 
     def run_forever(self) -> None:
@@ -143,6 +287,317 @@ class AnalysisWorker:
         while True:
             if not self.run_once():
                 time.sleep(self.settings.poll_interval_seconds)
+
+    def _run_science(
+        self,
+        job: AnalysisJob,
+        request: CompleteAnalysisRequest,
+        guard: _LeaseGuard,
+    ) -> tuple[Path, JobStatus]:
+        try:
+            result = self._run_stage(
+                job,
+                guard,
+                "full_pipeline",
+                lambda: self.runner(request, analysis_id=UUID(job.analysis_id)),
+            )
+        except CompleteAnalysisError as error:
+            result = error.failure_path
+        try:
+            return self._validated_scientific_result(result)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise _StageFailure("full_pipeline", "pipeline_execution_failed", False) from error
+
+    def _record_science(
+        self,
+        job: AnalysisJob,
+        result: Path,
+        public_status: JobStatus,
+    ) -> AnalysisJob:
+        output_root = self.settings.output_root.resolve()
+        manifest_path = result / "run_manifest.json"
+        try:
+            return self.repository.record_scientific_result(
+                job.analysis_id,
+                output_prefix=result.relative_to(output_root).as_posix(),
+                parent_manifest_sha256=_sha256(manifest_path),
+                scientific_status=public_status,
+                lease_owner_id=job.lease_owner_id or "",
+                attempt=job.attempt,
+            )
+        except InvalidJobTransitionError as error:
+            raise _LeaseLostError("worker_attempt_fenced") from error
+
+    def _load_recorded_science(self, job: AnalysisJob) -> tuple[Path, JobStatus]:
+        if (
+            job.output_prefix is None
+            or job.parent_manifest_sha256 is None
+            or job.scientific_status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}
+        ):
+            raise _StageFailure(job.stage, "report_contract_invalid", False)
+        result = _safe_path(self.settings.output_root, job.output_prefix)
+        try:
+            validated, status = self._validated_scientific_result(result)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise _StageFailure(job.stage, "report_contract_invalid", False) from error
+        if _sha256(validated / "run_manifest.json") != job.parent_manifest_sha256:
+            raise _StageFailure(job.stage, "report_contract_invalid", False)
+        return validated, status
+
+    def _validated_scientific_result(self, result: Path) -> tuple[Path, JobStatus]:
+        resolved_result = result.resolve()
+        output_root = self.settings.output_root.resolve()
+        if not resolved_result.is_relative_to(output_root):
+            raise ValueError("analysis_output_outside_root")
+        manifest = _load_manifest(resolved_result / "run_manifest.json")
+        status_value = manifest.get("overall_status")
+        if status_value not in {"complete", "partial"}:
+            raise ValueError("analysis_manifest_status_invalid")
+        status = JobStatus.COMPLETED if status_value == "complete" else JobStatus.PARTIAL
+        return resolved_result, status
+
+    def _postprocess(
+        self,
+        job: AnalysisJob,
+        result: Path,
+        public_status: JobStatus,
+        guard: _LeaseGuard,
+    ) -> None:
+        client_report = self._render_report(job, result, guard)
+        self._check_cancellation(job, guard)
+        published = self._publish(job, result, client_report, guard)
+        self._check_cancellation(job, guard)
+        self._package(job, result, client_report, guard)
+        self._check_cancellation(job, guard)
+        report_dataset = published / "report_assets" / "report_dataset.json"
+        guard.ensure_owned()
+        try:
+            self.repository.complete(
+                job.analysis_id,
+                status=public_status,
+                output_prefix=job.output_prefix or result.name,
+                parent_manifest_sha256=job.parent_manifest_sha256
+                or _sha256(result / "run_manifest.json"),
+                report_dataset_sha256=(
+                    _sha256(report_dataset) if report_dataset.is_file() else None
+                ),
+                lease_owner_id=job.lease_owner_id or "",
+                attempt=job.attempt,
+            )
+        except InvalidJobTransitionError as error:
+            raise _LeaseLostError("worker_attempt_fenced") from error
+
+    def _render_report(self, job: AnalysisJob, result: Path, guard: _LeaseGuard) -> Path:
+        durable = _client_report_path(self.settings.storage_root, job.analysis_id, job.attempt)
+
+        def render() -> Path:
+            if _valid_pdf(durable):
+                return durable
+            attempt_path = durable.with_name(".client-report.tmp.pdf")
+            attempt_path.parent.mkdir(parents=True, exist_ok=True)
+            if attempt_path.exists():
+                retry_filesystem_operation(
+                    lambda: attempt_path.unlink(),
+                    attempts=self.settings.filesystem_retry_attempts,
+                )
+            input_path = _safe_path(self.settings.storage_root, job.input_object_key)
+            rendered = retry_filesystem_operation(
+                lambda: self.report_renderer(result, attempt_path, input_path),
+                attempts=self.settings.filesystem_retry_attempts,
+            ).resolve()
+            if rendered != attempt_path.resolve() or not _valid_pdf(rendered):
+                raise RuntimeError("client_report_output_invalid")
+            guard.ensure_owned()
+            retry_filesystem_operation(
+                lambda: rendered.replace(durable),
+                attempts=self.settings.filesystem_retry_attempts,
+            )
+            return durable
+
+        try:
+            return self._run_stage(job, guard, "rendering_pdf", render)
+        except ReportContractError as error:
+            raise _StageFailure(
+                "rendering_pdf",
+                "report_contract_invalid",
+                False,
+                type(error).__name__,
+            ) from error
+        except ReportIntegrityError as error:
+            retryable = _caused_by_os_error(error)
+            raise _StageFailure(
+                "rendering_pdf",
+                "report_integrity_io_failed" if retryable else "report_contract_invalid",
+                retryable,
+                type(error).__name__,
+            ) from error
+        except ValueError as error:
+            raise _StageFailure(
+                "rendering_pdf", "report_contract_invalid", False, type(error).__name__
+            ) from error
+        except _LeaseLostError:
+            raise
+        except Exception as error:
+            raise _StageFailure(
+                "rendering_pdf", "pdf_render_failed", True, type(error).__name__
+            ) from error
+
+    def _publish(
+        self,
+        job: AnalysisJob,
+        result: Path,
+        client_report: Path,
+        guard: _LeaseGuard,
+    ) -> Path:
+        try:
+            published = self._run_stage(
+                job,
+                guard,
+                "publishing_results",
+                lambda: publish_curated_results(
+                    result,
+                    self.settings.storage_root,
+                    job.analysis_id,
+                    client_report=client_report,
+                    attempt=job.attempt,
+                    before_commit=guard.ensure_owned,
+                ),
+            )
+        except ValueError as error:
+            raise _StageFailure("publishing_results", "report_contract_invalid", False) from error
+        except _LeaseLostError:
+            raise
+        except OSError as error:
+            raise _StageFailure("publishing_results", "results_publish_failed", True) from error
+        if published is None:
+            raise _StageFailure("publishing_results", "report_contract_invalid", False)
+        return published
+
+    def _package(
+        self,
+        job: AnalysisJob,
+        result: Path,
+        client_report: Path,
+        guard: _LeaseGuard,
+    ) -> Path:
+        try:
+            package = self._run_stage(
+                job,
+                guard,
+                "packaging",
+                lambda: create_evidence_package(
+                    result,
+                    self.settings.storage_root,
+                    job.analysis_id,
+                    client_report=client_report,
+                    attempt=job.attempt,
+                    before_commit=guard.ensure_owned,
+                ),
+            )
+        except ValueError as error:
+            raise _StageFailure("packaging", "report_contract_invalid", False) from error
+        except _LeaseLostError:
+            raise
+        except OSError as error:
+            raise _StageFailure("packaging", "evidence_package_failed", True) from error
+        if package is None:
+            raise _StageFailure("packaging", "report_contract_invalid", False)
+        return package
+
+    def _run_stage(
+        self,
+        job: AnalysisJob,
+        guard: _LeaseGuard,
+        stage: str,
+        operation: Callable[[], _Result],
+    ) -> _Result:
+        guard.set_stage(stage)
+        started = time.monotonic()
+        self._log("worker_stage_started", job, stage=stage)
+        try:
+            result = operation()
+            guard.ensure_owned()
+        except Exception as error:
+            self._log(
+                "worker_stage_aborted",
+                job,
+                stage=stage,
+                duration_seconds=time.monotonic() - started,
+                error_class=type(error).__name__,
+            )
+            raise
+        self._log(
+            "worker_stage_completed",
+            job,
+            stage=stage,
+            duration_seconds=time.monotonic() - started,
+        )
+        return result
+
+    def _check_cancellation(self, job: AnalysisJob, guard: _LeaseGuard) -> None:
+        guard.ensure_owned()
+        current = self.repository.get(job.analysis_id)
+        if current is None:
+            raise _LeaseLostError("worker_attempt_fenced")
+        if current.status is JobStatus.CANCELLING:
+            guard.stop()
+            self._mark_cancelled(job)
+            raise _LeaseLostError("worker_attempt_cancelled")
+
+    def _mark_cancelled(self, job: AnalysisJob) -> None:
+        try:
+            self.repository.mark_cancelled(
+                job.analysis_id,
+                lease_owner_id=job.lease_owner_id or "",
+                attempt=job.attempt,
+            )
+        except InvalidJobTransitionError:
+            self._log("worker_attempt_fenced", job, stage="cancelled")
+
+    def _record_pipeline_failure(self, job: AnalysisJob) -> None:
+        self._log(
+            "worker_stage_failed",
+            job,
+            stage="full_pipeline",
+            safe_error_code="pipeline_execution_failed",
+        )
+        try:
+            self.repository.fail(
+                job.analysis_id,
+                safe_error_code="pipeline_execution_failed",
+                lease_owner_id=job.lease_owner_id or "",
+                attempt=job.attempt,
+            )
+        except InvalidJobTransitionError:
+            self._log("worker_attempt_fenced", job, stage="full_pipeline")
+
+    def _record_stage_failure(self, job: AnalysisJob, failure: _StageFailure) -> None:
+        self._log(
+            "worker_stage_failed",
+            job,
+            stage=failure.stage,
+            safe_error_code=failure.safe_error_code,
+            error_class=failure.internal_error_class,
+        )
+        try:
+            if failure.retryable:
+                self.repository.retry_postprocessing(
+                    job.analysis_id,
+                    safe_error_code=failure.safe_error_code,
+                    failed_stage=failure.stage,
+                    lease_owner_id=job.lease_owner_id or "",
+                    attempt=job.attempt,
+                    max_attempts=self.settings.max_attempts,
+                )
+            else:
+                self.repository.fail(
+                    job.analysis_id,
+                    safe_error_code=failure.safe_error_code,
+                    lease_owner_id=job.lease_owner_id or "",
+                    attempt=job.attempt,
+                )
+        except InvalidJobTransitionError:
+            self._log("worker_attempt_fenced", job, stage=failure.stage)
 
     def _build_request(self, job: AnalysisJob) -> CompleteAnalysisRequest:
         input_path = _safe_path(self.settings.storage_root, job.input_object_key)
@@ -166,93 +621,70 @@ class AnalysisWorker:
             catalog_path=project / "data" / "catalog.yml",
             licenses_path=project / "data" / "licenses.yml",
             credentials_path=self.settings.credentials_path,
-            declared_land_use=job.declared_land_use,  # type: ignore[arg-type]
+            declared_land_use=cast(
+                Literal["unknown", "managed_forest_plantation"], job.declared_land_use
+            ),
             declared_context_source=job.declared_context_source,
         )
 
-    def _publish_result(self, job: AnalysisJob, result: Path) -> None:
-        analysis_id = job.analysis_id
-        resolved_result = result.resolve()
-        output_root = self.settings.output_root.resolve()
-        if not resolved_result.is_relative_to(output_root):
-            raise ValueError("analysis_output_outside_root")
-        manifest_path = resolved_result / "run_manifest.json"
-        manifest = _load_manifest(manifest_path)
-        status_value = manifest.get("overall_status")
-        if status_value not in {"complete", "partial"}:
-            raise ValueError("analysis_manifest_status_invalid")
-        public_status = JobStatus.COMPLETED if status_value == "complete" else JobStatus.PARTIAL
-        report_staging = _client_report_staging_path(self.settings.storage_root, analysis_id)
-        report_staging.parent.mkdir(parents=True, exist_ok=True)
-        report_staging.unlink(missing_ok=True)
-        input_path = _safe_path(self.settings.storage_root, job.input_object_key)
-        try:
-            client_report = self.report_renderer(
-                resolved_result,
-                report_staging,
-                input_path,
-            ).resolve()
-            if client_report != report_staging.resolve() or not client_report.is_file():
-                raise ValueError("client_report_output_invalid")
-            published = publish_curated_results(
-                resolved_result,
-                self.settings.storage_root,
-                analysis_id,
-                client_report=client_report,
-            )
-            package = create_evidence_package(
-                resolved_result,
-                self.settings.storage_root,
-                analysis_id,
-                client_report=client_report,
-            )
-        finally:
-            report_staging.unlink(missing_ok=True)
-        if published is None or package is None:
-            raise ValueError("analysis_report_assets_missing")
-        report_dataset = published / "report_assets" / "report_dataset.json"
-        self.repository.complete(
-            analysis_id,
-            status=public_status,
-            output_prefix=resolved_result.relative_to(output_root).as_posix(),
-            parent_manifest_sha256=_sha256(manifest_path),
-            report_dataset_sha256=_sha256(report_dataset) if report_dataset.is_file() else None,
+    def _log(
+        self,
+        event: str,
+        job: AnalysisJob,
+        *,
+        stage: str,
+        duration_seconds: float = 0.0,
+        safe_error_code: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        LOGGER.info(
+            event,
+            extra={
+                "analysis_id": job.analysis_id,
+                "attempt": job.attempt,
+                "stage": stage,
+                "duration_seconds": round(duration_seconds, 6),
+                "safe_error_code": safe_error_code,
+                "error_class": error_class,
+            },
         )
 
-    def _handle_complete_analysis_error(
-        self, job: AnalysisJob, error: CompleteAnalysisError
-    ) -> None:
-        analysis_id = job.analysis_id
-        try:
-            manifest = _load_manifest(error.failure_path / "run_manifest.json")
-        except (FileNotFoundError, ValueError, json.JSONDecodeError):
-            self.repository.fail(analysis_id, safe_error_code="analysis_execution_failed")
-            return
-        if manifest.get("overall_status") == "partial":
-            try:
-                self._publish_result(job, error.failure_path)
-            except Exception:
-                self.repository.fail(analysis_id, safe_error_code="analysis_execution_failed")
-        else:
-            self.repository.fail(analysis_id, safe_error_code="analysis_execution_failed")
 
-
-def _safe_path(storage_root: Path, object_key: str) -> Path:
-    root = storage_root.resolve()
+def _safe_path(root_value: Path, object_key: str) -> Path:
+    root = root_value.resolve()
     relative = Path(object_key)
     candidate = (root / relative).resolve()
     if relative.is_absolute() or ".." in relative.parts or not candidate.is_relative_to(root):
-        raise ValueError("analysis_input_object_key_unsafe")
+        raise ValueError("analysis_object_key_unsafe")
     return candidate
 
 
-def _client_report_staging_path(storage_root: Path, analysis_id: str) -> Path:
+def _client_report_path(storage_root: Path, analysis_id: str, attempt: int) -> Path:
     UUID(analysis_id)
     root = storage_root.resolve()
     analysis_root = (root / "analyses" / analysis_id).resolve()
     if not analysis_root.is_relative_to(root):  # pragma: no cover - UUID lo impide
         raise ValueError("analysis_id_unsafe")
-    return analysis_root / ".client-report.tmp.pdf"
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ValueError("worker_attempt_invalid")
+    return analysis_root / "postprocess" / f"attempt-{attempt}" / "client-report.pdf"
+
+
+def _valid_pdf(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 5 and path.read_bytes()[:5] == b"%PDF-"
+    except OSError:
+        return False
+
+
+def _caused_by_os_error(error: BaseException) -> bool:
+    """Detecta I/O transitorio envuelto sin inspeccionar ni publicar su mensaje."""
+    cause = error.__cause__
+    while cause is not None:
+        if isinstance(cause, OSError):
+            return True
+        cause = cause.__cause__
+    return False
 
 
 def _sha256(path: Path) -> str:

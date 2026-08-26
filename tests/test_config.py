@@ -107,7 +107,7 @@ def _disturbance_detection_payload(
     indices: tuple[str, ...] = ("NDVI", "NBR"),
 ) -> dict[str, Any]:
     return {
-        "schema_version": "1.4.0",
+        "schema_version": "1.5.0",
         "reference_history_start_date": "2017-01-01",
         "analysis_start_date": "2021-01-01",
         "minimum_baseline_source_count": 2,
@@ -117,12 +117,16 @@ def _disturbance_detection_payload(
             "ccdc_benchmark",
         ),
         "robust_seasonal": {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "minimum_reference_observations": 3,
             "mad_scale_constant": 1.4826,
             "vegetation_loss_direction": "decrease_is_positive",
             "reference_comparison_policy": "same_season_only",
             "zero_scale_policy": "not_standardizable",
+            "scale_stabilization_policy": "seasonal_index_spatial_quantile_floor",
+            "scale_floor_quantile": 0.25,
+            "scale_floor_minimum_valid_pixels": 4,
+            "scale_floor_fallback_policy": "leave_local_scale_unchanged",
             "missing_data_policy": "preserve_nan_without_interpolation",
             "standardized_magnitude_threshold": 3.0,
             "minimum_index_support_count": 2,
@@ -194,12 +198,16 @@ def _disturbance_detection_payload(
 
 def _disturbance_events_payload() -> dict[str, Any]:
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.2.0",
         "connectivity": 8,
-        "area_threshold_ha": 0.5,
+        "visec_operational_event_area_threshold_ha": 0.5,
+        "visec_area_threshold_relation": "strictly_greater_than",
+        "area_threshold_basis": "candidate_footprint_reference_only_no_event_promotion",
         "area_method": "projected_grid_affine_determinant",
-        "area_threshold_policy": "flag_without_filtering",
-        "event_id_strategy": "grid_and_pixels_sha256_v1",
+        "area_threshold_policy": "preserve_all_candidates_publish_events_only_after_attribution",
+        "maximum_onset_period_difference": 1,
+        "missing_onset_policy": "separate_unknown_episode",
+        "event_id_strategy": "grid_temporal_episode_and_pixels_sha256_v2",
         "ordering_policy": "area_descending_then_event_id",
         "detail_figure_limit": 5,
         "detail_selection_policy": "largest_area_then_event_id",
@@ -219,6 +227,11 @@ def test_default_config_is_valid_and_deterministic() -> None:
     assert config.analysis.cutoff_date == date(2020, 12, 31)
     assert config.spatial.forest_definition_min_area_ha == 0.5
     assert config.spatial.preserve_subthreshold_events is True
+    assert config.disturbance_events.visec_operational_event_area_threshold_ha == 0.5
+    assert config.disturbance_events.visec_area_threshold_relation == "strictly_greater_than"
+    assert config.disturbance_events.area_threshold_basis == (
+        "candidate_footprint_reference_only_no_event_promotion"
+    )
     assert config.spatial.raster_crs_strategy == "local_utm"
     assert len(scientific_parameters_hash(resolved)) == 64
     assert len(execution_config_hash(resolved)) == 64
@@ -228,7 +241,7 @@ def test_default_config_declares_current_hls_raster_contract() -> None:
     """Los defaults operativos usados por el flujo HLS permanecen explícitos."""
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.11.0"
+    assert config.schema_version == "1.13.0"
     assert config.data.composition_interval == "annual"
     assert config.data.composition_reducer == "median"
     assert config.data.source_native_reflectance_scale_factor == 0.0001
@@ -239,6 +252,7 @@ def test_default_config_declares_current_hls_raster_contract() -> None:
     assert config.data.preserve_water is True
     assert config.spatial.raster_crs_strategy == "local_utm"
     assert OutputFormat.GEOTIFF in config.output.formats
+    assert config.output.artifact_profile == "lean"
     assert config.output.raster_nodata == -9999.0
     assert config.output.maximum_direct_download_bytes == 32_000_000
     assert config.output.maximum_direct_download_dimension == 10_000
@@ -250,7 +264,7 @@ def test_execution_hash_matches_golden_for_controlled_configuration() -> None:
     """El digest se calcula sobre el contenido validado, no sobre un YAML dado."""
     config = PipelineConfig.model_validate(
         {
-            "schema_version": "1.11.0",
+            "schema_version": "1.13.0",
             "analysis": {
                 "cutoff_date": "2020-12-31",
                 "benchmark_start_date": "2019-01-01",
@@ -284,6 +298,7 @@ def test_execution_hash_matches_golden_for_controlled_configuration() -> None:
             "disturbance_detection": _disturbance_detection_payload(),
             "disturbance_events": _disturbance_events_payload(),
             "output": {
+                "artifact_profile": "lean",
                 "directory": "outputs",
                 "formats": ["json", "png", "geotiff"],
                 "raster_nodata": -9999.0,
@@ -303,16 +318,16 @@ def test_execution_hash_matches_golden_for_controlled_configuration() -> None:
     resolved = resolve_run_config(config, date(2021, 1, 1))
 
     assert execution_config_hash(resolved) == (
-        "ef74ab215bab40eb4bac5b783bc2e36813cc9c480c7c7dc4358830ecb73e5bf6"
+        "db3986409777990f73bdaac42ad4a14c9f58aff36d6d4001d8e21b44e26d0772"
     )
 
 
-def test_event_area_threshold_must_match_spatial_forest_threshold() -> None:
-    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump()
-    payload["disturbance_events"]["area_threshold_ha"] = 0.6
+def test_forest_definition_and_visec_operational_thresholds_are_separate_contracts() -> None:
+    payload = load_config(PROJECT_ROOT / "configs" / "default.yml").model_dump(mode="json")
 
-    with pytest.raises(ValidationError, match="area_threshold_ha debe coincidir"):
-        PipelineConfig.model_validate(payload)
+    assert payload["spatial"]["forest_definition_min_area_ha"] == 0.5
+    assert payload["disturbance_events"]["visec_operational_event_area_threshold_ha"] == 0.5
+    assert "area_threshold_ha" not in payload["disturbance_events"]
 
 
 def test_execution_hash_ignores_yaml_key_order_and_surface_format(
@@ -324,7 +339,7 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
     first.write_text(
         "\n".join(
             [
-                'schema_version: "1.11.0"',
+                'schema_version: "1.13.0"',
                 "analysis:",
                 "  cutoff_date: 2020-12-31",
                 "  benchmark_start_date: 2019-01-01",
@@ -403,19 +418,23 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                 "  score_semantics: uncalibrated_binary_tree_vote_fraction",
                 "  automatic_final_assessment_allowed: false",
                 "disturbance_detection:",
-                '  schema_version: "1.4.0"',
+                '  schema_version: "1.5.0"',
                 "  reference_history_start_date: 2017-01-01",
                 "  analysis_start_date: 2021-01-01",
                 "  minimum_baseline_source_count: 2",
                 "  detection_indices: [NDVI, NBR]",
                 "  planned_detectors: [robust_seasonal_pre_post, ccdc_benchmark]",
                 "  robust_seasonal:",
-                '    schema_version: "1.1.0"',
+                '    schema_version: "1.2.0"',
                 "    minimum_reference_observations: 3",
                 "    mad_scale_constant: 1.4826",
                 "    vegetation_loss_direction: decrease_is_positive",
                 "    reference_comparison_policy: same_season_only",
                 "    zero_scale_policy: not_standardizable",
+                "    scale_stabilization_policy: seasonal_index_spatial_quantile_floor",
+                "    scale_floor_quantile: 0.25",
+                "    scale_floor_minimum_valid_pixels: 4",
+                "    scale_floor_fallback_policy: leave_local_scale_unchanged",
                 "    missing_data_policy: preserve_nan_without_interpolation",
                 "    standardized_magnitude_threshold: 3.0",
                 "    minimum_index_support_count: 2",
@@ -488,12 +507,19 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                 "  spatial_area_threshold_applied: false",
                 "  automatic_final_assessment_allowed: false",
                 "disturbance_events:",
-                '  schema_version: "1.0.0"',
+                '  schema_version: "1.2.0"',
                 "  connectivity: 8",
-                "  area_threshold_ha: 0.5",
+                "  visec_operational_event_area_threshold_ha: 0.5",
+                "  visec_area_threshold_relation: strictly_greater_than",
+                ("  area_threshold_basis: candidate_footprint_reference_only_no_event_promotion"),
                 "  area_method: projected_grid_affine_determinant",
-                "  area_threshold_policy: flag_without_filtering",
-                "  event_id_strategy: grid_and_pixels_sha256_v1",
+                (
+                    "  area_threshold_policy: preserve_all_candidates_publish_events_"
+                    "only_after_attribution"
+                ),
+                "  maximum_onset_period_difference: 1",
+                "  missing_onset_policy: separate_unknown_episode",
+                "  event_id_strategy: grid_temporal_episode_and_pixels_sha256_v2",
                 "  ordering_policy: area_descending_then_event_id",
                 "  detail_figure_limit: 5",
                 "  detail_selection_policy: largest_area_then_event_id",
@@ -506,6 +532,7 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                 "  automatic_final_assessment_allowed: false",
                 "  attribution_allowed: false",
                 "output:",
+                "  artifact_profile: lean",
                 "  directory: outputs",
                 "  formats: [json, geojson, png, geotiff]",
                 "  raster_nodata: -9999.0",
@@ -538,7 +565,7 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                     "maximum_direct_download_bytes: 32000000, "
                     "maximum_series_download_bytes: 256000000, "
                     "raster_nodata: -9999.0, formats: [json, geojson, png, geotiff], "
-                    "directory: outputs}"
+                    "artifact_profile: lean, directory: outputs}"
                 ),
                 (
                     "data: {indices: [NDVI, EVI2, NBR], preserve_water: true, "
@@ -589,17 +616,21 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                     "automatic_final_assessment_allowed: false}"
                 ),
                 (
-                    "disturbance_detection: {schema_version: 1.4.0, "
+                    "disturbance_detection: {schema_version: 1.5.0, "
                     "reference_history_start_date: 2017-01-01, "
                     "analysis_start_date: 2021-01-01, "
                     "minimum_baseline_source_count: 2, "
                     "detection_indices: [NDVI, NBR], "
                     "planned_detectors: [robust_seasonal_pre_post, ccdc_benchmark], "
-                    "robust_seasonal: {schema_version: 1.1.0, "
+                    "robust_seasonal: {schema_version: 1.2.0, "
                     "minimum_reference_observations: 3, mad_scale_constant: 1.4826, "
                     "vegetation_loss_direction: decrease_is_positive, "
                     "reference_comparison_policy: same_season_only, "
                     "zero_scale_policy: not_standardizable, "
+                    "scale_stabilization_policy: seasonal_index_spatial_quantile_floor, "
+                    "scale_floor_quantile: 0.25, "
+                    "scale_floor_minimum_valid_pixels: 4, "
+                    "scale_floor_fallback_policy: leave_local_scale_unchanged, "
                     "missing_data_policy: preserve_nan_without_interpolation, "
                     "standardized_magnitude_threshold: 3.0, "
                     "minimum_index_support_count: 2, "
@@ -655,11 +686,15 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                     "automatic_final_assessment_allowed: false}"
                 ),
                 (
-                    "disturbance_events: {schema_version: 1.0.0, connectivity: 8, "
-                    "area_threshold_ha: 0.5, area_threshold_policy: "
-                    "flag_without_filtering, area_method: "
-                    "projected_grid_affine_determinant, event_id_strategy: "
-                    "grid_and_pixels_sha256_v1, ordering_policy: "
+                    "disturbance_events: {schema_version: 1.2.0, connectivity: 8, "
+                    "visec_operational_event_area_threshold_ha: 0.5, "
+                    "visec_area_threshold_relation: strictly_greater_than, "
+                    "area_threshold_basis: candidate_footprint_reference_only_no_event_"
+                    "promotion, area_threshold_policy: preserve_all_candidates_publish_"
+                    "events_only_after_attribution, area_method: "
+                    "projected_grid_affine_determinant, maximum_onset_period_difference: 1, "
+                    "missing_onset_policy: separate_unknown_episode, event_id_strategy: "
+                    "grid_temporal_episode_and_pixels_sha256_v2, ordering_policy: "
                     "area_descending_then_event_id, detail_figure_limit: 5, "
                     "detail_selection_policy: largest_area_then_event_id, "
                     "comparison_policy: latest_pre_cutoff_same_season_vs_"
@@ -678,7 +713,7 @@ def test_execution_hash_ignores_yaml_key_order_and_surface_format(
                     "analysis: {random_seed: 7, analysis_end_date: 2021-01-01, "
                     "benchmark_start_date: 2019-01-01, cutoff_date: 2020-12-31}"
                 ),
-                'schema_version: "1.11.0"',
+                'schema_version: "1.13.0"',
                 "",
             ]
         ),

@@ -5,12 +5,36 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 import zipfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 _CLIENT_REPORT_PATH = "client_report/informe-tecnico.pdf"
 _CLIENT_REPORT_METADATA_PATH = "client_report/report.json"
+
+
+def retry_filesystem_operation[OperationResult](
+    operation: Callable[[], OperationResult],
+    *,
+    attempts: int = 5,
+    initial_delay_seconds: float = 0.05,
+) -> OperationResult:
+    """Reintenta bloqueos transitorios de Windows sin ocultar el error final."""
+    if attempts < 1 or initial_delay_seconds < 0:
+        raise ValueError("filesystem_retry_options_invalid")
+    delay = initial_delay_seconds
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except (PermissionError, OSError):
+            if attempt == attempts:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("filesystem_retry_unreachable")  # pragma: no cover
 
 
 def create_evidence_package(
@@ -19,6 +43,8 @@ def create_evidence_package(
     analysis_id: str,
     *,
     client_report: Path | None = None,
+    attempt: int = 1,
+    before_commit: Callable[[], None] | None = None,
 ) -> Path | None:
     """Crea un ZIP desde la allowlist; no modifica el bundle científico."""
     files = _verified_files(result_root)
@@ -26,27 +52,50 @@ def create_evidence_package(
         return None
     report_metadata = _client_report_metadata(client_report) if client_report else None
     analysis_root = _analysis_root(storage_root, analysis_id)
-    package = analysis_root / "downloads" / "evidence-package.zip"
-    package.parent.mkdir(parents=True, exist_ok=True)
-    temporary = package.with_suffix(".tmp")
-    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative, path in sorted(files.items()):
-            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o600 << 16
-            archive.writestr(info, path.read_bytes())
-        if client_report is not None and report_metadata is not None:
-            _write_zip_entry(archive, _CLIENT_REPORT_PATH, client_report.read_bytes())
-            _write_zip_entry(
-                archive,
-                _CLIENT_REPORT_METADATA_PATH,
-                json.dumps(report_metadata, sort_keys=True).encode("utf-8"),
-            )
-    temporary.replace(package)
-    _write_json_atomic(
-        package.with_suffix(".json"),
-        {"sha256": _sha256(package), "size_bytes": package.stat().st_size},
-    )
+    token = _attempt_token(attempt)
+    generation = analysis_root / "downloads" / f"attempt-{token}"
+    package = generation / "evidence-package.zip"
+    generation.mkdir(parents=True, exist_ok=True)
+    temporary = generation / ".evidence-package.tmp.zip"
+    metadata_path = package.with_suffix(".json")
+    metadata_temporary = generation / ".evidence-package.tmp.json"
+    fence = before_commit or _noop
+    try:
+        if temporary.exists():
+            retry_filesystem_operation(lambda: temporary.unlink())
+        if metadata_temporary.exists():
+            retry_filesystem_operation(lambda: metadata_temporary.unlink())
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for relative, path in sorted(files.items()):
+                info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o600 << 16
+                archive.writestr(info, path.read_bytes())
+            if client_report is not None and report_metadata is not None:
+                _write_zip_entry(archive, _CLIENT_REPORT_PATH, client_report.read_bytes())
+                _write_zip_entry(
+                    archive,
+                    _CLIENT_REPORT_METADATA_PATH,
+                    json.dumps(report_metadata, sort_keys=True).encode("utf-8"),
+                )
+        metadata_temporary.write_text(
+            json.dumps(
+                {"sha256": _sha256(temporary), "size_bytes": temporary.stat().st_size},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        fence()
+        retry_filesystem_operation(lambda: temporary.replace(package))
+        fence()
+        retry_filesystem_operation(lambda: metadata_temporary.replace(metadata_path))
+    except Exception:
+        for attempt_file in (temporary, metadata_temporary):
+            if attempt_file.exists():
+                retry_filesystem_operation(attempt_file.unlink)
+        if generation.exists() and not any(generation.iterdir()):
+            retry_filesystem_operation(generation.rmdir)
+        raise
     return package
 
 
@@ -56,6 +105,8 @@ def publish_curated_results(
     analysis_id: str,
     *,
     client_report: Path | None = None,
+    attempt: int = 1,
+    before_commit: Callable[[], None] | None = None,
 ) -> Path | None:
     """Publica una copia privada e inmutable del contrato curado y su allowlist."""
     files = _verified_files(result_root)
@@ -63,44 +114,38 @@ def publish_curated_results(
         return None
     report_metadata = _client_report_metadata(client_report) if client_report else None
     analysis_root = _analysis_root(storage_root, analysis_id)
-    destination = analysis_root / "results"
-    staging = analysis_root / ".results.tmp"
-    previous = analysis_root / ".results.previous"
-    analysis_root.mkdir(parents=True, exist_ok=True)
+    token = _attempt_token(attempt)
+    generations_root = analysis_root / "results"
+    destination = generations_root / f"attempt-{token}"
+    staging = generations_root / f".attempt-{token}.tmp"
+    fence = before_commit or _noop
+    generations_root.mkdir(parents=True, exist_ok=True)
     if staging.exists():
-        shutil.rmtree(staging)
-    if previous.exists():
-        if destination.exists():
-            shutil.rmtree(previous)
-        else:
-            previous.rename(destination)
+        retry_filesystem_operation(lambda: shutil.rmtree(staging))
+    if destination.exists():
+        raise ValueError("curated_result_generation_already_exists")
     try:
         for relative, source in sorted(files.items()):
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            retry_filesystem_operation(partial(shutil.copyfile, source, target))
             if _sha256(target) != _sha256(source):
                 raise ValueError("curated_result_copy_sha256_mismatch")
         if client_report is not None and report_metadata is not None:
             report_target = staging / _CLIENT_REPORT_PATH
             report_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(client_report, report_target)
+            retry_filesystem_operation(lambda: shutil.copyfile(client_report, report_target))
             if _sha256(report_target) != report_metadata["sha256"]:
                 raise ValueError("client_report_copy_sha256_mismatch")
             (staging / _CLIENT_REPORT_METADATA_PATH).write_text(
                 json.dumps(report_metadata, sort_keys=True),
                 encoding="utf-8",
             )
-        if destination.exists():
-            destination.rename(previous)
-        staging.rename(destination)
-        if previous.exists():
-            shutil.rmtree(previous, ignore_errors=True)
+        fence()
+        retry_filesystem_operation(lambda: staging.rename(destination))
     except Exception:
         if staging.exists():
-            shutil.rmtree(staging)
-        if previous.exists() and not destination.exists():
-            previous.rename(destination)
+            retry_filesystem_operation(lambda: shutil.rmtree(staging))
         raise
     return destination
 
@@ -158,6 +203,16 @@ def _analysis_root(storage_root: Path, analysis_id: str) -> Path:
     ):
         raise ValueError("analysis_id_unsafe")
     return candidate
+
+
+def _attempt_token(attempt: int) -> str:
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ValueError("worker_attempt_invalid")
+    return str(attempt)
+
+
+def _noop() -> None:
+    return None
 
 
 def _client_report_metadata(path: Path) -> dict[str, object]:
@@ -241,4 +296,4 @@ def _is_sha256(value: object) -> bool:
 def _write_json_atomic(path: Path, payload: object) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    retry_filesystem_operation(lambda: temporary.replace(path))

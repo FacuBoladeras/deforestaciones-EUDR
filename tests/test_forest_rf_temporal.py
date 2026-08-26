@@ -30,6 +30,7 @@ from deforestation_pipeline.forest_rf_temporal import (
     predict_forest_rf_locally,
     summarize_forest_year,
 )
+from deforestation_pipeline.raster_products import RasterDownloadError
 from deforestation_pipeline.schemas import RasterGridSpec, raster_grid_sha256
 from deforestation_pipeline.seasonal_feature_stack import (
     SeasonalFeatureStack,
@@ -202,7 +203,7 @@ def test_p0_candidate_comparison_requires_identical_stack_support() -> None:
 def test_temporal_output_contract_has_only_existing_bundle_roots_and_versions() -> None:
     paths = forest_rf_temporal_output_paths(years=(2020, 2021, 2022, 2023, 2024))
 
-    assert FOREST_RF_TEMPORAL_SCHEMA_VERSION == "1.1.0"
+    assert FOREST_RF_TEMPORAL_SCHEMA_VERSION == "1.2.0"
     assert len(paths) == len(set(paths.values()))
     assert paths["class_2024"] == "tiffs/evidence/rf_forest_class_2024.tif"
     assert paths["delta_2024"] == "tiffs/evidence/rf_forest_vote_delta_2024_vs_2020.tif"
@@ -305,8 +306,18 @@ def test_overview_figure_has_complete_discrete_legends_north_and_metric_scale(
 
 
 @pytest.mark.filterwarnings("error:Setting the shape on a NumPy array has been deprecated")
+@pytest.mark.parametrize(
+    "fallback_error_code",
+    [
+        None,
+        "direct_download_limit_exceeded",
+        "download_url_failed",
+        "remote_server_error",
+    ],
+)
 def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
     monkeypatch: pytest.MonkeyPatch,
+    fallback_error_code: str | None,
 ) -> None:
     import deforestation_pipeline.forest_rf_temporal as temporal
 
@@ -320,10 +331,14 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
         def __init__(self) -> None:
             self.selections: list[tuple[str, ...]] = []
 
-        def select(self, names: list[str]) -> object:
+        def select(self, names: list[str]) -> FakeImage:
             selected = tuple(names)
             self.selections.append(selected)
-            return SimpleNamespace(selected=selected)
+            return self
+
+        def addBands(self, other: object) -> FakeImage:
+            del other
+            return self
 
     feature_images = {year: FakeImage() for year in candidate_config.supported_observation_years}
     stacks = {
@@ -341,17 +356,17 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
     fake_metadata = SimpleNamespace(model_dump=lambda mode: {"temporal_transfer_validated": False})
     images = {
         year: SimpleNamespace(
-            forest_class=object(),
-            forest_vote_fraction=object(),
-            input_complete=object(),
+            forest_class=FakeImage(),
+            forest_vote_fraction=FakeImage(),
+            input_complete=FakeImage(),
             metadata=fake_metadata,
         )
         for year in candidate_config.supported_observation_years
     }
     p0_images = SimpleNamespace(
-        forest_class=object(),
-        forest_vote_fraction=object(),
-        input_complete=object(),
+        forest_class=FakeImage(),
+        forest_vote_fraction=FakeImage(),
+        input_complete=FakeImage(),
         metadata=fake_metadata,
     )
 
@@ -380,11 +395,34 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
         band_names = tuple(cast(list[str] | tuple[str, ...], kwargs["band_names"]))
         output_type = str(kwargs["output_type"])
         download_calls.append((artifact_path, band_names))
-        if len(band_names) == 56:
+        if fallback_error_code is not None and len(band_names) in {69, 3}:
+            raise RasterDownloadError(fallback_error_code)
+        if len(band_names) == 69:
+            values = np.concatenate(
+                (
+                    np.full((56, grid.height, grid.width), 0.2, dtype=np.float32),
+                    np.stack(
+                        [
+                            np.full((grid.height, grid.width), index, dtype=np.float32)
+                            for index in range(12)
+                        ]
+                    ),
+                    np.ones((1, grid.height, grid.width), dtype=np.float32),
+                )
+            )
+        elif len(band_names) == 56:
             values = np.full((56, grid.height, grid.width), 0.2, dtype=np.float32)
         elif len(band_names) == 12:
             values = np.stack(
                 [np.full((grid.height, grid.width), index, dtype=np.int16) for index in range(12)]
+            )
+        elif len(band_names) == 3:
+            values = np.stack(
+                (
+                    np.zeros((grid.height, grid.width), dtype=np.float32),
+                    np.full((grid.height, grid.width), 0.2, dtype=np.float32),
+                    np.ones((grid.height, grid.width), dtype=np.float32),
+                )
             )
         elif "vote" in artifact_path:
             values = np.full((grid.height, grid.width), 0.2, dtype=np.float32)
@@ -418,7 +456,7 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
 
     monkeypatch.setattr(temporal, "materialize_ee_image_to_grid", fake_download)
     monkeypatch.setattr(temporal, "canonicalize_forest_rf_feature_stack", lambda **kwargs: object())
-    monkeypatch.setattr(temporal, "select_forest_rf_predictors", lambda image: object())
+    monkeypatch.setattr(temporal, "select_forest_rf_predictors", lambda image: FakeImage())
     monkeypatch.setattr(
         temporal,
         "_load_local_model_bundle",
@@ -442,7 +480,47 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
 
     paths = forest_rf_temporal_output_paths(years=candidate_config.supported_observation_years)
     metadata = json.loads(result.files[paths["metadata"]])
-    assert len([path for path, names in download_calls if len(names) == 12]) == 5
+    if fallback_error_code is not None:
+        assert [len(names) for _, names in download_calls] == [
+            69,
+            56,
+            12,
+            1,
+            69,
+            56,
+            12,
+            1,
+            69,
+            56,
+            12,
+            1,
+            69,
+            56,
+            12,
+            1,
+            69,
+            56,
+            12,
+            1,
+            3,
+            1,
+            1,
+            1,
+        ]
+        assert metadata["raster_materialization"]["transport_request_count"] == 18
+        assert metadata["raster_materialization"]["transport_strategy"] == (
+            "adaptive_multiband_with_individual_fallback"
+        )
+        assert metadata["raster_materialization"]["transport_fallback_codes"] == [
+            fallback_error_code
+        ]
+    else:
+        assert [len(names) for _, names in download_calls] == [69, 69, 69, 69, 69, 3]
+        assert metadata["raster_materialization"]["transport_request_count"] == 6
+        assert metadata["raster_materialization"]["transport_strategy"] == (
+            "single_multiband_geotiff_per_year"
+        )
+        assert metadata["raster_materialization"]["transport_fallback_codes"] == []
     for year in candidate_config.supported_observation_years:
         path = paths[f"observation_qa_{year}"]
         with MemoryFile(result.files[path]) as memory:

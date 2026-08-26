@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-REPORT_FIGURE_COLLECTION_SCHEMA_VERSION = "2.0.0"
+REPORT_FIGURE_COLLECTION_SCHEMA_VERSION = "2.1.0"
 REPORT_FIGURE_SELECTION_POLICY_VERSION = "2.0.0"
-REPORT_DATASET_SCHEMA_VERSION = "1.0.0"
+REPORT_DATASET_SCHEMA_VERSION = "1.4.0"
 _MAX_REVIEW_EVENT_SHEETS = 10
 _SUPERSEDED_FULL_PIPELINE_LIMITATIONS_AFTER_ATTRIBUTION = {
     "Se detectaron señales de perturbación sin atribuir su causa o uso posterior.",
@@ -496,6 +496,8 @@ def _load_components(
         status = str(component.get("status", ""))
         statuses[name] = {
             "status": status,
+            "available": status == "completed",
+            "reason": _component_status_reason(component, status),
             "selected_figure_count": 0,
             "status_receipt": component.get("status_receipt"),
             "status_receipt_sha256": component.get("status_receipt_sha256"),
@@ -523,6 +525,19 @@ def _load_components(
         manifest_sha = str(component["child_manifest_sha256"])
         bundles[name] = _ComponentBundle(name, bundle, manifest_path, manifest_sha, artifacts)
     return bundles, statuses
+
+
+def _component_status_reason(component: Mapping[str, object], status: str) -> str | None:
+    if status == "completed":
+        return None
+    error = component.get("error")
+    if isinstance(error, Mapping):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    if status == "skipped":
+        return "dependency_not_completed"
+    return status or "component_unavailable"
 
 
 def _load_source_documents(
@@ -557,7 +572,8 @@ def _has_event_selection_sources(documents: Mapping[str, Mapping[str, object]]) 
 
 
 def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str]:
-    attribution_events = _object_list(documents.get("attribution", {}).get("events"))
+    attribution_document = documents.get("attribution", {})
+    attribution_events = _attribution_records(attribution_document)
     likely = [
         event
         for event in attribution_events
@@ -567,19 +583,25 @@ def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str
         event
         for event in attribution_events
         if event.get("automatic_status") == "review_required"
-        and event.get("area_threshold_met") is True
+        and (
+            event.get("candidate_footprint_above_visec_area_reference") is True
+            or (
+                attribution_document.get("schema_version") != "5.0.0"
+                and event.get("area_threshold_met") is True
+            )
+        )
     ]
     likely.sort(key=_event_sort_key)
     review.sort(key=_event_sort_key)
     selected = likely + review[: max(0, _MAX_REVIEW_EVENT_SHEETS - len(likely))]
-    if not selected:
+    if not selected and not attribution_document:
         disturbance_events = _object_list(documents.get("disturbance", {}).get("events"))
         disturbance_events.sort(key=_event_sort_key)
         selected = disturbance_events[:5]
     result: list[str] = []
     seen: set[str] = set()
     for event in selected:
-        event_id = event.get("event_id")
+        event_id = event.get("candidate_id", event.get("event_id"))
         if isinstance(event_id, str) and event_id and event_id.casefold() not in seen:
             result.append(event_id)
             seen.add(event_id.casefold())
@@ -589,7 +611,7 @@ def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str
 def _event_sort_key(event: Mapping[str, object]) -> tuple[float, str]:
     area = event.get("area_ha")
     numeric_area = float(area) if isinstance(area, (int, float)) else 0.0
-    return (-numeric_area, str(event.get("event_id", "")))
+    return (-numeric_area, str(event.get("candidate_id", event.get("event_id", ""))))
 
 
 def _copy_selected(selected: list[dict[str, Any]], temporary_root: Path) -> list[dict[str, object]]:
@@ -695,6 +717,21 @@ def _build_report_dataset(
             for limitation in inherited_limitations
             if limitation not in _SUPERSEDED_FULL_PIPELINE_LIMITATIONS_AFTER_ATTRIBUTION
         ]
+    attribution_available = _component_available(component_statuses, "post_change_attribution")
+    unavailable_limitations = _component_unavailability_limitations(component_statuses)
+    attribution_inventory_path = (
+        "report_assets/data/main/080_post_change_attribution.json"
+        if attribution_available
+        else None
+    )
+    candidate_inventory_path = next(
+        (
+            str(item["report_path"])
+            for item in files
+            if item.get("report_path") == "report_assets/data/main/030_disturbance_events.json"
+        ),
+        None,
+    )
     return {
         "schema_version": REPORT_DATASET_SCHEMA_VERSION,
         "recorded_at": recorded_at,
@@ -709,22 +746,35 @@ def _build_report_dataset(
         "headline_metrics": {
             "establishment_area_ha": area.get("total_area_ha"),
             "forest_area_2020_ha": baseline_metrics.get("automated_forest_area_ha"),
-            "detected_event_area_ha": disturbance.get("total_event_area_ha"),
-            "detected_event_count": disturbance.get("event_count"),
+            "spectral_candidate_area_ha": disturbance.get("total_event_area_ha"),
+            "spectral_candidate_count": disturbance.get("event_count"),
+            "candidate_episode_area_ha": disturbance.get(
+                "above_visec_area_reference_candidate_area_ha",
+                disturbance.get(
+                    "operational_event_area_ha", disturbance.get("total_event_area_ha")
+                ),
+            ),
+            "candidate_episode_count": disturbance.get(
+                "above_visec_area_reference_candidate_count",
+                disturbance.get("operational_event_count", disturbance.get("event_count")),
+            ),
             "likely_conversion_area_ha": attribution.get("likely_conversion_area_ha"),
             "conversion_likely_count": attribution.get("conversion_likely_count"),
             "automatic_final_assessment_generated": detection_screening.get(
                 "final_assessment_generated"
             ),
         },
-        "selected_events": selected_events,
-        "event_selection": {
+        "selected_disturbances": selected_events,
+        "disturbance_selection": {
             "policy": (
-                "all_conversion_likely_then_review_required_over_area_threshold_up_to_10; "
-                "fallback_largest_5"
+                "all_conversion_likely_events_then_persistent_unattributed_or_insufficient_"
+                "candidates_over_area_threshold_up_to_10"
             ),
-            "selected_event_ids": list(selected_event_ids),
-            "complete_event_inventory_path": "report_assets/data/main/030_disturbance_events.json",
+            "selected_candidate_ids": list(selected_event_ids),
+            "complete_candidate_inventory_path": (
+                attribution_inventory_path or candidate_inventory_path
+            ),
+            "complete_event_inventory_path": (attribution_inventory_path),
         },
         "component_statuses": component_statuses,
         "source_paths_by_category": source_paths,
@@ -732,15 +782,46 @@ def _build_report_dataset(
             "Resultado técnico automático sujeto a revisión humana.",
             "No constituye certificación ni confirmación legal EUDR.",
             *inherited_limitations,
+            *unavailable_limitations,
         ],
     }
+
+
+def _component_available(component_statuses: Mapping[str, Mapping[str, object]], name: str) -> bool:
+    component = component_statuses.get(name)
+    return component is not None and component.get("status") == "completed"
+
+
+def _component_unavailability_limitations(
+    component_statuses: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    labels = {
+        "agricultural_collection": "La recolección agrícola",
+        "agricultural_persistence": "La evaluación de persistencia agrícola",
+        "post_change_attribution": "La atribución post-cambio",
+    }
+    limitations: list[str] = []
+    for name, label in labels.items():
+        component = component_statuses.get(name)
+        if component is None or component.get("status") == "completed":
+            continue
+        status = str(component.get("status", "unavailable"))
+        reason = str(component.get("reason", status))
+        limitations.append(f"{label} no está disponible ({status}: {reason}).")
+    attribution = component_statuses.get("post_change_attribution")
+    if attribution is not None and attribution.get("status") != "completed":
+        limitations.append(
+            "No es posible concluir ausencia ni presencia de conversión porque la "
+            "atribución post-cambio no se completó."
+        )
+    return limitations
 
 
 def _event_record(
     event_id: str, documents: Mapping[str, Mapping[str, object]]
 ) -> dict[str, object]:
     return {
-        "event_id": event_id,
+        "candidate_id": event_id,
         "disturbance": _find_event(documents.get("disturbance"), event_id),
         "agricultural_collection": _find_event(documents.get("agriculture"), event_id),
         "agricultural_persistence": _find_event(documents.get("persistence"), event_id),
@@ -753,11 +834,23 @@ def _find_event(
 ) -> Mapping[str, object] | None:
     if document is None:
         return None
-    for event in _object_list(document.get("events")):
-        candidate = event.get("event_id")
+    records = (
+        _attribution_records(document)
+        if "records" in document
+        else _object_list(document.get("events"))
+    )
+    for event in records:
+        candidate = event.get("candidate_id", event.get("event_id"))
         if isinstance(candidate, str) and candidate.casefold() == event_id.casefold():
             return event
     return None
+
+
+def _attribution_records(document: Mapping[str, object]) -> list[Mapping[str, object]]:
+    records = document.get("records")
+    if isinstance(records, list):
+        return _object_list(records)
+    return _object_list(document.get("events"))
 
 
 def _object_list(value: object) -> list[Mapping[str, object]]:

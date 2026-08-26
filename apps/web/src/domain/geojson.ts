@@ -81,6 +81,22 @@ export function featureFromVertices(vertices: readonly Position[]): PolygonFeatu
   };
 }
 
+export function featureFromBounds(first: Position, opposite: Position): PolygonFeature {
+  const west = Math.min(first[0], opposite[0]);
+  const east = Math.max(first[0], opposite[0]);
+  const south = Math.min(first[1], opposite[1]);
+  const north = Math.max(first[1], opposite[1]);
+  if (west === east || south === north) {
+    throw new Error("El rectángulo debe tener ancho y alto");
+  }
+  return featureFromVertices([
+    [west, south],
+    [east, south],
+    [east, north],
+    [west, north],
+  ]);
+}
+
 export function geometryPositions(feature: PolygonFeature): Position[] {
   if (feature.geometry.type === "Polygon") {
     return feature.geometry.coordinates.flat();

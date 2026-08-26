@@ -112,6 +112,10 @@ class _DownloadImage:
         self.operations.append("toInt16")
         return self
 
+    def addBands(self, other: _DownloadImage) -> _DownloadImage:
+        self.operations.append(f"addBands:{other.identifier}")
+        return self
+
     def getDownloadURL(self, parameters: dict[str, object]) -> str:
         self.download_parameters = parameters
         return f"https://example.invalid/{self.identifier}"
@@ -147,6 +151,33 @@ def _geotiff_bytes(
         ) as dataset:
             dataset.write(values)
         return bytes(memory.read())
+
+
+def _hls_transport_bytes(
+    *,
+    reflectance: np.ndarray,
+    indices: np.ndarray,
+    total_count: np.ndarray,
+    l30_count: np.ndarray | None = None,
+    s30_count: np.ndarray | None = None,
+) -> bytes:
+    values = np.concatenate(
+        (
+            reflectance.astype(np.float32),
+            indices.astype(np.float32),
+            total_count.astype(np.float32),
+            (l30_count if l30_count is not None else total_count).astype(np.float32),
+            (s30_count if s30_count is not None else total_count).astype(np.float32),
+        ),
+        axis=0,
+    )
+    return _geotiff_bytes(
+        band_count=values.shape[0],
+        dtype="float32",
+        values=values,
+        crs=TEST_GRID.target_crs,
+        transform_value=Affine(*TEST_GRID.transform),
+    )
 
 
 def test_materializes_generic_ee_image_on_exact_grid() -> None:
@@ -310,30 +341,11 @@ def test_period_materialization_accepts_empty_spectral_bands_and_zero_counts() -
     zero_count_with_nodata_exterior = np.zeros((1, height, width), dtype=np.int16)
     zero_count_with_nodata_exterior[0, 0, 0] = int(TEST_GRID.nodata)
     responses = {
-        "https://example.invalid/reflectance": _geotiff_bytes(
-            band_count=6,
-            dtype="float32",
-            values=all_nodata_reflectance,
-            crs=TEST_GRID.target_crs,
-            transform_value=Affine(*TEST_GRID.transform),
-        ),
-        "https://example.invalid/indices": _geotiff_bytes(
-            band_count=8,
-            dtype="float32",
-            values=all_nodata_indices,
-            crs=TEST_GRID.target_crs,
-            transform_value=Affine(*TEST_GRID.transform),
-        ),
-        **{
-            f"https://example.invalid/{name}": _geotiff_bytes(
-                band_count=1,
-                dtype="int16",
-                values=zero_count_with_nodata_exterior,
-                crs=TEST_GRID.target_crs,
-                transform_value=Affine(*TEST_GRID.transform),
-            )
-            for name in ("count", "count_l30", "count_s30")
-        },
+        "https://example.invalid/reflectance": _hls_transport_bytes(
+            reflectance=all_nodata_reflectance,
+            indices=all_nodata_indices,
+            total_count=zero_count_with_nodata_exterior,
+        )
     }
 
     result = materialize_hls_raster_products(
@@ -391,16 +403,12 @@ def test_annual_materialization_does_not_publish_empty_required_composite() -> N
         valid_observation_count_s30=_DownloadImage("count_s30"),
         metadata=cast(Any, None),
     )
-    content = _geotiff_bytes(
-        band_count=6,
-        dtype="float32",
-        values=np.full(
-            (6, TEST_GRID.height, TEST_GRID.width),
-            TEST_GRID.nodata,
-            dtype=np.float32,
+    content = _hls_transport_bytes(
+        reflectance=np.full(
+            (6, TEST_GRID.height, TEST_GRID.width), TEST_GRID.nodata, dtype=np.float32
         ),
-        crs=TEST_GRID.target_crs,
-        transform_value=Affine(*TEST_GRID.transform),
+        indices=np.ones((8, TEST_GRID.height, TEST_GRID.width), dtype=np.float32),
+        total_count=np.ones((1, TEST_GRID.height, TEST_GRID.width), dtype=np.int16),
     )
 
     with pytest.raises(RasterDownloadError) as captured:
@@ -482,12 +490,12 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls(
     )
     count_values = np.full((1, height, width), 12, dtype=np.int16)
     responses = {
-        "https://example.invalid/reflectance": _geotiff_bytes(
-            band_count=6,
-            dtype="float32",
-            values=reflectance_values,
-            crs=TEST_GRID.target_crs,
-            transform_value=Affine(*TEST_GRID.transform),
+        "https://example.invalid/reflectance": _hls_transport_bytes(
+            reflectance=reflectance_values,
+            indices=index_values,
+            total_count=count_values,
+            l30_count=np.full((1, height, width), 7, dtype=np.int16),
+            s30_count=np.full((1, height, width), 5, dtype=np.int16),
         ),
         "https://example.invalid/indices": _geotiff_bytes(
             band_count=8,
@@ -544,7 +552,7 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls(
     assert set(result.files) == expected_rasters | expected_figures
     assert all(result.files[path].startswith(b"\x89PNG") for path in expected_figures)
     assert len(result.validations) == 5
-    assert len(result.estimates) == 5
+    assert len(result.estimates) == 1
     assert result.grid_spec == TEST_GRID
     assert all(item.grid_sha256 == TEST_GRID.grid_sha256 for item in result.validations)
     visualization_sources = {item.source_raster for item in result.visualizations}
@@ -559,17 +567,80 @@ def test_materialization_returns_geotiffs_and_local_pngs_without_signed_urls(
     assert expected_label in panel_record.title
     assert all("example.invalid" not in str(item) for item in result.metadata_payload().values())
     assert reflectance.unmask_value == -9999.0
-    assert count.operations.index("toInt16") < count.operations.index("unmask:-9999.0:False")
+    assert reflectance.operations[:5] == [
+        "addBands:indices",
+        "addBands:count",
+        "addBands:count_l30",
+        "addBands:count_s30",
+        "toFloat",
+    ]
     download_parameters = reflectance.download_parameters
     assert download_parameters is not None
     assert download_parameters == {
-        "name": f"hls_{artifact_kind}_reflectance",
-        "bands": ["blue", "green", "red", "nir", "swir1", "swir2"],
+        "name": f"hls_{artifact_kind}_transport",
+        "bands": [
+            "blue",
+            "green",
+            "red",
+            "nir",
+            "swir1",
+            "swir2",
+            *[item.index.value for item in config.output.index_visualization_ranges],
+            "valid_observation_count",
+            "valid_observation_count_l30",
+            "valid_observation_count_s30",
+        ],
         "crs": TEST_GRID.target_crs,
         "crs_transform": list(TEST_GRID.transform),
         "dimensions": [TEST_GRID.width, TEST_GRID.height],
         "format": "GEO_TIFF",
     }
+
+
+def test_hls_materialization_uses_one_multiband_remote_transport() -> None:
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    images = {
+        name: _DownloadImage(name)
+        for name in ("reflectance", "indices", "count", "count_l30", "count_s30")
+    }
+    product = HlsCompositeImages(
+        reflectance=images["reflectance"],
+        indices=images["indices"],
+        valid_observation_count=images["count"],
+        valid_observation_count_l30=images["count_l30"],
+        valid_observation_count_s30=images["count_s30"],
+        metadata=cast(Any, None),
+    )
+    requests: list[str] = []
+
+    def fetch(url: str, maximum_bytes: int) -> bytes:
+        del maximum_bytes
+        requests.append(url)
+        identifier = url.rsplit("/", 1)[-1]
+        image = images[identifier]
+        assert image.download_parameters is not None
+        bands = cast(list[str], image.download_parameters["bands"])
+        dtype = "float32" if identifier in {"reflectance", "indices"} else "int16"
+        values = np.ones((len(bands), TEST_GRID.height, TEST_GRID.width), dtype=dtype)
+        return _geotiff_bytes(
+            band_count=len(bands),
+            dtype=dtype,
+            values=values,
+            crs=TEST_GRID.target_crs,
+            transform_value=Affine(*TEST_GRID.transform),
+        )
+
+    result = materialize_hls_raster_products(
+        product=product,
+        aoi_wgs84=TEST_AOI,
+        output_config=config.output,
+        grid_spec=TEST_GRID,
+        fetch_bytes=fetch,
+    )
+
+    assert requests == ["https://example.invalid/reflectance"]
+    assert len(result.estimates) == 1
+    assert result.metadata_payload()["transport_strategy"] == "single_multiband_geotiff"
 
 
 @pytest.mark.parametrize(
@@ -729,8 +800,8 @@ def test_download_url_failures_are_classified_without_remote_text(
         )
 
     assert captured.value.code == expected_code
-    assert captured.value.artifact_path == "tiffs/hls_annual_reflectance.tif"
-    assert captured.value.product == "hls_annual_reflectance"
+    assert captured.value.artifact_path == "internal/hls_annual_transport.tif"
+    assert captured.value.product == "hls_annual_transport"
     assert captured.value.band_index is None
     assert "band_index=<not_applicable>" in str(captured.value)
     assert "SECRET" not in str(captured.value)

@@ -54,21 +54,47 @@ class ResultCatalog:
         return _load_object(dataset_path)
 
     def events(self, job: AnalysisJob) -> list[dict[str, Any]]:
+        return self._disturbance_records(
+            job,
+            inventory_key="complete_event_inventory_path",
+            record_key="events",
+        )
+
+    def candidates(self, job: AnalysisJob) -> list[dict[str, Any]]:
+        return self._disturbance_records(
+            job,
+            inventory_key="complete_candidate_inventory_path",
+            record_key="candidates",
+        )
+
+    def _disturbance_records(
+        self,
+        job: AnalysisJob,
+        *,
+        inventory_key: str,
+        record_key: str,
+    ) -> list[dict[str, Any]]:
         root, index = self._index(job)
         dataset = _load_object(self._verified_dataset_path(root, job, index))
-        selection = dataset.get("event_selection")
+        selection = dataset.get("disturbance_selection", dataset.get("event_selection"))
         if not isinstance(selection, dict):
-            raise ResultIntegrityError("event_selection_missing")
-        inventory_path = selection.get("complete_event_inventory_path")
+            raise ResultIntegrityError("disturbance_selection_missing")
+        inventory_path = selection.get(inventory_key)
+        if inventory_path is None:
+            inventory_path = selection.get("complete_event_inventory_path")
         if not isinstance(inventory_path, str):
-            raise ResultIntegrityError("event_inventory_path_missing")
+            if not _attribution_explicitly_unavailable(dataset):
+                raise ResultIntegrityError(f"{record_key}_inventory_path_missing")
+            if record_key == "events":
+                return []
+            inventory_path = "report_assets/data/main/030_disturbance_events.json"
         entry = self._entry_by_report_path(index, inventory_path)
         path = _verified_allowlisted_path(root, entry)
         payload = _load_object(path)
-        events = payload.get("events")
-        if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
-            raise ResultIntegrityError("event_inventory_invalid")
-        return events
+        records = _attribution_records(payload, record_key)
+        likely = record_key == "events"
+        selected = [record for record in records if _is_likely_conversion(record) is likely]
+        return [_public_disturbance_record(record, likely=likely) for record in selected]
 
     def assets(self, job: AnalysisJob) -> list[VerifiedAsset]:
         root, index = self._index(job)
@@ -82,7 +108,7 @@ class ResultCatalog:
         return next((item for item in self.assets(job) if item.asset_id == asset_id), None)
 
     def _index(self, job: AnalysisJob) -> tuple[Path, dict[str, Any]]:
-        root = _published_result_root(self.storage_root, job.analysis_id)
+        root = _published_result_root(self.storage_root, job.analysis_id, job.attempt)
         index_path = _safe_descendant(root, "report_assets/index.json")
         return root, _load_object(index_path)
 
@@ -138,9 +164,49 @@ class ResultCatalog:
         )
 
 
-def packaged_download(storage_root: Path, analysis_id: str) -> tuple[Path, str]:
-    package = _safe_descendant(
-        storage_root.resolve(), f"analyses/{analysis_id}/downloads/evidence-package.zip"
+def _attribution_records(payload: dict[str, Any], record_key: str) -> list[dict[str, Any]]:
+    records = payload.get("records")
+    if records is None and "candidates" in payload:
+        events = payload.get("events")
+        candidates = payload.get("candidates")
+        if not isinstance(events, list) or not isinstance(candidates, list):
+            raise ResultIntegrityError(f"{record_key}_inventory_invalid")
+        records = [*events, *candidates]
+    if records is None:
+        records = payload.get("events")
+    if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+        raise ResultIntegrityError(f"{record_key}_inventory_invalid")
+    return records
+
+
+def _attribution_explicitly_unavailable(dataset: dict[str, Any]) -> bool:
+    statuses = dataset.get("component_statuses")
+    if not isinstance(statuses, dict):
+        return False
+    attribution = statuses.get("post_change_attribution")
+    return bool(
+        isinstance(attribution, dict)
+        and attribution.get("status") in {"failed", "skipped"}
+        and attribution.get("available") is False
+    )
+
+
+def _public_disturbance_record(record: dict[str, Any], *, likely: bool) -> dict[str, Any]:
+    public = dict(record)
+    geometry_key = "likely_conversion_geometry" if likely else "candidate_geometry"
+    geometry = record.get(geometry_key)
+    if isinstance(geometry, dict):
+        public["geometry"] = geometry
+    return public
+
+
+def packaged_download(storage_root: Path, analysis_id: str, attempt: int) -> tuple[Path, str]:
+    package = _generation_path(
+        storage_root,
+        analysis_id,
+        attempt,
+        "downloads",
+        "evidence-package.zip",
     )
     metadata = _load_object(package.with_suffix(".json"))
     expected_digest = metadata.get("sha256")
@@ -152,8 +218,8 @@ def packaged_download(storage_root: Path, analysis_id: str) -> tuple[Path, str]:
     return package, expected_digest
 
 
-def client_report_download(storage_root: Path, analysis_id: str) -> tuple[Path, str]:
-    root = _published_result_root(storage_root, analysis_id)
+def client_report_download(storage_root: Path, analysis_id: str, attempt: int) -> tuple[Path, str]:
+    root = _published_result_root(storage_root, analysis_id, attempt)
     metadata = _load_object(_safe_descendant(root, "client_report/report.json"))
     if (
         metadata.get("schema_version") != "1.0.0"
@@ -193,9 +259,33 @@ def purge_expired_private_objects(storage_root: Path, analysis_ids: list[str]) -
     return removed
 
 
-def _published_result_root(storage_root: Path, analysis_id: str) -> Path:
+def _published_result_root(storage_root: Path, analysis_id: str, attempt: int) -> Path:
     UUID(analysis_id)
-    return _safe_descendant(storage_root.resolve(), f"analyses/{analysis_id}/results")
+    return _generation_path(storage_root, analysis_id, attempt, "results")
+
+
+def _generation_path(
+    storage_root: Path,
+    analysis_id: str,
+    attempt: int,
+    category: str,
+    relative: str | None = None,
+) -> Path:
+    UUID(analysis_id)
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ResultIntegrityError("result_generation_invalid")
+    root = storage_root.resolve()
+    generation = _safe_target(
+        root,
+        f"analyses/{analysis_id}/{category}/attempt-{attempt}",
+    )
+    legacy = _safe_target(root, f"analyses/{analysis_id}/{category}")
+    selected = generation if generation.exists() else legacy
+    return (
+        _safe_descendant(selected, relative)
+        if relative is not None
+        else _safe_descendant(root, selected.relative_to(root).as_posix())
+    )
 
 
 def _verified_allowlisted_path(root: Path, entry: dict[str, Any]) -> Path:
@@ -238,6 +328,24 @@ def _load_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ResultIntegrityError("result_json_not_object")
     return payload
+
+
+def _is_likely_conversion(record: dict[str, Any]) -> bool:
+    record_type = record.get("record_type")
+    interpretation = record.get("interpretation_status")
+    automatic_status = record.get("automatic_status")
+    if record_type is not None:
+        return bool(
+            record_type == "conversion_likely_event"
+            and interpretation in {None, "conversion_likely"}
+            and automatic_status in {None, "conversion_likely"}
+        )
+    if interpretation is not None:
+        return bool(
+            interpretation == "conversion_likely"
+            and automatic_status in {None, "conversion_likely"}
+        )
+    return automatic_status == "conversion_likely"
 
 
 def _sha256(path: Path) -> str:

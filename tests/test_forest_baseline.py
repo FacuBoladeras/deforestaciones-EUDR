@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_default_config_declares_auditable_forest_baseline_contract() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.11.0"
+    assert config.schema_version == "1.13.0"
     assert config.forest_baseline.reference_date == date(2020, 12, 31)
     assert config.forest_baseline.feature_end_date_exclusive == date(2021, 1, 1)
     assert config.forest_baseline.benchmark_resolution_m == 30

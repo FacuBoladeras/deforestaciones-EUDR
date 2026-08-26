@@ -35,8 +35,10 @@ class AnalysisOverview(StrictViewModel):
 class HeadlineMetrics(StrictViewModel):
     establishment_area_ha: NonNegativeFloat | None
     forest_area_2020_ha: NonNegativeFloat | None
-    detected_event_area_ha: NonNegativeFloat | None
-    detected_event_count: Annotated[int, Field(ge=0)] | None
+    spectral_candidate_area_ha: NonNegativeFloat | None
+    spectral_candidate_count: Annotated[int, Field(ge=0)] | None
+    candidate_episode_area_ha: NonNegativeFloat | None
+    candidate_episode_count: Annotated[int, Field(ge=0)] | None
     likely_conversion_area_ha: NonNegativeFloat | None
     conversion_likely_count: Annotated[int, Field(ge=0)] | None
     automatic_final_assessment_generated: bool
@@ -45,6 +47,8 @@ class HeadlineMetrics(StrictViewModel):
 class ComponentSummary(StrictViewModel):
     name: NonEmptyString
     status: NonEmptyString
+    available: bool
+    reason: str | None
     selected_figure_count: Annotated[int, Field(ge=0)]
 
 
@@ -90,6 +94,10 @@ class ClientFigure(StrictViewModel):
     kind: Literal[
         "annual_forest_change",
         "rgb_timeline",
+        "spectral_index_timeline",
+        "observation_coverage",
+        "disturbance_detection",
+        "post_change_attribution",
         "event_spectral_evidence",
     ]
     event_id: NonEmptyString | None = None
@@ -106,6 +114,7 @@ class EvidenceGate(StrictViewModel):
         "agricultural_or_livestock_post_use",
         "defensible_area_and_geometry",
         "strong_alternative_explanation_absent",
+        "visec_operational_area_strictly_greater_than_threshold",
     ]
     passed: bool
 
@@ -117,13 +126,25 @@ class AnnualForestPoint(StrictViewModel):
 
 class EventSummary(StrictViewModel):
     ordinal: Annotated[int, Field(gt=0)]
-    event_id: NonEmptyString
+    candidate_id: NonEmptyString
+    event_id: NonEmptyString | None
+    record_type: Literal["disturbance_candidate", "conversion_likely_event"]
+    interpretation_level: Literal["candidate_episode", "event"]
+    interpretation_status: Literal[
+        "candidate_only",
+        "temporary_or_recovered",
+        "persistent_unattributed",
+        "insufficient_data",
+        "subthreshold_conversion_evidence",
+        "conversion_likely",
+    ]
     selected_for_detail: bool
     automatic_status: NonEmptyString
     area_ha: NonNegativeFloat
     area_threshold_ha: NonNegativeFloat
     area_threshold_met: bool
     likely_conversion_area_ha: NonNegativeFloat
+    conjunctive_conversion_evidence_area_ha: NonNegativeFloat
     estimated_onset_period_id: NonEmptyString
     estimated_onset_window_start: date | None
     estimated_onset_window_end: date | None
@@ -144,11 +165,12 @@ class EventSummary(StrictViewModel):
     forest_trajectory: tuple[AnnualForestPoint, ...]
     quality_flags: tuple[str, ...]
     event_geometry: GeometryRings
+    candidate_geometry: GeometryRings
     agricultural_geometry: GeometryRings
 
 
 class ReportViewModel(StrictViewModel):
-    schema_version: Literal["2.3.0"] = "2.3.0"
+    schema_version: Literal["2.8.0"] = "2.8.0"
     title: Literal["Informe técnico de evidencia geoespacial"] = (
         "Informe técnico de evidencia geoespacial"
     )

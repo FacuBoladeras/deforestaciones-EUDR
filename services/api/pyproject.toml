@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deforestation-api"
-version = "0.2.0"
+version = "0.4.0"
 description = "API interna asíncrona para el pipeline de evidencia EUDR."
 requires-python = ">=3.12,<3.13"
 dependencies = [

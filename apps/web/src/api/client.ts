@@ -110,11 +110,15 @@ export class ApiClient {
   }
 
   getEvents(analysisId: string): Promise<Page<Record<string, unknown>>> {
-    return this.request(`/api/v1/analyses/${analysisId}/events?page=1&page_size=100`);
+    return this.requestAllPages(`/api/v1/analyses/${analysisId}/events`);
+  }
+
+  getCandidates(analysisId: string): Promise<Page<Record<string, unknown>>> {
+    return this.requestAllPages(`/api/v1/analyses/${analysisId}/candidates`);
   }
 
   getAssets(analysisId: string): Promise<Page<AnalysisAsset>> {
-    return this.request(`/api/v1/analyses/${analysisId}/assets?page=1&page_size=100`);
+    return this.requestAllPages(`/api/v1/analyses/${analysisId}/assets`);
   }
 
   packageUrl(analysisId: string): string {
@@ -134,6 +138,43 @@ export class ApiClient {
       throw new ApiError(response.status, error.code, error.message, error.details);
     }
     return payload as T;
+  }
+
+  private async requestAllPages<T>(path: string): Promise<Page<T>> {
+    const pageSize = 100;
+    const items: T[] = [];
+    let requestedPage = 1;
+    let declaredTotal: number | null = null;
+
+    while (true) {
+      const page = await this.request<Page<T>>(
+        `${path}?page=${requestedPage}&page_size=${pageSize}`,
+      );
+      if (
+        page.page !== requestedPage ||
+        !Number.isInteger(page.total) ||
+        page.total < 0 ||
+        (declaredTotal !== null && page.total !== declaredTotal)
+      ) {
+        throw new Error("pagination_inconsistent");
+      }
+      declaredTotal ??= page.total;
+      items.push(...page.items);
+      if (page.next_page == null) break;
+      if (!Number.isInteger(page.next_page) || page.next_page <= requestedPage) {
+        throw new Error("pagination_inconsistent");
+      }
+      requestedPage = page.next_page;
+    }
+
+    if (items.length !== declaredTotal) throw new Error("pagination_incomplete");
+    return {
+      items,
+      page: 1,
+      page_size: pageSize,
+      total: declaredTotal,
+      next_page: null,
+    };
   }
 
   private url(path: string): string {

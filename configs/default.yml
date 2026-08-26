@@ -1,4 +1,4 @@
-schema_version: "1.11.0"
+schema_version: "1.13.0"
 
 analysis:
   cutoff_date: 2020-12-31
@@ -83,19 +83,23 @@ forest_screening:
   automatic_final_assessment_allowed: false
 
 disturbance_detection:
-  schema_version: "1.4.0"
+  schema_version: "1.5.0"
   reference_history_start_date: 2017-01-01
   analysis_start_date: 2021-01-01
   minimum_baseline_source_count: 2
   detection_indices: [NDVI, NBR, NDMI, NIRv]
   planned_detectors: [robust_seasonal_pre_post, ccdc_benchmark]
   robust_seasonal:
-    schema_version: "1.1.0"
+    schema_version: "1.2.0"
     minimum_reference_observations: 3
     mad_scale_constant: 1.4826
     vegetation_loss_direction: "decrease_is_positive"
     reference_comparison_policy: "same_season_only"
     zero_scale_policy: "not_standardizable"
+    scale_stabilization_policy: "seasonal_index_spatial_quantile_floor"
+    scale_floor_quantile: 0.25
+    scale_floor_minimum_valid_pixels: 4
+    scale_floor_fallback_policy: "leave_local_scale_unchanged"
     missing_data_policy: "preserve_nan_without_interpolation"
     standardized_magnitude_threshold: 3.0
     minimum_index_support_count: 2
@@ -152,12 +156,16 @@ disturbance_detection:
   automatic_final_assessment_allowed: false
 
 disturbance_events:
-  schema_version: "1.0.0"
+  schema_version: "1.2.0"
   connectivity: 8
-  area_threshold_ha: 0.5
+  visec_operational_event_area_threshold_ha: 0.5
+  visec_area_threshold_relation: "strictly_greater_than"
+  area_threshold_basis: "candidate_footprint_reference_only_no_event_promotion"
   area_method: "projected_grid_affine_determinant"
-  area_threshold_policy: "flag_without_filtering"
-  event_id_strategy: "grid_and_pixels_sha256_v1"
+  area_threshold_policy: "preserve_all_candidates_publish_events_only_after_attribution"
+  maximum_onset_period_difference: 1
+  missing_onset_policy: "separate_unknown_episode"
+  event_id_strategy: "grid_temporal_episode_and_pixels_sha256_v2"
   ordering_policy: "area_descending_then_event_id"
   detail_figure_limit: 5
   detail_selection_policy: "largest_area_then_event_id"
@@ -169,6 +177,7 @@ disturbance_events:
 
 output:
   directory: "outputs"
+  artifact_profile: "lean"
   formats:
     - "json"
     - "geojson"

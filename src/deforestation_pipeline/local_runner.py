@@ -820,11 +820,11 @@ def run_local_vector_pipeline(
                 "overview_figure_path": "figures/evidence/disturbance_events.png",
                 "event_count": disturbance_materialization.events.event_count,
                 "total_event_area_ha": (disturbance_materialization.events.total_event_area_ha),
-                "area_threshold_event_count": (
-                    disturbance_materialization.events.area_threshold_event_count
+                "above_visec_area_reference_candidate_count": (
+                    disturbance_materialization.events.above_visec_area_reference_candidate_count
                 ),
-                "below_area_threshold_event_count": (
-                    disturbance_materialization.events.below_area_threshold_event_count
+                "above_visec_area_reference_candidate_area_ha": (
+                    disturbance_materialization.events.above_visec_area_reference_candidate_area_ha
                 ),
                 "automatic_final_assessment_generated": False,
                 "attribution_generated": False,

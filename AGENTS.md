@@ -34,18 +34,38 @@ El MVP termina en la generación de evidencia geoespacial por establecimiento.
 No incluye todavía la gestión completa de trazabilidad animal ni la
 presentación de declaraciones en sistemas de la Unión Europea.
 
-### 2.1 Checkpoint operativo — 18 de agosto de 2026
+### 2.1 Checkpoint operativo — 21 de agosto de 2026
 
 - La CLI `scripts/run_complete_analysis.py` orquesta en un solo run: pipeline
   principal, Hampel diagnóstico, RF 2020–2024, recolección agrícola,
   persistencia y atribución post-cambio.
-- El collector agrícola `1.1.0` comparte adquisiciones mensuales entre eventos
-  y conserva rasters, grillas, áreas, `nodata`, hashes y linaje individuales.
-  Un micro-smoke real de una ventana sobre 58 eventos fue válido; aún falta
-  repetir el run remoto completo de seis componentes.
+- El collector agrícola `1.2.0` comparte adquisiciones mensuales entre
+  candidatos y usa `maximum_events_per_batch` como tamaño de lote de conteos,
+  no como tope del inventario. Conserva también los subumbrales y mantiene
+  rasters, grillas, áreas, `nodata`, hashes y linaje individuales; el bundle
+  auditable correspondiente es `1.3.0`.
+  Un run remoto sobre 1.198,06 ha completó los seis componentes científicos;
+  todavía falta repetir su publicación final después del fix de cierre atómico.
+- La configuración del pipeline `1.13.0` conserva los perfiles `lean/debug` y usa
+  `lean` por defecto. HLS consolida cinco productos en un transporte multibanda
+  efímero; RF reduce el caso normal 2020–2024 más P0 de 18 a seis transportes,
+  con fallback individual ante el límite directo. Agricultura no persiste el
+  GeoTIFF mensual `_shared` en `lean`, pero conserva los raster evento-mes que
+  todavía consume persistencia. La ciencia y los productos downstream no
+  cambiaron. La detección `1.5.0` agrega un piso cuantílico espacial a escalas
+  MAD positivas para evitar anomalías infladas por denominadores casi nulos;
+  los MAD nulos siguen siendo no estandarizables y no se suaviza reflectancia.
+- La colección técnica `1.1.0` preserva todos los componentes persistentes como
+  candidatos; sus nuevos registros declaran `candidate_id`,
+  `persistent_disturbance_candidate` y `candidate_episode`. La segunda máscara
+  sólo identifica candidatos conectados de al menos 0,5 ha y ya no se comunica
+  como evento. Los
+  bordes evaluables reciben `EDGE_PIXEL` como QA, no como filtro. CCDC y el
+  detector robusto comparten HLS: su acuerdo es complementario, no independencia
+  de sensor.
 - `report_assets` `2.0.0` organiza figuras generales y por evento, datos
   principales, anexos y `report_dataset.json`, sin alterar los bundles
-  científicos. `packages/reporting` `0.6.0`, con contrato editorial `2.3.0`,
+  científicos. `packages/reporting` `0.8.0`, con contrato editorial `2.5.0`,
   verifica sus assets y el `input.geojson` declarado, y proyecta JSON, CSV y
   GeoJSON a un PDF cliente determinístico y atómico. El expediente real produjo
   quince páginas inspeccionadas desde 41 assets: nueve verticales y seis
@@ -54,11 +74,14 @@ presentación de declaraciones en sistemas de la Unión Europea.
   norte, escala, localizador y contexto vectorial OSM al 50 %, cacheado por
   extensión y con atribución ODbL. El mapa base es presentación, no evidencia.
   Las figuras internas no seleccionadas permanecen en el bundle técnico y el
-  worker `0.2.0` ya genera el PDF como postproceso, lo publica con metadatos de
-  integridad y lo incorpora al ZIP. La API `0.2.0` y el cliente web `0.2.0`
-  exponen su descarga sin renderizar dentro del request HTTP.
-- El último gate local aprobado contiene 610 tests, cobertura total 90,67 %,
-  Ruff, formato sobre 147 archivos, Mypy sobre 146 archivos y
+  worker `0.3.0` ya genera el PDF como postproceso, lo publica con metadatos de
+  integridad y lo incorpora al ZIP. La API `0.3.0` y el cliente web `0.3.0`
+  exponen por separado perturbaciones candidatas y eventos probables, además de
+  la descarga sin renderizar dentro del request HTTP. La atribución `4.0.0`
+  conserva `records`, separa `candidates` y reserva `events` a registros
+  `conversion_likely_event`. `report_dataset.json` `1.2.0` mantiene esa frontera.
+- El último gate raíz aprobado contiene 620 tests, cobertura total 90,71 %,
+  Ruff, formato sobre 147 archivos, Mypy sobre 148 archivos y
   `git diff --check` verdes. No se construyó frontend ni imagen de contenedor.
 - Los Incrementos 1–4 de la **API interna asíncrona** están implementados en el
   monorepo; API, jobs y worker integran el `uv workspace`, mientras el cliente
@@ -68,7 +91,7 @@ presentación de declaraciones en sistemas de la Unión Europea.
   consultan GEE y mantienen cobertura por paquete superior a 90 %.
 - `apps/web` agrega el cliente React/TypeScript minimalista: carga o dibujo,
   validación, creación, polling, cancelación y lectura básica de resultados.
-  Tiene quince pruebas Vitest, typecheck estricto y auditoría productiva verde.
+  Tiene dieciséis pruebas Vitest y typecheck estricto verdes.
   El progreso es estimado y limitado hasta que la API confirma el terminal; el
   `analysis_id` persiste en la URL para reanudar polling después de recargar.
 - Un gate multiproceso sintético verifica API HTTP → SQLite → worker →
@@ -85,11 +108,36 @@ presentación de declaraciones en sistemas de la Unión Europea.
   RF, agricultura, persistencia y atribución completaron. Publicó 41 assets y
   cuatro eventos verificables. La copia durable permite leerlos aun sin el
   workspace científico original.
+- La prueba de consola con `plantaciones-uru.geojson` (74.949,64 ha) fue
+  rechazada correctamente por el preflight: 24 estaciones sobre una grilla de
+  1.224 × 922 implican 1,68 GB sin comprimir, por encima del presupuesto de
+  serie de 256 MB; el TIFF de ocho índices también excede por sí solo el límite
+  directo de 32 MB. No elevar límites a ciegas: este AOI requiere el Incremento
+  2 de agregación remota/tabular.
+- La prueba de consola con `prueba-pequeña.geojson` (1.198,06 ha) completó
+  pipeline principal, Hampel, RF, agricultura, persistencia y atribución, y
+  reunió 53 archivos y 26 figuras para reporte. El fallback RF respondió ante
+  un fallo remoto de generación de URL. El cierre final encontró un bloqueo
+  transitorio de Windows (`WinError 5`), por lo que el expediente quedó en
+  `.staging` con sobre de error aunque la ciencia terminó. El orquestador ahora
+  reutiliza el rename atómico con reintentos en publicación exitosa y fallida.
+  Desde ese expediente se renderizó y revisó un PDF cliente de 37 páginas; aún
+  falta repetir el run para comprobar el cierre remoto ya corregido.
+- El smoke `nativo-robustness-retry` completó los seis componentes con la
+  configuración `1.13.0`. Frente al run previo del mismo GeoJSON, conservó 34
+  candidatos y redujo el subconjunto por área de 8 a 6 candidatos y de 6,39 a
+  4,95 ha. La atribución mostró cero eventos probables: ningún candidato reunió
+  persistencia y uso agropecuario posterior; trece mostraron recuperación. Un
+  intento anterior falló por HTTP 5xx al transportar RF 2021; RF
+  ahora admite `remote_server_error` como motivo de fallback multibanda a
+  descargas individuales. Los fallos instantáneos observados desde la API eran
+  de un worker iniciado antes del cambio de esquema y requieren reiniciarlo.
 
 ### 2.2 Límites científicos y operativos vigentes
 
-- No afirmar estabilidad operativa cloud hasta cerrar un smoke real posterior
-  al collector compartido y `report_assets` 2.0.
+- No afirmar estabilidad operativa cloud hasta repetir un smoke real que cierre
+  la publicación final con reintentos después del collector compartido y
+  `report_assets` 2.0.
 - Hampel sigue siendo diagnóstico estacional y no equivalente metodológicamente
   a VISEC; su indisponibilidad justificada no bloquea los demás componentes.
 - El RF sólo soporta transferencia 2020–2024 y no está calibrado como
@@ -104,9 +152,11 @@ presentación de declaraciones en sistemas de la Unión Europea.
 
 ### 2.3 Orden de avance actual
 
-1. contenerizar API y worker por separado;
-2. ejecutar un smoke local con Compose, volúmenes privados y límites explícitos;
-3. desplegar gradualmente en AWS con almacenamiento privado, cola, identidad,
+1. mover agregaciones agrícolas temporales aptas a GEE y descargar tablas más
+   el conjunto raster mínimo requerido por figuras y atribución;
+2. contenerizar API y worker por separado;
+3. ejecutar un smoke local con Compose, volúmenes privados y límites explícitos;
+4. desplegar gradualmente en AWS con almacenamiento privado, cola, identidad,
    observabilidad y límites de concurrencia.
 
 La API es un adaptador: debe invocar `run_complete_analysis()` y no duplicar
@@ -117,8 +167,10 @@ reglas científicas ni acoplar el núcleo a FastAPI, AWS o React.
 - `README.md`: capacidades implementadas, ejecución y evidencia de gates.
 - `NEXT_STEPS.md`: roadmap científico y validación pendiente.
 - `API_CONTEXT.md`: contrato, tecnologías y evolución de API/cliente/AWS.
+- `DISTURBANCE_INTERPRETATION.md`: ontología y reglas científicas exclusivas
+  para distinguir señal, candidato y evento probable.
 
-No agregar nuevos documentos históricos por incremento. Actualizar estos tres
+No agregar nuevos documentos históricos por incremento. Actualizar estos cuatro
 cuando cambien arquitectura, capacidad operativa o prioridad.
 
 ## 3. Alcance autorizado

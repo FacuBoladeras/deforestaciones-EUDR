@@ -80,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             licenses_path=arguments.licenses,
             created_at=datetime.now(UTC),
             raster_provider=provider,
+            artifact_profile=output_config.artifact_profile,
         )
     except (
         AgriculturalCollectorRemoteError,

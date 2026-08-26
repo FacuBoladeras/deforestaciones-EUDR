@@ -114,6 +114,30 @@ def test_known_vegetation_drop_is_positive_and_standardized() -> None:
     assert not hasattr(result, "state")
 
 
+def test_tiny_positive_mad_is_stabilized_by_spatial_quantile_floor() -> None:
+    result = _diagnose(
+        reference_values=np.array(
+            [
+                [[[0.5000, 0.4, 0.3, 0.2]]],
+                [[[0.5001, 0.5, 0.5, 0.5]]],
+                [[[0.5002, 0.6, 0.7, 0.8]]],
+            ]
+        ),
+        reference_seasons=("MAM", "MAM", "MAM"),
+        post_values=np.array([[[[0.2, 0.2, 0.2, 0.2]]]]),
+        post_seasons=("MAM",),
+    )
+
+    raw_scale = result.robust_scale[0, 0, 0, 0]
+    effective_scale = result.standardization_scale[0, 0, 0, 0]
+    assert raw_scale == pytest.approx(0.00014826)
+    assert effective_scale > raw_scale
+    assert result.scale_floor[0, 0, 0, 0] == pytest.approx(effective_scale)
+    assert result.standardized_magnitude[0, 0, 0, 0] < 10
+    stabilized_bit = np.uint16(1 << DisturbanceQualityBit.ROBUST_SCALE_STABILIZED)
+    assert result.quality_flags_bitmask[0, 0, 0, 0] & stabilized_bit
+
+
 def test_each_post_observation_uses_only_its_same_season_history() -> None:
     result = _diagnose(
         reference_values=np.array(
@@ -179,6 +203,7 @@ def test_zero_mad_keeps_raw_delta_but_not_standardized_magnitude() -> None:
 
     assert result.raw_directional_delta[0, 0, 0, 0] == pytest.approx(0.3)
     assert result.robust_scale[0, 0, 0, 0] == 0.0
+    assert result.standardization_scale[0, 0, 0, 0] == 0.0
     assert np.isnan(result.standardized_magnitude[0, 0, 0, 0])
 
 
@@ -229,6 +254,8 @@ def test_diagnostics_are_immutable() -> None:
     for array in (
         result.reference_center,
         result.robust_scale,
+        result.scale_floor,
+        result.standardization_scale,
         result.raw_directional_delta,
         result.standardized_magnitude,
         result.reference_valid_count,

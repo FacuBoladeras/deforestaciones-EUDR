@@ -1,4 +1,4 @@
-"""Atribución post-cambio v1, separada de la detección de perturbaciones."""
+"""Atribución post-cambio v3, separada de la detección de perturbaciones."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import matplotlib
@@ -22,10 +22,11 @@ from matplotlib.patches import Patch
 from matplotlib.patches import Polygon as PlotPolygon
 from pyproj import CRS
 from rasterio.enums import Resampling
-from rasterio.features import geometry_mask
+from rasterio.features import geometry_mask, shapes
 from rasterio.io import MemoryFile
 from rasterio.warp import reproject, transform_geom
-from shapely.geometry import MultiPolygon, Polygon, shape
+from shapely.geometry import MultiPolygon, Polygon, mapping, shape
+from shapely.ops import unary_union
 
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
@@ -50,10 +51,11 @@ PostChangeUse = Literal[
 ]
 DeclaredLandUse = Literal["unknown", "managed_forest_plantation"]
 
-POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "3.0.0"
-POST_CHANGE_ATTRIBUTION_BUNDLE_SCHEMA_VERSION: Final = "3.0.0"
+POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "5.0.0"
+POST_CHANGE_ATTRIBUTION_BUNDLE_SCHEMA_VERSION: Final = "5.0.0"
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
 _YEARS: Final = (2020, 2021, 2022, 2023, 2024)
+_CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA: Final = 1e-5
 _CLASS_COLORS: Final = {
     "agriculture_likely": "#d73027",
     "forest_recovery": "#1a9850",
@@ -138,6 +140,12 @@ class AttributionRules:
     persistent_nonforest_years: int = 2
     recovery_fraction_minimum: float = 0.5
     recovery_gain_minimum: float = 0.25
+    visec_operational_event_area_threshold_ha: float = 0.5
+    visec_area_threshold_relation: Literal["strictly_greater_than"] = "strictly_greater_than"
+
+    def __post_init__(self) -> None:
+        if self.visec_operational_event_area_threshold_ha != 0.5:
+            raise ValueError("visec_operational_event_area_threshold_ha debe ser 0.5")
 
 
 _DEFAULT_RULES: Final = AttributionRules()
@@ -158,13 +166,20 @@ def attribute_post_change_event(
     if any(count == 0 for count in trajectory.evaluable_pixel_count):
         return _result(
             event_id=event_id,
+            candidate_area_ha=float(event.get("area_ha", 0.0)),
             post_change_use="unknown",
             reason_codes=("insufficient_annual_rf_support",),
-            gates=_gates(False, False, False, False, False, False),
+            gates=_gates(False, False, False, False, False, False, False),
             trajectory=trajectory,
             context=context,
             evidence=None,
             agricultural_support=agricultural_support,
+            alternative_explanation_assessment=_alternative_explanation_assessment(
+                recovery=False,
+                declared_managed=False,
+                context=context,
+                recovery_trajectory_evaluated=False,
+            ),
         )
 
     baseline_forest = (
@@ -180,7 +195,6 @@ def attribute_post_change_event(
         value <= rules.persistent_nonforest_fraction_maximum for value in tail
     )
     persistence = bool(persistent_event and persistent_nonforest)
-    area_defensible = bool(event.get("area_threshold_met")) and float(event.get("area_ha", 0.0)) > 0
     trough_index = min(
         range(1, len(trajectory.years)), key=lambda index: trajectory.forest_fraction[index]
     )
@@ -201,9 +215,12 @@ def attribute_post_change_event(
     )
     alternative_absent = not recovery and not declared_managed
     spatial_area_defensible = bool(
-        area_defensible
-        and agricultural_support is not None
-        and agricultural_support.conjunctive_likely_area_ha > 0
+        agricultural_support is not None and agricultural_support.conjunctive_likely_area_ha > 0
+    )
+    visec_operational_area = bool(
+        agricultural_support is not None
+        and agricultural_support.conjunctive_likely_area_ha
+        > rules.visec_operational_event_area_threshold_ha
     )
 
     gates = _gates(
@@ -213,6 +230,7 @@ def attribute_post_change_event(
         agriculture_supported,
         spatial_area_defensible,
         alternative_absent,
+        visec_operational_area,
     )
     reason_codes: list[str] = []
     if declared_managed:
@@ -231,13 +249,15 @@ def attribute_post_change_event(
         reason_codes.extend(
             f"policy_eligible_{item.observation.land_use}_evidence" for item in eligible_evidence
         )
+    if gates["all_scientific_conversion_evidence_gates"] and not visec_operational_area:
+        reason_codes.append("visec_operational_event_area_not_exceeded")
 
     post_change_use: PostChangeUse
     if declared_managed and post_loss and recovery:
         post_change_use = "managed_harvest"
     elif recovery:
         post_change_use = "forest_recovery" if persistent_event else "temporary_disturbance"
-    elif all(gates.values()):
+    elif gates["all_scientific_conversion_evidence_gates"]:
         post_change_use = "agriculture_likely"
     else:
         post_change_use = "unknown"
@@ -246,6 +266,7 @@ def attribute_post_change_event(
         reason_codes.append("no_attribution_rule_satisfied")
     return _result(
         event_id=event_id,
+        candidate_area_ha=float(event.get("area_ha", 0.0)),
         post_change_use=post_change_use,
         reason_codes=tuple(reason_codes),
         gates=gates,
@@ -253,6 +274,12 @@ def attribute_post_change_event(
         context=context,
         evidence=evidence,
         agricultural_support=agricultural_support,
+        alternative_explanation_assessment=_alternative_explanation_assessment(
+            recovery=recovery,
+            declared_managed=declared_managed,
+            context=context,
+            recovery_trajectory_evaluated=True,
+        ),
     )
 
 
@@ -287,6 +314,7 @@ def materialize_post_change_attribution(
     features = event_collection.get("features") if isinstance(event_collection, dict) else None
     if not isinstance(features, list):
         raise ValueError("disturbance_events.geojson no es un FeatureCollection válido")
+    features = _normalize_disjoint_event_geometries(features)
     _validate_disjoint_event_geometries(features)
     event_ids = {
         str(feature.get("properties", {}).get("event_id", ""))
@@ -388,8 +416,12 @@ def materialize_post_change_attribution(
         geometry = feature.get("geometry")
         if not isinstance(geometry, dict):
             raise ValueError("evento sin geometría")
+        topology_trimmed_area_ha = float(
+            feature["properties"].get("candidate_topology_overlap_trimmed_ha", 0.0)
+        )
         trajectory = _event_trajectory(geometry, arrays, raster_contract)
         support = None
+        conjunctive_geometry: Mapping[str, Any] | None = None
         conjunction_for_visualization: tuple[str, bytes] | None = None
         persistence_event = persistence_by_event.get(str(feature["properties"]["event_id"]))
         if (
@@ -430,6 +462,7 @@ def materialize_post_change_attribution(
                 raise ValueError("persistent raster area does not match persistence contract")
             conjunction_files[conjunction_relative] = conjunction_content
             conjunction_for_visualization = (conjunction_relative, conjunction_content)
+            conjunctive_geometry = _geometry_from_conjunctive_support(conjunction_content)
             support = AgriculturalAttributionSupport(
                 persistent_agricultural_area_ha=persistent_area,
                 conjunctive_likely_area_ha=conjunctive_area,
@@ -447,19 +480,39 @@ def materialize_post_change_attribution(
         result.update(
             {
                 "area_ha": feature["properties"].get("area_ha"),
-                "area_threshold_met": feature["properties"].get("area_threshold_met"),
+                "candidate_footprint_above_visec_area_reference": feature["properties"].get(
+                    "candidate_footprint_above_visec_area_reference"
+                ),
                 "estimated_onset_period_id": feature["properties"].get("estimated_onset_period_id"),
                 "confidence": None,
                 "confidence_semantics": "not_calibrated_in_v1",
-                "quality_flags": (
-                    ["insufficient_annual_rf_support"]
-                    if 0 in trajectory.evaluable_pixel_count
-                    else []
+                "quality_flags": [
+                    *(
+                        ["insufficient_annual_rf_support"]
+                        if 0 in trajectory.evaluable_pixel_count
+                        else []
+                    ),
+                    *(
+                        ["candidate_topology_sliver_normalized"]
+                        if topology_trimmed_area_ha > 0
+                        else []
+                    ),
+                ],
+                "candidate_topology_overlap_trimmed_ha": topology_trimmed_area_ha,
+                "candidate_geometry": geometry,
+                "conjunctive_conversion_evidence_geometry": conjunctive_geometry,
+                "likely_conversion_geometry": (
+                    conjunctive_geometry
+                    if result["record_type"] == "conversion_likely_event"
+                    else None
                 ),
             }
         )
         results.append(result)
-        if conjunction_for_visualization is not None:
+        if (
+            conjunction_for_visualization is not None
+            and result["record_type"] == "conversion_likely_event"
+        ):
             conjunction_relative, conjunction_content = conjunction_for_visualization
             visualization = render_likely_conversion_conjunction(
                 event=result,
@@ -469,9 +522,15 @@ def materialize_post_change_attribution(
             if visualization is not None:
                 conjunction_files[visualization.path] = visualization.content
                 conjunction_visualizations.append(visualization.record)
-        output_features.append(
-            {"type": "Feature", "geometry": geometry, "properties": dict(result)}
-        )
+    results = _normalize_likely_event_geometries(results)
+    output_features = [
+        {
+            "type": "Feature",
+            "geometry": result["likely_conversion_geometry"] or result["candidate_geometry"],
+            "properties": dict(result),
+        }
+        for result in results
+    ]
 
     source_identity = {
         "events": _source_identity(event_bundle, event_manifest),
@@ -495,9 +554,9 @@ def materialize_post_change_attribution(
         sort_keys=True,
         separators=(",", ":"),
     )
-    analysis_id = uuid5(NAMESPACE_URL, f"post-change-attribution-v1:{identity_payload}")
+    analysis_id = uuid5(NAMESPACE_URL, f"post-change-attribution-v3:{identity_payload}")
     run_name = (
-        f"{_slug(establishment_id)}-attribution-v1__"
+        f"{_slug(establishment_id)}-attribution-v3__"
         f"{created_at.strftime('%Y%m%dT%H%M%S%fZ')}__{str(analysis_id)[:8]}"
     )
     output_root = output_root.resolve()
@@ -509,28 +568,47 @@ def materialize_post_change_attribution(
     staging.mkdir()
     try:
         counts = Counter(str(result["post_change_use"]) for result in results)
-        conversion_likely_count = sum(
-            result["automatic_status"] == "conversion_likely" for result in results
-        )
+        candidates = [
+            result for result in results if result["record_type"] == "disturbance_candidate"
+        ]
+        events = [
+            result for result in results if result["record_type"] == "conversion_likely_event"
+        ]
+        conversion_likely_count = len(events)
         likely_conversion_area_ha = float(
             sum(float(result["likely_conversion_area_ha"]) for result in results)
+        )
+        interpretation_counts = Counter(str(result["interpretation_status"]) for result in results)
+        status = (
+            "conversion_likely"
+            if events
+            else "review_required"
+            if any(result["automatic_status"] == "review_required" for result in candidates)
+            else "low_risk"
         )
         payload = {
             "schema_version": POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION,
             "analysis_id": str(analysis_id),
             "establishment_id": establishment_id,
             "created_at": created_at.isoformat(),
-            "status": "review_required",
+            "status": status,
             "automatic_final_assessment_generated": False,
             "conversion_confirmed_count": 0,
             "conversion_likely_count": conversion_likely_count,
+            "observed_candidate_count": len(results),
+            "candidate_count": len(candidates),
+            "event_count": len(events),
             "likely_conversion_area_ha": likely_conversion_area_ha,
             "counts_by_post_change_use": dict(sorted(counts.items())),
-            "events": results,
+            "counts_by_interpretation_status": dict(sorted(interpretation_counts.items())),
+            "records": results,
+            "candidates": candidates,
+            "events": events,
         }
+        _validate_attribution_payload_v5(payload)
         metadata = {
             "schema_version": POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION,
-            "method": "deterministic_post_change_attributor_v1",
+            "method": "deterministic_post_change_attributor_v3",
             "source_bundles": source_identity,
             "rules": rules_payload,
             "context": context_payload,
@@ -560,6 +638,8 @@ def materialize_post_change_attribution(
         }
         summary = {
             **payload,
+            "records": [],
+            "candidates": [],
             "events": [],
             "attribution_generated": True,
             "source_bundles": source_identity,
@@ -627,6 +707,7 @@ def _gates(
     agricultural_use: bool,
     area_geometry: bool,
     alternative_absent: bool,
+    visec_operational_area: bool,
 ) -> dict[str, bool]:
     gates = {
         "forest_at_cutoff": baseline_forest,
@@ -636,13 +717,18 @@ def _gates(
         "defensible_area_and_geometry": area_geometry,
         "strong_alternative_explanation_absent": alternative_absent,
     }
-    gates["all_conversion_likely_gates"] = all(gates.values())
+    gates["all_scientific_conversion_evidence_gates"] = all(gates.values())
+    gates["visec_operational_area_strictly_greater_than_threshold"] = visec_operational_area
+    gates["all_conversion_likely_gates"] = bool(
+        gates["all_scientific_conversion_evidence_gates"] and visec_operational_area
+    )
     return gates
 
 
 def _result(
     *,
     event_id: str,
+    candidate_area_ha: float,
     post_change_use: PostChangeUse,
     reason_codes: tuple[str, ...],
     gates: dict[str, bool],
@@ -650,19 +736,40 @@ def _result(
     context: AttributionContext,
     evidence: tuple[EvaluatedAgriculturalEvidence, ...] | None,
     agricultural_support: AgriculturalAttributionSupport | None,
+    alternative_explanation_assessment: Mapping[str, object],
 ) -> dict[str, Any]:
     conversion_likely = post_change_use == "agriculture_likely" and gates.get(
         "all_conversion_likely_gates", False
     )
+    interpretation_status = _interpretation_status(
+        conversion_likely=conversion_likely,
+        post_change_use=post_change_use,
+        gates=gates,
+        reason_codes=reason_codes,
+    )
+    review_candidate = interpretation_status in {
+        "persistent_unattributed",
+        "insufficient_data",
+        "subthreshold_conversion_evidence",
+    }
+    declared_alternative_requires_review = post_change_use == "managed_harvest"
+    automatic_status = (
+        "conversion_likely"
+        if conversion_likely
+        else "review_required"
+        if review_candidate or declared_alternative_requires_review
+        else "low_risk"
+    )
+    human_review_required = automatic_status in {"conversion_likely", "review_required"}
     reasons_for = [
         f"gate_passed:{name}"
         for name, passed in gates.items()
-        if passed and name != "all_conversion_likely_gates"
+        if passed and not name.startswith("all_")
     ]
     reasons_against = [
         f"gate_failed:{name}"
         for name, passed in gates.items()
-        if not passed and name != "all_conversion_likely_gates"
+        if not passed and not name.startswith("all_")
     ]
     if agricultural_support is None:
         reasons_against.append("persistent_agricultural_spatial_support_missing")
@@ -677,11 +784,17 @@ def _result(
     )
     return {
         "schema_version": POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION,
-        "event_id": event_id,
+        "candidate_id": event_id,
+        "event_id": event_id if conversion_likely else None,
+        "record_type": (
+            "conversion_likely_event" if conversion_likely else "disturbance_candidate"
+        ),
+        "interpretation_level": "event" if conversion_likely else "candidate_episode",
+        "interpretation_status": interpretation_status,
         "post_change_use": post_change_use,
-        "automatic_status": "conversion_likely" if conversion_likely else "review_required",
+        "automatic_status": automatic_status,
         "conversion_confirmed": False,
-        "human_review_required": True,
+        "human_review_required": human_review_required,
         "gates": gates,
         "reason_codes": list(reason_codes),
         "reasons_for": reasons_for,
@@ -691,7 +804,14 @@ def _result(
             if agricultural_support is not None
             else 0.0
         ),
+        "candidate_area_ha": candidate_area_ha,
+        "conjunctive_conversion_evidence_area_ha": (
+            agricultural_support.conjunctive_likely_area_ha
+            if agricultural_support is not None
+            else 0.0
+        ),
         "likely_conversion_area_ha": likely_area,
+        "alternative_explanation_assessment": dict(alternative_explanation_assessment),
         "agricultural_spatial_support": (
             None
             if agricultural_support is None
@@ -718,6 +838,63 @@ def _result(
             "is_independent_evidence": False,
         },
         "agricultural_use_evidence": [item.model_dump(mode="json") for item in (evidence or ())],
+    }
+
+
+def _interpretation_status(
+    *,
+    conversion_likely: bool,
+    post_change_use: PostChangeUse,
+    gates: Mapping[str, bool],
+    reason_codes: tuple[str, ...],
+) -> Literal[
+    "candidate_only",
+    "temporary_or_recovered",
+    "persistent_unattributed",
+    "insufficient_data",
+    "subthreshold_conversion_evidence",
+    "conversion_likely",
+]:
+    """Resuelve la jerarquía sin promover una perturbación a evento prematuramente."""
+    if conversion_likely:
+        return "conversion_likely"
+    if "insufficient_annual_rf_support" in reason_codes:
+        return "insufficient_data"
+    if post_change_use in {"forest_recovery", "managed_harvest", "temporary_disturbance"}:
+        return "temporary_or_recovered"
+    if post_change_use == "agriculture_likely" and gates.get(
+        "all_scientific_conversion_evidence_gates", False
+    ):
+        return "subthreshold_conversion_evidence"
+    if gates.get("persistent_change", False):
+        return "persistent_unattributed"
+    return "candidate_only"
+
+
+def _alternative_explanation_assessment(
+    *,
+    recovery: bool,
+    declared_managed: bool,
+    context: AttributionContext,
+    recovery_trajectory_evaluated: bool,
+) -> dict[str, object]:
+    evaluated_sources = ["rf_annual_recovery_trajectory"] if recovery_trajectory_evaluated else []
+    supported: list[str] = []
+    if recovery:
+        supported.append("forest_recovery_after_trough")
+    if context.declared_context_source != "not_provided":
+        evaluated_sources.append("declared_land_use_context")
+    if declared_managed:
+        supported.append("declared_managed_forest_context")
+    return {
+        "supported_explanations": supported,
+        "evaluated_sources": evaluated_sources,
+        "unevaluated_explanation_types": [
+            "fire",
+            "flood",
+            "drought",
+            "field_or_high_resolution_evidence",
+        ],
     }
 
 
@@ -772,6 +949,85 @@ def _safe_child(root: Path, relative: str) -> Path:
     return resolved
 
 
+def _validate_attribution_payload_v5(payload: Mapping[str, Any]) -> None:
+    """Valida invariantes relacionales que JSON Schema no puede expresar por sí solo."""
+    records = _mapping_list(payload.get("records"), "attribution_v5_records_invalid")
+    candidates = _mapping_list(payload.get("candidates"), "attribution_v5_candidates_invalid")
+    events = _mapping_list(payload.get("events"), "attribution_v5_events_invalid")
+    candidate_ids = [str(record.get("candidate_id", "")) for record in records]
+    if any(not candidate_id for candidate_id in candidate_ids) or len(set(candidate_ids)) != len(
+        candidate_ids
+    ):
+        raise ValueError("attribution_v5_candidate_identity_invalid")
+
+    expected_candidates = [
+        record for record in records if record.get("record_type") == "disturbance_candidate"
+    ]
+    expected_events = [
+        record for record in records if record.get("record_type") == "conversion_likely_event"
+    ]
+    if (
+        len(expected_candidates) + len(expected_events) != len(records)
+        or candidates != expected_candidates
+        or events != expected_events
+    ):
+        raise ValueError("attribution_v5_partition_mismatch")
+    if (
+        payload.get("observed_candidate_count") != len(records)
+        or payload.get("candidate_count") != len(candidates)
+        or payload.get("event_count") != len(events)
+        or payload.get("conversion_likely_count") != len(events)
+    ):
+        raise ValueError("attribution_v5_count_mismatch")
+
+    likely_area = round(
+        sum(float(record.get("likely_conversion_area_ha", 0.0)) for record in events), 8
+    )
+    if not math.isclose(
+        float(payload.get("likely_conversion_area_ha", -1.0)), likely_area, abs_tol=1e-8
+    ):
+        raise ValueError("attribution_v5_likely_area_mismatch")
+
+    for record in candidates:
+        if (
+            record.get("event_id") is not None
+            or not _is_valid_polygonal_geometry(record.get("candidate_geometry"))
+            or record.get("likely_conversion_geometry") is not None
+            or float(record.get("likely_conversion_area_ha", -1.0)) != 0.0
+        ):
+            raise ValueError("attribution_v5_candidate_geometry_invalid")
+    for record in events:
+        if (
+            not isinstance(record.get("event_id"), str)
+            or not record["event_id"]
+            or float(record.get("likely_conversion_area_ha", 0.0)) <= 0.5
+            or not _is_valid_polygonal_geometry(record.get("candidate_geometry"))
+            or not _is_valid_polygonal_geometry(
+                record.get("conjunctive_conversion_evidence_geometry")
+            )
+            or not _is_valid_polygonal_geometry(record.get("likely_conversion_geometry"))
+        ):
+            raise ValueError("attribution_v5_event_geometry_invalid")
+
+
+def _mapping_list(value: object, error_code: str) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
+        raise ValueError(error_code)
+    return cast(list[Mapping[str, Any]], value)
+
+
+def _is_valid_polygonal_geometry(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        geometry = shape(dict(value))
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(geometry, Polygon | MultiPolygon) and not geometry.is_empty and geometry.is_valid
+    )
+
+
 def _read_rf_rasters(
     paths: Mapping[tuple[str, int], Path],
 ) -> tuple[dict[tuple[str, int], np.ndarray], dict[str, Any]]:
@@ -799,7 +1055,12 @@ def _read_rf_rasters(
 
 
 def _validate_disjoint_event_geometries(features: list[Any]) -> None:
-    """La suma por evento sólo es segura si los componentes no se superponen."""
+    """Rechaza solapes sustantivos usando superficie equivalente documentada.
+
+    La materialización normaliza antes los slivers tolerables para publicar una
+    partición. Esta segunda barrera no debe reclasificar como sustantivo el
+    residuo numérico que GEOS puede representar en coordenadas geográficas.
+    """
     geometries: list[tuple[str, Polygon | MultiPolygon]] = []
     event_ids: set[str] = set()
     for feature in features:
@@ -819,9 +1080,138 @@ def _validate_disjoint_event_geometries(features: list[Any]) -> None:
             raise ValueError(f"event_id duplicado:{event_id}")
         event_ids.add(event_id)
         for other_id, other in geometries:
-            if geometry.intersection(other).area > 1e-15:
+            overlap = geometry.intersection(other)
+            if (
+                not overlap.is_empty
+                and overlap.area > 0
+                and _equal_area_geometry_ha(overlap) > _CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA
+            ):
                 raise ValueError(f"event geometries overlap:{other_id}:{event_id}")
         geometries.append((event_id, geometry))
+
+
+def _normalize_disjoint_event_geometries(features: list[Any]) -> list[dict[str, Any]]:
+    """Recorta sólo slivers submétricos de reproyección y conserva una partición exacta.
+
+    Los componentes provienen de píxeles disjuntos, pero su vectorización y
+    redondeo independiente en WGS84 puede crear solapes microscópicos. La
+    precedencia lexicográfica del ID asigna esos slivers una única vez. Un
+    solape científicamente material continúa siendo un error de integridad.
+    """
+    parsed: dict[str, Polygon | MultiPolygon] = {}
+    normalized_features: list[dict[str, Any]] = []
+    feature_index: dict[str, int] = {}
+    for index, feature in enumerate(features):
+        if not isinstance(feature, Mapping) or not isinstance(feature.get("geometry"), Mapping):
+            raise ValueError("evento GeoJSON inválido")
+        properties = feature.get("properties")
+        event_id = str(properties.get("event_id", "")) if isinstance(properties, Mapping) else ""
+        geometry = shape(dict(feature["geometry"]))
+        if (
+            not event_id
+            or not isinstance(geometry, (Polygon, MultiPolygon))
+            or geometry.is_empty
+            or not geometry.is_valid
+        ):
+            raise ValueError("evento GeoJSON requiere geometría poligonal válida")
+        if event_id in parsed:
+            raise ValueError(f"event_id duplicado:{event_id}")
+        parsed[event_id] = geometry
+        feature_index[event_id] = index
+        normalized_features.append(dict(feature))
+
+    allocated: list[tuple[str, Polygon | MultiPolygon]] = []
+    for event_id in sorted(parsed):
+        geometry = parsed[event_id]
+        was_trimmed = False
+        trimmed_area_ha = 0.0
+        for owner_id, owner in allocated:
+            overlap = geometry.intersection(owner)
+            if overlap.is_empty or overlap.area == 0:
+                continue
+            overlap_area_ha = _equal_area_geometry_ha(overlap)
+            if overlap_area_ha > _CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA:
+                raise ValueError(f"event geometries overlap:{owner_id}:{event_id}")
+            geometry = geometry.difference(owner)
+            was_trimmed = True
+            trimmed_area_ha += overlap_area_ha
+        if (
+            not isinstance(geometry, (Polygon, MultiPolygon))
+            or geometry.is_empty
+            or not geometry.is_valid
+        ):
+            raise ValueError(f"event geometry collapsed during topology normalization:{event_id}")
+        parsed[event_id] = geometry
+        allocated.append((event_id, geometry))
+        if was_trimmed:
+            feature = normalized_features[feature_index[event_id]]
+            properties = cast(dict[str, Any], dict(feature["properties"]))
+            properties["candidate_topology_overlap_trimmed_ha"] = round(trimmed_area_ha, 12)
+            normalized_features[feature_index[event_id]] = {
+                **feature,
+                "geometry": mapping(geometry),
+                "properties": properties,
+            }
+    return normalized_features
+
+
+def _equal_area_geometry_ha(geometry: Any) -> float:
+    projected = shape(
+        transform_geom(
+            "EPSG:4326",
+            "EPSG:6933",
+            mapping(geometry),
+            precision=-1,
+        )
+    )
+    return float(projected.area / 10_000)
+
+
+def _normalize_likely_event_geometries(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Garantiza que la geometría publicada de eventos sea una partición sin duplicación."""
+    event_features = [
+        {
+            "type": "Feature",
+            "geometry": record.get("likely_conversion_geometry"),
+            "properties": {"event_id": record.get("event_id")},
+        }
+        for record in records
+        if record.get("record_type") == "conversion_likely_event"
+    ]
+    if not event_features:
+        return records
+    normalized_by_id = {
+        str(feature["properties"]["event_id"]): feature["geometry"]
+        for feature in _normalize_disjoint_event_geometries(event_features)
+    }
+    normalized_records: list[dict[str, Any]] = []
+    for record in records:
+        event_id = record.get("event_id")
+        if record.get("record_type") != "conversion_likely_event" or not isinstance(event_id, str):
+            normalized_records.append(record)
+            continue
+        geometry = normalized_by_id[event_id]
+        normalized_records.append(
+            {
+                **record,
+                "conjunctive_conversion_evidence_geometry": geometry,
+                "likely_conversion_geometry": geometry,
+            }
+        )
+    _validate_disjoint_event_geometries(
+        [
+            {
+                "type": "Feature",
+                "geometry": record["likely_conversion_geometry"],
+                "properties": {"event_id": record["event_id"]},
+            }
+            for record in normalized_records
+            if record.get("record_type") == "conversion_likely_event"
+        ]
+    )
+    return normalized_records
 
 
 def _validate_persistence_evidence_consistency(
@@ -941,6 +1331,37 @@ def _materialize_conjunctive_support(
     return persistent_area, conjunctive_area, content
 
 
+def _geometry_from_conjunctive_support(content: bytes) -> Mapping[str, Any] | None:
+    """Vectoriza sólo celdas con soporte conjuntivo positivo y conserva su huella real."""
+    with MemoryFile(content) as memory:
+        with memory.open() as dataset:
+            values = dataset.read(indexes=(1,))[0]
+            valid = values > 0
+            if not valid.any():
+                return None
+            polygons = [
+                shape(geometry)
+                for geometry, value in shapes(
+                    valid.astype("uint8"),
+                    mask=valid,
+                    transform=dataset.transform,
+                )
+                if int(value) == 1
+            ]
+            merged = unary_union(polygons)
+            projected = mapping(merged)
+            geometry = transform_geom(
+                dataset.crs,
+                "EPSG:4326",
+                projected,
+                precision=8,
+            )
+    polygon = shape(geometry)
+    if not isinstance(polygon, (Polygon, MultiPolygon)) or polygon.is_empty or not polygon.is_valid:
+        raise ValueError("conjunctive support geometry invalid")
+    return cast(Mapping[str, Any], geometry)
+
+
 def _event_trajectory(
     geometry: Mapping[str, Any],
     arrays: Mapping[tuple[str, int], np.ndarray],
@@ -999,13 +1420,13 @@ def _source_identity(bundle: Path, manifest: Mapping[str, Any]) -> dict[str, Any
 
 def _code_identity() -> dict[str, str]:
     module = Path(__file__).resolve()
-    schema = PROJECT_ROOT / "data/schemas/post-change-attribution-v3.0.0.json"
+    schema = PROJECT_ROOT / "data/schemas/post-change-attribution-v5.0.0.json"
     if not schema.is_file():
         raise ValueError("post-change attribution schema file no existe")
     return {
         "module_path": "src/deforestation_pipeline/post_change_attribution.py",
         "module_sha256": hashlib.sha256(module.read_bytes()).hexdigest(),
-        "schema_path": "data/schemas/post-change-attribution-v3.0.0.json",
+        "schema_path": "data/schemas/post-change-attribution-v5.0.0.json",
         "schema_sha256": hashlib.sha256(schema.read_bytes()).hexdigest(),
     }
 
@@ -1018,6 +1439,11 @@ def _rules_payload(rules: AttributionRules) -> dict[str, object]:
         "persistent_nonforest_years": rules.persistent_nonforest_years,
         "recovery_fraction_minimum": rules.recovery_fraction_minimum,
         "recovery_gain_minimum": rules.recovery_gain_minimum,
+        "visec_operational_event_area_threshold_ha": (
+            rules.visec_operational_event_area_threshold_ha
+        ),
+        "visec_area_threshold_relation": rules.visec_area_threshold_relation,
+        "candidate_topology_overlap_tolerance_ha": (_CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA),
     }
 
 
@@ -1035,13 +1461,18 @@ def _context_payload(context: AttributionContext) -> dict[str, object]:
 
 def _csv_bytes(results: list[dict[str, Any]]) -> bytes:
     fields = (
+        "candidate_id",
         "event_id",
+        "record_type",
+        "interpretation_level",
+        "interpretation_status",
         "post_change_use",
         "automatic_status",
         "conversion_confirmed",
         "human_review_required",
         "area_ha",
-        "area_threshold_met",
+        "candidate_area_ha",
+        "candidate_footprint_above_visec_area_reference",
         "estimated_onset_period_id",
         "confidence",
         "confidence_semantics",
@@ -1049,6 +1480,7 @@ def _csv_bytes(results: list[dict[str, Any]]) -> bytes:
         "reasons_for",
         "reasons_against",
         "persistent_agricultural_area_ha",
+        "conjunctive_conversion_evidence_area_ha",
         "likely_conversion_area_ha",
         "quality_flags",
         "gates",

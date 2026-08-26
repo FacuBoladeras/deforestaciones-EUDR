@@ -39,8 +39,8 @@ def test_default_config_declares_the_versioned_step_14_3_rule() -> None:
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
     detection = config.disturbance_detection
 
-    assert config.schema_version == "1.11.0"
-    assert detection.schema_version == "1.4.0"
+    assert config.schema_version == "1.13.0"
+    assert detection.schema_version == "1.5.0"
     assert detection.reference_history_start_date == date(2017, 1, 1)
     assert detection.analysis_start_date == date(2021, 1, 1)
     assert detection.minimum_baseline_source_count == 2
@@ -54,6 +54,12 @@ def test_default_config_declares_the_versioned_step_14_3_rule() -> None:
     assert detection.robust_seasonal.vegetation_loss_direction == "decrease_is_positive"
     assert detection.robust_seasonal.reference_comparison_policy == "same_season_only"
     assert detection.robust_seasonal.zero_scale_policy == "not_standardizable"
+    assert (
+        detection.robust_seasonal.scale_stabilization_policy
+        == "seasonal_index_spatial_quantile_floor"
+    )
+    assert detection.robust_seasonal.scale_floor_quantile == 0.25
+    assert detection.robust_seasonal.scale_floor_minimum_valid_pixels == 4
     assert detection.robust_seasonal.missing_data_policy == "preserve_nan_without_interpolation"
     assert detection.robust_seasonal.standardized_magnitude_threshold == 3.0
     assert detection.robust_seasonal.minimum_index_support_count == 2
@@ -90,6 +96,7 @@ def test_detection_states_and_quality_bits_are_stable_machine_codes() -> None:
         "CCDC_FIT_FAILURE": 7,
         "EDGE_PIXEL": 8,
         "CCDC_INSUFFICIENT_OBSERVATIONS": 9,
+        "ROBUST_SCALE_STABILIZED": 10,
     }
 
 
@@ -109,6 +116,8 @@ def test_reserved_raster_bands_do_not_claim_probability_or_attribution() -> None
     assert DISTURBANCE_DIAGNOSTIC_BAND_NAMES == (
         "robust_multi_index_support_count",
         "robust_max_standardized_anomaly",
+        "robust_scale_floor_maximum",
+        "robust_scale_stabilization_count",
         "ccdc_break_day_offset_from_cutoff",
         "ccdc_change_magnitude",
         "recovery_indicator",
@@ -172,7 +181,7 @@ def test_disturbance_outputs_reuse_the_flat_evidence_domain() -> None:
 
 
 def test_committed_disturbance_detection_schema_matches_model() -> None:
-    path = PROJECT_ROOT / "data" / "schemas" / "disturbance-detection-v1.4.0.json"
+    path = PROJECT_ROOT / "data" / "schemas" / "disturbance-detection-v1.5.0.json"
     committed = json.loads(path.read_text(encoding="utf-8"))
 
     assert committed == disturbance_detection_json_schema()

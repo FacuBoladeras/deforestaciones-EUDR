@@ -16,6 +16,7 @@ def _component(
     *,
     status: str = "completed",
     documents: dict[str, object | str | bytes] | None = None,
+    reason: str | None = None,
 ) -> dict[str, object]:
     component: dict[str, object] = {
         "name": name,
@@ -24,9 +25,17 @@ def _component(
         "status_receipt": None,
     }
     if status != "completed":
+        component["error"] = (
+            {"error_type": "SyntheticComponentError", "message": reason}
+            if reason is not None
+            else None
+        )
         receipt = staging / "components" / name / "component_status.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)
-        receipt.write_text(json.dumps({"component": name, "status": status}), encoding="utf-8")
+        receipt.write_text(
+            json.dumps({"component": name, "status": status, "reason": reason}),
+            encoding="utf-8",
+        )
         component["status_receipt"] = receipt.relative_to(staging).as_posix()
         component["status_receipt_sha256"] = hashlib.sha256(receipt.read_bytes()).hexdigest()
         return component
@@ -82,6 +91,96 @@ def _component(
     component["child_manifest"] = manifest.relative_to(staging).as_posix()
     component["child_manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
     return component
+
+
+def test_partial_run_records_component_availability_without_inventing_outputs(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "run"
+    components = [
+        _component(
+            staging,
+            "full_pipeline",
+            {"figures/evidence/forest_baseline_2020.png": b"baseline"},
+            documents={
+                "json/run/summary.json": {
+                    "analysis_id": "analysis-partial",
+                    "establishment_id": "farm-partial",
+                    "analysis_end_date": "2025-12-31",
+                    "area": {"total_area_ha": 100.0},
+                    "limitations": [],
+                },
+                "json/evidence/forest_baseline_2020.json": {
+                    "screening": {"metrics": {"automated_forest_area_ha": 60.0}}
+                },
+                "json/evidence/disturbance_detection.json": {
+                    "screening": {"final_assessment_generated": False}
+                },
+                "json/evidence/disturbance_events.json": {
+                    "schema_version": "1.2.0",
+                    "event_count": 1,
+                    "total_event_area_ha": 0.8,
+                    "events": [
+                        {
+                            "candidate_id": "PDC-PARTIAL-1",
+                            "area_ha": 0.8,
+                            "estimated_onset_period_id": "2024-SON",
+                        }
+                    ],
+                },
+            },
+        ),
+        _component(
+            staging,
+            "agricultural_collection",
+            {},
+            status="failed",
+            reason="remote_server_error",
+        ),
+        _component(
+            staging,
+            "agricultural_persistence",
+            {},
+            status="skipped",
+            reason="dependency_not_completed:agricultural_collection",
+        ),
+        _component(
+            staging,
+            "post_change_attribution",
+            {},
+            status="skipped",
+            reason="dependency_not_completed:agricultural_persistence",
+        ),
+    ]
+
+    result = materialize_report_figure_collection(
+        staging=staging,
+        components=components,
+        overall_status="partial",
+        recorded_at="2026-08-24T12:00:00+00:00",
+    )
+
+    dataset = json.loads((staging / str(result["dataset_path"])).read_text("utf-8"))
+    assert dataset["schema_version"] == "1.4.0"
+    assert dataset["component_statuses"]["agricultural_collection"] == {
+        "status": "failed",
+        "available": False,
+        "reason": "remote_server_error",
+        "selected_figure_count": 0,
+        "status_receipt": components[1]["status_receipt"],
+        "status_receipt_sha256": components[1]["status_receipt_sha256"],
+    }
+    assert dataset["disturbance_selection"]["complete_event_inventory_path"] is None
+    assert dataset["disturbance_selection"]["complete_candidate_inventory_path"] == (
+        "report_assets/data/main/030_disturbance_events.json"
+    )
+    index = json.loads((staging / "report_assets/index.json").read_text("utf-8"))
+    assert any(
+        item["report_path"] == "report_assets/data/main/030_disturbance_events.json"
+        for item in index["files"]
+    )
+    assert dataset["headline_metrics"]["likely_conversion_area_ha"] is None
+    assert dataset["disturbance_selection"]["selected_candidate_ids"] == ["PDC-PARTIAL-1"]
 
 
 def test_collects_bounded_report_figures_without_moving_sources(tmp_path: Path) -> None:
@@ -148,6 +247,8 @@ def test_collects_bounded_report_figures_without_moving_sources(tmp_path: Path) 
     assert index["selection_policy_version"] == "2.0.0"
     assert index["component_statuses"]["hampel_benchmark"] == {
         "status": "diagnostic_unavailable",
+        "available": False,
+        "reason": "diagnostic_unavailable",
         "selected_figure_count": 0,
         "status_receipt": "components/hampel_benchmark/component_status.json",
         "status_receipt_sha256": components[1]["status_receipt_sha256"],
@@ -176,43 +277,60 @@ def test_builds_structured_report_package_and_selects_priority_events(
 ) -> None:
     staging = tmp_path / "run"
     disturbance_events = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "event_count": 3,
         "total_event_area_ha": 17.1,
+        "operational_event_count": 2,
+        "operational_event_area_ha": 17.0,
         "events": [
             {"event_id": "PDE-A", "area_ha": 10.0, "area_threshold_met": True},
             {"event_id": "PDE-B", "area_ha": 7.0, "area_threshold_met": True},
             {"event_id": "PDE-C", "area_ha": 0.1, "area_threshold_met": False},
         ],
     }
+    attribution_records = [
+        {
+            "candidate_id": "PDE-A",
+            "event_id": "PDE-A",
+            "record_type": "conversion_likely_event",
+            "interpretation_level": "event",
+            "interpretation_status": "conversion_likely",
+            "automatic_status": "conversion_likely",
+            "area_ha": 10.0,
+            "area_threshold_met": True,
+            "likely_conversion_area_ha": 4.0,
+        },
+        {
+            "candidate_id": "PDE-B",
+            "event_id": None,
+            "record_type": "disturbance_candidate",
+            "interpretation_level": "candidate_episode",
+            "interpretation_status": "persistent_unattributed",
+            "automatic_status": "review_required",
+            "area_ha": 7.0,
+            "area_threshold_met": True,
+            "likely_conversion_area_ha": 0.0,
+        },
+        {
+            "candidate_id": "PDE-C",
+            "event_id": None,
+            "record_type": "disturbance_candidate",
+            "interpretation_level": "candidate_episode",
+            "interpretation_status": "candidate_only",
+            "automatic_status": "low_risk",
+            "area_ha": 0.1,
+            "area_threshold_met": False,
+            "likely_conversion_area_ha": 0.0,
+        },
+    ]
     attribution = {
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "status": "review_required",
         "likely_conversion_area_ha": 4.0,
         "conversion_likely_count": 1,
-        "events": [
-            {
-                "event_id": "PDE-A",
-                "automatic_status": "conversion_likely",
-                "area_ha": 10.0,
-                "area_threshold_met": True,
-                "likely_conversion_area_ha": 4.0,
-            },
-            {
-                "event_id": "PDE-B",
-                "automatic_status": "review_required",
-                "area_ha": 7.0,
-                "area_threshold_met": True,
-                "likely_conversion_area_ha": 0.0,
-            },
-            {
-                "event_id": "PDE-C",
-                "automatic_status": "review_required",
-                "area_ha": 0.1,
-                "area_threshold_met": False,
-                "likely_conversion_area_ha": 0.0,
-            },
-        ],
+        "records": attribution_records,
+        "candidates": attribution_records[1:],
+        "events": attribution_records[:1],
     }
     components = [
         _component(
@@ -345,7 +463,7 @@ def test_builds_structured_report_package_and_selects_priority_events(
         parent_analysis_id="parent-analysis",
     )
 
-    assert result["schema_version"] == "2.0.0"
+    assert result["schema_version"] == "2.1.0"
     assert result["dataset_path"] == "report_assets/report_dataset.json"
     assert result["selected_event_count"] == 2
     dataset = json.loads((staging / str(result["dataset_path"])).read_text("utf-8"))
@@ -356,8 +474,10 @@ def test_builds_structured_report_package_and_selects_priority_events(
     assert dataset["headline_metrics"] == {
         "establishment_area_ha": 100.0,
         "forest_area_2020_ha": 60.0,
-        "detected_event_area_ha": 17.1,
-        "detected_event_count": 3,
+        "candidate_episode_area_ha": 17.0,
+        "candidate_episode_count": 2,
+        "spectral_candidate_area_ha": 17.1,
+        "spectral_candidate_count": 3,
         "likely_conversion_area_ha": 4.0,
         "conversion_likely_count": 1,
         "automatic_final_assessment_generated": False,
@@ -368,10 +488,13 @@ def test_builds_structured_report_package_and_selects_priority_events(
         "full limitation",
         "No se determinó deforestación.",
     ]
-    assert [event["event_id"] for event in dataset["selected_events"]] == [
+    assert [item["candidate_id"] for item in dataset["selected_disturbances"]] == [
         "PDE-A",
         "PDE-B",
     ]
+    assert dataset["disturbance_selection"]["complete_event_inventory_path"] == (
+        "report_assets/data/main/080_post_change_attribution.json"
+    )
     index = json.loads((staging / "report_assets/index.json").read_text("utf-8"))
     report_paths = {item["report_path"] for item in index["files"]}
     assert "report_assets/figures/events/PDE-A/disturbance.png" in report_paths

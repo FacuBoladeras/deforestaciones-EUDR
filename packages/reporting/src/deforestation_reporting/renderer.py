@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import html
+import os
+from datetime import datetime
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -16,7 +19,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.utils import ImageReader, TimeStamp
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -39,7 +42,6 @@ from deforestation_reporting.basemap import OSMBasemapProvider, OverpassOSMProvi
 from deforestation_reporting.graphics import (
     agricultural_map_bounds,
     agricultural_support_map,
-    baseline_area_chart,
     events_overview_map,
     forest_trajectory_chart,
     sensitivity_chart,
@@ -68,6 +70,23 @@ _TEXT = colors.HexColor("#1F2937")
 _MUTED = colors.HexColor("#6B7280")
 _FONT_REGULAR = "ReportBody"
 _FONT_BOLD = "ReportBody-Bold"
+_EUDR_CUTOFF = "31/12/2020"
+_PRIORITY_EVENT_LIMIT = 4
+
+
+class _AuditDocTemplate(BaseDocTemplate):  # type: ignore[misc]
+    """Agrega marcadores PDF a los títulos editoriales declarados."""
+
+    def afterFlowable(self, flowable: Any) -> None:
+        bookmark = getattr(flowable, "_audit_bookmark", None)
+        level = getattr(flowable, "_audit_level", None)
+        if not isinstance(bookmark, str) or not isinstance(level, int):
+            return
+        title = getattr(flowable, "_audit_title", None)
+        if not isinstance(title, str):
+            title = flowable.getPlainText() if isinstance(flowable, Paragraph) else str(bookmark)
+        self.canv.bookmarkPage(bookmark)
+        self.canv.addOutlineEntry(title, bookmark, level=level, closed=False)
 
 
 def _register_fonts() -> None:
@@ -92,9 +111,11 @@ def render_technical_report(
     output_path: Path,
     *,
     osm_basemap_provider: OSMBasemapProvider | None = None,
+    issued_at: datetime | None = None,
 ) -> ReportArtifact:
     """Renderiza el informe cliente sin mutar el expediente científico verificado."""
     view = build_report_view_model(package)
+    emission_time = issued_at or view.analysis.recorded_at
     output = output_path.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     basemap_provider = osm_basemap_provider or OverpassOSMProvider(
@@ -103,7 +124,7 @@ def render_technical_report(
     temporary = output.with_suffix(".tmp")
     temporary.unlink(missing_ok=True)
     try:
-        document = BaseDocTemplate(
+        document = _AuditDocTemplate(
             str(temporary),
             pagesize=_PORTRAIT_PAGE,
             leftMargin=1.7 * cm,
@@ -116,19 +137,22 @@ def render_technical_report(
         )
         document.addPageTemplates(
             [
-                _page_template("cover", view, cover=True, pagesize=_PORTRAIT_PAGE),
-                _page_template("content", view, cover=False, pagesize=_PORTRAIT_PAGE),
+                _page_template("cover", view, emission_time, cover=True, pagesize=_PORTRAIT_PAGE),
+                _page_template(
+                    "content", view, emission_time, cover=False, pagesize=_PORTRAIT_PAGE
+                ),
                 _page_template(
                     "landscape",
                     view,
+                    emission_time,
                     cover=False,
                     pagesize=_LANDSCAPE_PAGE,
                 ),
             ]
         )
         document.build(
-            _story(view, basemap_provider),
-            canvasmaker=_deterministic_canvas,
+            _story(view, basemap_provider, emission_time),
+            canvasmaker=partial(_dated_canvas, creation_time=emission_time),
         )
         temporary.replace(output)
     except Exception:
@@ -137,135 +161,965 @@ def render_technical_report(
     return ReportArtifact(path=output, sha256=_sha256(output), size_bytes=output.stat().st_size)
 
 
-def _story(view: ReportViewModel, osm_basemap_provider: OSMBasemapProvider) -> list[Any]:
+def _story(
+    view: ReportViewModel,
+    osm_basemap_provider: OSMBasemapProvider,
+    emission_time: datetime,
+) -> list[Any]:
     styles = _styles()
+    priority = _priority_events(view)
     story: list[Any] = [
-        Spacer(1, 1.35 * cm),
-        Paragraph(view.title, styles["cover_title"]),
-        Spacer(1, 0.45 * cm),
-        Paragraph(
-            f"Establecimiento: <b>{_escape(view.analysis.establishment_id)}</b>",
-            styles["cover_subtitle"],
-        ),
-        Spacer(1, 0.25 * cm),
-        Paragraph(f"ID de análisis: {_escape(view.analysis.analysis_id)}", styles["cover_meta"]),
-        Paragraph(
-            f"Período analizado hasta: {view.analysis.analysis_end_date.isoformat()}",
-            styles["cover_meta"],
-        ),
-        Spacer(1, 0.45 * cm),
-        Paragraph("Qué clase de informe es", styles["cover_science_heading"]),
-        Paragraph(
-            "Este informe reúne evidencia geoespacial para apoyar la revisión de cambios "
-            "de cobertura posteriores al 31/12/2020. Parte de una línea base de cobertura "
-            "forestal al 31/12/2020, analiza series multitemporales para identificar cambios "
-            "persistentes y evalúa el uso posterior mediante convergencia de evidencias. "
-            "Sus resultados expresan estimaciones científicas sujetas a incertidumbre y "
-            "revisión humana.",
-            styles["cover_science"],
-        ),
-        Spacer(1, 0.45 * cm),
-        Paragraph(
-            f"Resultado automático: <b>{_result_status_label(view.result_status)}</b>",
-            styles["cover_status"],
-        ),
-        Spacer(1, 0.45 * cm),
-        Paragraph(
-            "Resultado técnico automático. Toda alerta y toda evidencia compatible con "
-            "conversión requieren revisión humana documentada.",
-            styles["cover_note"],
-        ),
-        Spacer(1, 0.35 * cm),
+        Spacer(1, 1.9 * cm),
+        _section_heading(view.title, styles["cover_title"], "cover", outline_title="Portada"),
+        Spacer(1, 1.1 * cm),
+        _cover_metadata_table(view, emission_time, styles),
+        Spacer(1, 0.9 * cm),
+        Paragraph(_headline_messages(view)[0], styles["cover_result"]),
+        Spacer(1, 1.0 * cm),
         Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
-        Spacer(1, 0.45 * cm),
-        Paragraph("Índice de contenidos", styles["cover_index_heading"]),
-        _section_index_table(view, styles),
         NextPageTemplate("content"),
         PageBreak(),
     ]
     story.extend(_executive_section(view, styles))
-    story.extend(_events_overview_section(view, styles))
-    story.extend(_global_evidence_sections(view, styles))
-    for event in view.events:
-        if event.selected_for_detail:
-            story.extend(
-                _event_sections(
-                    view,
-                    event,
-                    _event_client_figure(view, event),
-                    styles,
-                    osm_basemap_provider,
-                )
-            )
-    story.extend(_quality_section(view, styles))
-    story.extend(_limitations_section(view, styles))
+    story.extend(_identification_section(view, styles))
+    story.extend(_eudr_scope_section(styles))
+    story.extend(_events_overview_section(view, priority, styles))
+    story.extend(_priority_event_sections(view, priority, styles, osm_basemap_provider))
+    story.extend(_temporal_evidence_section(view, styles))
+    story.extend(_conclusion_section(view, styles))
+    story.extend(_technical_annexes(view, priority, styles))
     return story
 
 
 def _executive_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
-    result_text = (
-        "Se identificó al menos un evento con evidencia automática compatible con "
-        "conversión de bosque a uso agrícola. El expediente requiere revisión humana."
-        if (view.metrics.likely_conversion_area_ha or 0) > 0
-        else "No se generó una conclusión automática final; el expediente conserva los "
-        "eventos y limitaciones que deben revisarse."
-    )
+    messages = _headline_messages(view)
     return [
-        Paragraph("1. Resumen ejecutivo", styles["heading"]),
-        Paragraph("Cómo leer este informe", styles["subheading"]),
+        _section_heading(
+            "2. Resumen ejecutivo",
+            styles["heading"],
+            "executive",
+            outline_title="Resumen ejecutivo",
+        ),
+        Paragraph(messages[0], styles["headline_primary"]),
+        Paragraph(messages[1], styles["headline_secondary"]),
+        Paragraph(messages[2], styles["headline_secondary"]),
+        Paragraph(messages[3], styles["headline_secondary"]),
+        Spacer(1, 0.35 * cm),
+        _dashboard_table(view, styles),
+        Spacer(1, 0.55 * cm),
+        Paragraph("Tres niveles de interpretación", styles["subheading"]),
+        _interpretation_layers_table(view, styles),
+        Spacer(1, 0.4 * cm),
         Paragraph(
-            "El documento separa la línea base forestal, los cambios detectados y la "
-            "atribución del uso posterior. Las superficies y figuras son evidencia técnica "
-            "automática: orientan la revisión, pero no sustituyen una conclusión documentada.",
+            "Los niveles anteriores no son equivalentes: detectar un cambio no implica "
+            "atribuir conversión, y ninguna salida automática reemplaza la decisión humana "
+            "documentada.",
             styles["body"],
         ),
-        Paragraph(result_text, styles["lead"]),
-        Spacer(1, 0.2 * cm),
-        _metrics_summary_table(view, styles),
-        Spacer(1, 0.55 * cm),
-        Paragraph("Cobertura forestal al corte del 31/12/2020", styles["subheading"]),
-        baseline_area_chart(view.baseline, width=15.3 * cm, height=4.0 * cm),
-        Spacer(1, 0.15 * cm),
+    ]
+
+
+def _section_heading(
+    text: str,
+    style: ParagraphStyle,
+    bookmark: str,
+    *,
+    level: int = 0,
+    outline_title: str | None = None,
+) -> Paragraph:
+    paragraph = Paragraph(text, style)
+    paragraph._audit_bookmark = bookmark
+    paragraph._audit_level = level
+    paragraph._audit_title = outline_title or text
+    return paragraph
+
+
+def _cover_metadata_table(
+    view: ReportViewModel,
+    emission_time: datetime,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    rows = [
+        ("Establecimiento", view.analysis.establishment_id),
+        ("ID del análisis", view.analysis.analysis_id),
+        ("Fecha de emisión", emission_time.date().isoformat()),
+        ("Fecha de corte EUDR", _EUDR_CUTOFF),
+        ("Período analizado", f"01/01/2020 a {view.analysis.analysis_end_date:%d/%m/%Y}"),
+        ("Resultado técnico", _headline_messages(view)[0]),
+    ]
+    data = [
+        [
+            Paragraph(_escape(label), styles["cover_field_label"]),
+            Paragraph(_escape(value), styles["cover_field_value"]),
+        ]
+        for label, value in rows
+    ]
+    table = Table(data, colWidths=[5.2 * cm, 9.2 * cm], hAlign="CENTER")
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, -1), _LIGHT_BLUE),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D7DEE7")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    return table
+
+
+def _headline_messages(view: ReportViewModel) -> tuple[str, str, str, str]:
+    attribution_available = _component_available(view, "post_change_attribution")
+    likely_area = view.metrics.likely_conversion_area_ha or 0.0
+    detected_count = view.metrics.spectral_candidate_count or 0
+    if not attribution_available:
+        primary = "La evidencia disponible es incompleta para evaluar conversión."
+    elif likely_area > 0:
+        primary = "Se identificó evidencia compatible con conversión."
+    else:
+        primary = "No se identificó evidencia suficiente de conversión."
+    if detected_count > 0:
+        changes = "Se detectaron eventos de cambio que requieren revisión."
+    else:
+        changes = "No se detectaron eventos de cambio en el período evaluado."
+    area = f"Superficie compatible con conversión: {_ha(likely_area)}."
+    review = f"Estado de revisión humana: {_review_state(view)}."
+    return primary, changes, area, review
+
+
+def _review_state(view: ReportViewModel) -> str:
+    if not _component_available(view, "post_change_attribution"):
+        return "Pendiente por evidencia incompleta"
+    if view.metrics.automatic_final_assessment_generated:
+        return "Automática disponible; validación humana pendiente"
+    if any(event.human_review_required for event in view.events):
+        return "Pendiente"
+    return "Sin revisión documentada"
+
+
+def _dashboard_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+    baseline = view.baseline
+    metrics = view.metrics
+    event_summary = (
+        f"{_number(metrics.spectral_candidate_count)} registros · "
+        f"{_ha(metrics.spectral_candidate_area_ha)}"
+    )
+    cards = [
+        ("Superficie declarada", _ha(metrics.establishment_area_ha), "blue"),
+        ("Bosque 2020", _ha(baseline.automated_forest_area_ha), "green"),
+        ("No bosque", _ha(baseline.automated_nonforest_area_ha), "gray"),
+        ("Revisión requerida", _ha(baseline.review_required_area_ha), "amber"),
+        ("Sin datos", _ha(baseline.insufficient_data_area_ha), "gray"),
+        ("Eventos de cambio", event_summary, "amber"),
+        (
+            "Área compatible con conversión",
+            _ha(metrics.likely_conversion_area_ha),
+            "red" if (metrics.likely_conversion_area_ha or 0) > 0 else "green",
+        ),
+        ("Estado de revisión", _review_state(view), "amber"),
+    ]
+    data = [
+        [_dashboard_card(*cards[index], styles) for index in range(row, row + 2)]
+        for row in range(0, len(cards), 2)
+    ]
+    table = Table(data, colWidths=[7.45 * cm, 7.45 * cm], rowHeights=[2.0 * cm] * 4)
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return table
+
+
+def _dashboard_card(
+    label: str,
+    value: str,
+    tone: str,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    palette = {
+        "blue": (_LIGHT_BLUE, _BLUE),
+        "green": (_LIGHT_GREEN, _GREEN),
+        "amber": (_LIGHT_AMBER, _AMBER),
+        "red": (colors.HexColor("#FDECEC"), _RED),
+        "gray": (_LIGHT_GRAY, _MUTED),
+    }
+    background, accent = palette[tone]
+    table = Table(
+        [
+            [Paragraph(_escape(label), styles["dashboard_label"])],
+            [Paragraph(_escape(value), styles["dashboard_value"])],
+        ]
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), background),
+                ("BOX", (0, 0), (-1, -1), 1.0, accent),
+                ("LINEBEFORE", (0, 0), (0, -1), 4.0, accent),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, 0), 7),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 7),
+            ]
+        )
+    )
+    return table
+
+
+def _interpretation_layers_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+    detected = view.metrics.spectral_candidate_count or 0
+    compatible = view.metrics.conversion_likely_count or 0
+    rows = [
+        (
+            "1 · Cambio de cobertura detectado",
+            f"{detected} registros, {_ha(view.metrics.spectral_candidate_area_ha)}",
+            "Señal espacial posterior al corte; no atribuye causa.",
+        ),
+        (
+            "2 · Evidencia compatible con conversión",
+            f"{compatible} eventos, {_ha(view.metrics.likely_conversion_area_ha)}",
+            "Exige convergencia de bosque, pérdida, persistencia, uso y superficie.",
+        ),
+        (
+            "3 · Decisión humana y estado de revisión",
+            _review_state(view),
+            "La conclusión documentada corresponde al operador, auditor o certificador.",
+        ),
+    ]
+    data = [
+        [
+            Paragraph(_escape(label), styles["table_cell_bold"]),
+            Paragraph(_escape(value), styles["table_cell_bold"]),
+            Paragraph(_escape(explanation), styles["table_cell"]),
+        ]
+        for label, value, explanation in rows
+    ]
+    table = Table(data, colWidths=[5.2 * cm, 3.5 * cm, 6.6 * cm])
+    table.setStyle(_table_style(header=False))
+    return table
+
+
+def _identification_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    return [
+        PageBreak(),
+        _section_heading(
+            "3. Identificación y geolocalización",
+            styles["heading"],
+            "identification",
+            outline_title="Identificación y geolocalización",
+        ),
+        _two_column_table(
+            [
+                ("Establecimiento", view.analysis.establishment_id),
+                ("ID abreviado del análisis", view.analysis.analysis_id[:8]),
+                ("Tipo de geometría", view.geometry.geometry_type),
+                ("CRS de intercambio", view.geometry.normalized_crs),
+                ("CRS de cálculo de superficie", view.geometry.calculation_crs),
+                ("Superficie declarada", _ha(view.metrics.establishment_area_ha)),
+                ("Reparación topológica", "Sí" if view.geometry.repair_performed else "No"),
+            ],
+            styles,
+        ),
+        Spacer(1, 0.45 * cm),
+        events_overview_map(
+            (),
+            establishment_geometry=view.establishment_geometry,
+            width=15.3 * cm,
+            height=9.5 * cm,
+        ),
         Paragraph(
-            "La superficie declarada se calculó sobre la geometría vectorial. Las categorías "
-            "forestales se midieron sobre una grilla raster; por eso sus denominadores no se "
-            "mezclan para producir un porcentaje único.",
+            "La geometría se intercambia en WGS 84 (EPSG:4326). Las superficies se calculan "
+            f"en {view.geometry.calculation_crs} para evitar distorsiones métricas.",
             styles["fine_left"],
         ),
     ]
 
 
-def _events_overview_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _eudr_scope_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
+    rows = [
+        ("Geolocalización", "Cubierta", "Geometría declarada y validada espacialmente."),
+        ("Bosque de referencia 2020", "Cubierto", "Línea base automática al 31/12/2020."),
+        ("Cambios posteriores", "Cubiertos", "Serie temporal posterior a la fecha de corte."),
+        (
+            "Conversión a uso agropecuario",
+            "Evaluada técnicamente",
+            "Atribución automática sujeta a evidencia y revisión.",
+        ),
+        ("Legalidad", "No evaluada", "Requiere fuentes y procedimientos externos."),
+        (
+            "Trazabilidad de animales o productos",
+            "No evaluada",
+            "No forma parte del expediente geoespacial.",
+        ),
+        ("Certificación EUDR", "Fuera del alcance", "El informe no certifica cumplimiento."),
+    ]
+    data = [
+        [
+            Paragraph("Aspecto", styles["table_header"]),
+            Paragraph("Cobertura", styles["table_header"]),
+            Paragraph("Alcance de esta evidencia", styles["table_header"]),
+        ]
+    ]
+    data.extend(
+        [
+            Paragraph(_escape(aspect), styles["table_cell_bold"]),
+            Paragraph(_escape(status), styles["table_cell_bold"]),
+            Paragraph(_escape(scope), styles["table_cell"]),
+        ]
+        for aspect, status, scope in rows
+    )
+    table = Table(data, colWidths=[5.3 * cm, 3.6 * cm, 6.4 * cm], repeatRows=1)
+    table.setStyle(_table_style())
     return [
         PageBreak(),
-        Paragraph("2. Cambios detectados después de la fecha de corte", styles["heading"]),
+        _section_heading(
+            "4. Alcance EUDR",
+            styles["heading"],
+            "eudr-scope",
+            outline_title="Alcance EUDR",
+        ),
         Paragraph(
-            "El mapa muestra la ubicación relativa de todos los eventos persistentes. Los "
-            "colores expresan su interpretación automática y no una confirmación legal.",
+            "La tabla distingue lo cubierto por el análisis geoespacial de aquello que "
+            "requiere verificaciones legales, documentales o de trazabilidad independientes.",
             styles["body"],
         ),
-        Paragraph("Referencia espacial", styles["subheading"]),
+        table,
+        Spacer(1, 0.6 * cm),
+        Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
+    ]
+
+
+def _component_available(view: ReportViewModel, name: str) -> bool:
+    return any(component.name == name and component.available for component in view.components)
+
+
+def _events_overview_section(
+    view: ReportViewModel,
+    priority: tuple[EventSummary, ...],
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    labelled = frozenset(event.candidate_id for event in priority)
+    remaining = max(len(view.events) - len(priority), 0)
+    return [
+        PageBreak(),
+        _section_heading(
+            "5. Resultado cartográfico",
+            styles["heading"],
+            "cartography",
+            outline_title="Resultado cartográfico",
+        ),
         Paragraph(
-            "El perímetro declarado se usa como contexto local. Coordenadas WGS 84: la "
-            "grilla, la flecha norte y la escala aproximada complementan la lectura "
-            "espacial del inventario.",
+            "El mapa representa todos los cambios conservados en el inventario. Sólo se "
+            "rotulan los registros prioritarios para mantener legibilidad; los restantes se "
+            "muestran sin etiqueta y permanecen trazables en el anexo.",
             styles["body"],
         ),
         events_overview_map(
             view.events,
             establishment_geometry=view.establishment_geometry,
+            label_candidate_ids=labelled,
             width=15.3 * cm,
-            height=8.4 * cm,
+            height=12.2 * cm,
         ),
-        Spacer(1, 0.35 * cm),
-        Paragraph("Inventario completo de eventos", styles["subheading"]),
-        _event_inventory_table(view.events, styles),
-        Spacer(1, 0.2 * cm),
+        Spacer(1, 0.3 * cm),
+        _cartographic_summary_table(view, len(priority), remaining, styles),
+        Spacer(1, 0.25 * cm),
         Paragraph(
-            "Los eventos menores a 0,5 ha se conservan como evidencia intermedia, pero no "
-            "satisfacen por sí solos el umbral informativo de superficie.",
+            "La simbología combina color, rótulo y descripción textual. El mapa base es "
+            "contexto de presentación y no forma parte de la evidencia científica.",
             styles["fine_left"],
         ),
+    ]
+
+
+def _cartographic_summary_table(
+    view: ReportViewModel,
+    priority_count: int,
+    remaining_count: int,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    return _two_column_table(
+        [
+            ("Registros detectados", _number(view.metrics.spectral_candidate_count)),
+            ("Superficie detectada", _ha(view.metrics.spectral_candidate_area_ha)),
+            (
+                "Candidatos sobre la referencia de 0,5 ha",
+                f"{_number(view.metrics.candidate_episode_count)} · "
+                f"{_ha(view.metrics.candidate_episode_area_ha)}",
+            ),
+            ("Eventos prioritarios rotulados", str(priority_count)),
+            ("Registros restantes sin rótulo", str(remaining_count)),
+            ("Área compatible con conversión", _ha(view.metrics.likely_conversion_area_ha)),
+        ],
+        styles,
+    )
+
+
+def _priority_events(view: ReportViewModel) -> tuple[EventSummary, ...]:
+    ranked = sorted(
+        view.events,
+        key=lambda event: (
+            event.record_type == "conversion_likely_event",
+            event.likely_conversion_area_ha,
+            event.area_ha,
+            -event.ordinal,
+        ),
+        reverse=True,
+    )
+    return tuple(ranked[:_PRIORITY_EVENT_LIMIT])
+
+
+def _priority_event_sections(
+    view: ReportViewModel,
+    priority: tuple[EventSummary, ...],
+    styles: dict[str, ParagraphStyle],
+    osm_basemap_provider: OSMBasemapProvider,
+) -> list[Any]:
+    result: list[Any] = [
+        NextPageTemplate("landscape"),
+        PageBreak(),
+        _section_heading(
+            "6. Eventos prioritarios",
+            styles["landscape_heading"],
+            "priority",
+            outline_title="Eventos prioritarios",
+        ),
+        Paragraph(
+            "La prioridad se determina de forma reproducible: primero evidencia compatible "
+            "con conversión y luego mayor superficie observada. La prioridad ordena la "
+            "revisión; no modifica el resultado científico.",
+            styles["landscape_body"],
+        ),
+    ]
+    if not priority:
+        result.extend(
+            [
+                Paragraph("No hay registros prioritarios para presentar.", styles["lead"]),
+                NextPageTemplate("content"),
+            ]
+        )
+        return result
+    for index, event in enumerate(priority, start=1):
+        if index > 1:
+            result.append(PageBreak())
+        result.extend(
+            _priority_event_page(
+                view,
+                event,
+                index,
+                _event_client_figure(view, event),
+                styles,
+                osm_basemap_provider,
+            )
+        )
+    result.extend([NextPageTemplate("content")])
+    return result
+
+
+def _priority_event_page(
+    view: ReportViewModel,
+    event: EventSummary,
+    priority_ordinal: int,
+    client_figure: ClientFigure | None,
+    styles: dict[str, ParagraphStyle],
+    osm_basemap_provider: OSMBasemapProvider,
+) -> list[Any]:
+    map_width, map_height = 12.5 * cm, 5.9 * cm
+    geometry = event.candidate_geometry or event.event_geometry
+    basemap = (
+        osm_basemap_provider.get(
+            agricultural_map_bounds(geometry, width=map_width, height=map_height)
+        )
+        if geometry
+        else None
+    )
+    map_flowable = agricultural_support_map(
+        event,
+        establishment_geometry=view.establishment_geometry,
+        basemap=basemap,
+        width=map_width,
+        height=map_height,
+    )
+    evidence_flowable: Any
+    if client_figure is None:
+        evidence_flowable = Paragraph(
+            "Comparación antes/después no disponible en los assets seleccionados.",
+            styles["landscape_body"],
+        )
+    else:
+        evidence_flowable = _scaled_report_image(
+            client_figure,
+            max_width=12.5 * cm,
+            max_height=5.9 * cm,
+        )
+    evidence_table = Table(
+        [
+            [
+                Paragraph("Mapa y uso posterior", styles["panel_heading"]),
+                Paragraph("Comparación antes/después", styles["panel_heading"]),
+            ],
+            [map_flowable, evidence_flowable],
+        ],
+        colWidths=[12.9 * cm, 12.9 * cm],
+    )
+    evidence_table.setStyle(_panel_table_style())
+    lower_table = Table(
+        [
+            [
+                _priority_summary_table(event, styles),
+                forest_trajectory_chart(event, width=12.5 * cm, height=3.6 * cm),
+            ]
+        ],
+        colWidths=[12.9 * cm, 12.9 * cm],
+    )
+    lower_table.setStyle(_panel_table_style())
+    return [
+        _section_heading(
+            f"6.{priority_ordinal}. {_record_title(event)}",
+            styles["landscape_subheading"],
+            f"priority-{priority_ordinal}",
+            level=1,
+        ),
+        Paragraph(
+            f"{_event_status_label(event)} · {_ha(event.area_ha)} · inicio estimado "
+            f"{_event_onset(event)} · revisión humana {_review_label(event)}.",
+            styles["status_banner"],
+        ),
+        Spacer(1, 0.15 * cm),
+        evidence_table,
+        Spacer(1, 0.2 * cm),
+        lower_table,
+        Paragraph(
+            f"Interpretación técnica: {_event_interpretation(event)}",
+            styles["landscape_caption"],
+        ),
+    ]
+
+
+def _priority_summary_table(event: EventSummary, styles: dict[str, ParagraphStyle]) -> Table:
+    alternative = (
+        "No respaldada"
+        if any(
+            gate.key == "strong_alternative_explanation_absent" and gate.passed
+            for gate in event.gates
+        )
+        else "Presente o pendiente de evaluación"
+    )
+    rows = [
+        ("ID técnico", event.candidate_id),
+        ("Estado", _event_status_label(event)),
+        ("Área y fecha", f"{_ha(event.area_ha)} · {_event_onset(event)}"),
+        ("Uso posterior", _post_use_label(event.post_change_use)),
+        ("Área compatible", _ha(event.likely_conversion_area_ha)),
+        ("Explicación alternativa", alternative),
+        ("Estado de revisión", _review_label(event)),
+        ("Condiciones", _compact_gate_result(event)),
+    ]
+    return _two_column_table(rows, styles, widths=(4.2 * cm, 8.0 * cm), compact=True)
+
+
+def _compact_gate_result(event: EventSummary) -> str:
+    passed = sum(gate.passed for gate in event.gates)
+    return f"{passed} de {len(event.gates)} satisfechas"
+
+
+def _review_label(event: EventSummary) -> str:
+    return "pendiente" if event.human_review_required else "sin revisión requerida por el modelo"
+
+
+def _temporal_evidence_section(
+    view: ReportViewModel, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    figures = [
+        figure
+        for figure in view.client_figures
+        if figure.kind in {"annual_forest_change", "rgb_timeline"}
+    ]
+    if not figures:
+        return [
+            NextPageTemplate("content"),
+            PageBreak(),
+            _section_heading(
+                "7. Evidencia temporal",
+                styles["heading"],
+                "temporal",
+                outline_title="Evidencia temporal",
+            ),
+            Paragraph(
+                "No hay figuras temporales disponibles en el contrato editorial verificado.",
+                styles["body"],
+            ),
+        ]
+    result: list[Any] = [NextPageTemplate("landscape")]
+    first_page = True
+    for figure in figures:
+        for page in _global_figure_pages(figure, view, styles):
+            result.append(PageBreak())
+            if first_page:
+                result.extend(
+                    [
+                        _section_heading(
+                            "7. Evidencia temporal",
+                            styles["landscape_heading"],
+                            "temporal",
+                            outline_title="Evidencia temporal",
+                        ),
+                        Paragraph(
+                            "La lectura principal prioriza referencia 2020, ventana del cambio, "
+                            "período posterior y situación reciente. Las series exhaustivas y la "
+                            "calidad observacional se documentan en los anexos.",
+                            styles["landscape_body"],
+                        ),
+                    ]
+                )
+                first_page = False
+            result.extend(page)
+    result.append(NextPageTemplate("content"))
+    return result
+
+
+def _conclusion_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    messages = _headline_messages(view)
+    pending = [
+        "Revisar los registros prioritarios y las explicaciones alternativas.",
+        "Contrastar con documentación del establecimiento y, cuando corresponda, "
+        "evidencia de campo.",
+        "Documentar la conclusión humana sin sustituir las verificaciones de legalidad "
+        "y trazabilidad.",
+    ]
+    return [
+        PageBreak(),
+        _section_heading(
+            "8. Conclusión y revisión humana",
+            styles["heading"],
+            "conclusion",
+            outline_title="Conclusión y revisión humana",
+        ),
+        Paragraph("Resultado automático", styles["subheading"]),
+        Paragraph(messages[0], styles["headline_primary"]),
+        Paragraph(messages[1], styles["body"]),
+        Paragraph(messages[2], styles["body"]),
+        Paragraph("Interpretación técnica", styles["subheading"]),
+        Paragraph(
+            "El resultado distingue cambio detectado, atribución compatible con conversión "
+            "y decisión humana. La ausencia de evidencia suficiente de conversión no equivale "
+            "a certificación de cumplimiento.",
+            styles["body"],
+        ),
+        Paragraph("Aspectos pendientes", styles["subheading"]),
+        *[_bullet(item, styles) for item in pending],
+        Paragraph("Estado de revisión humana", styles["subheading"]),
+        _review_fields_table(view, styles),
+        Spacer(1, 0.5 * cm),
+        Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
+    ]
+
+
+def _review_fields_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+    rows = [
+        ("Estado", _review_state(view)),
+        ("Revisor", "________________________________________"),
+        ("Fecha", "____ / ____ / ________"),
+        ("Observaciones", "\n\n\n"),
+    ]
+    data = [
+        [
+            Paragraph(_escape(label), styles["table_cell_bold"]),
+            Paragraph(_escape(value), styles["table_cell"]),
+        ]
+        for label, value in rows
+    ]
+    table = Table(
+        data,
+        colWidths=[5.0 * cm, 10.0 * cm],
+        rowHeights=[None, None, None, 2.4 * cm],
+        hAlign="LEFT",
+    )
+    table.setStyle(_table_style(header=False, compact=True))
+    return table
+
+
+def _technical_annexes(
+    view: ReportViewModel,
+    priority: tuple[EventSummary, ...],
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    result: list[Any] = [
+        PageBreak(),
+        _section_heading(
+            "9. Anexos técnicos",
+            styles["heading"],
+            "annexes",
+            outline_title="Anexos técnicos",
+        ),
+        Paragraph(
+            "Los anexos conservan el inventario íntegro, las fichas secundarias, las series "
+            "temporales, la calidad observacional, las fuentes y la trazabilidad técnica.",
+            styles["body"],
+        ),
+        _section_heading(
+            "9.1. Inventario completo", styles["subheading"], "annex-inventory", level=1
+        ),
+        Paragraph(
+            "Todos los registros se mantienen en el PDF. La selección prioritaria sólo cambia "
+            "la jerarquía visual del cuerpo principal.",
+            styles["body"],
+        ),
+        _event_inventory_table(view.events, styles),
+        Spacer(1, 0.3 * cm),
+        Paragraph(
+            "Los registros menores o iguales a 0,5 ha permanecen como evidencia intermedia y "
+            "no satisfacen por sí solos el umbral operativo.",
+            styles["fine_left"],
+        ),
+    ]
+    result.extend(_secondary_event_annex(view, priority, styles))
+    result.extend(_complete_temporal_annex(view, styles))
+    result.extend(_methodology_quality_annex(view, styles))
+    result.extend(_sources_annex(view, styles))
+    result.extend(_traceability_annex(view, styles))
+    return result
+
+
+def _secondary_event_annex(
+    view: ReportViewModel,
+    priority: tuple[EventSummary, ...],
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    priority_ids = {event.candidate_id for event in priority}
+    secondary = [event for event in view.events if event.candidate_id not in priority_ids]
+    result: list[Any] = [
+        PageBreak(),
+        _section_heading(
+            "9.2. Fichas detalladas de eventos secundarios",
+            styles["subheading"],
+            "annex-secondary",
+            level=1,
+        ),
+    ]
+    if not secondary:
+        result.append(Paragraph("No hay registros secundarios.", styles["body"]))
+        return result
+    for batch_start in range(0, len(secondary), 6):
+        if batch_start:
+            result.append(PageBreak())
+        cards: list[list[Any]] = []
+        for event in secondary[batch_start : batch_start + 6]:
+            alternative = (
+                "No respaldada"
+                if any(
+                    gate.key == "strong_alternative_explanation_absent" and gate.passed
+                    for gate in event.gates
+                )
+                else "Presente o pendiente"
+            )
+            cards.append(
+                [
+                    Paragraph(
+                        f"{_record_title(event)} · {_event_status_label(event)}",
+                        styles["annex_event_heading"],
+                    ),
+                    _compact_event_table(event, alternative, styles, narrow=True),
+                ]
+            )
+        grid_rows: list[list[Any]] = []
+        for index in range(0, len(cards), 2):
+            row: list[Any] = [cards[index]]
+            row.append(cards[index + 1] if index + 1 < len(cards) else "")
+            grid_rows.append(row)
+        grid = Table(grid_rows, colWidths=[7.55 * cm, 7.55 * cm], hAlign="LEFT")
+        grid.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        result.append(grid)
+    return result
+
+
+def _compact_event_table(
+    event: EventSummary,
+    alternative: str,
+    styles: dict[str, ParagraphStyle],
+    *,
+    narrow: bool = False,
+) -> Table:
+    fields = [
+        ("ID técnico", event.candidate_id),
+        ("Área / inicio", f"{_ha(event.area_ha)} · {_event_onset(event)}"),
+        ("Uso posterior", _post_use_label(event.post_change_use)),
+        ("Área compatible", _ha(event.likely_conversion_area_ha)),
+        ("Condiciones", _compact_gate_result(event)),
+        ("Explicación alternativa", alternative),
+        ("Revisión", _review_label(event)),
+    ]
+    data = [
+        [
+            Paragraph(_escape(label), styles["annex_label"]),
+            Paragraph(_escape(value), styles["annex_value"]),
+        ]
+        for label, value in fields
+    ]
+    widths = [2.15 * cm, 5.1 * cm] if narrow else [4.1 * cm, 11.2 * cm]
+    table = Table(data, colWidths=widths)
+    table.setStyle(_table_style(header=False, compact=True))
+    return table
+
+
+def _complete_temporal_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    specs = {
+        "spectral_index_timeline": "Serie completa de índices espectrales",
+        "observation_coverage": "Calidad observacional temporal",
+        "disturbance_detection": "Detección temporal de perturbaciones",
+        "post_change_attribution": "Síntesis espacial de atribución post-cambio",
+    }
+    result: list[Any] = [
+        NextPageTemplate("landscape"),
+        PageBreak(),
+        _section_heading(
+            "9.3. Series temporales completas",
+            styles["landscape_heading"],
+            "annex-temporal",
+            level=1,
+        ),
+    ]
+    figures = [figure for figure in view.client_figures if figure.kind in specs]
+    if not figures:
+        result.append(Paragraph("No hay figuras temporales adicionales.", styles["body"]))
+    for index, figure in enumerate(figures):
+        if index:
+            result.append(PageBreak())
+        result.extend(
+            [
+                Paragraph(specs[figure.kind], styles["landscape_subheading"]),
+                _scaled_report_image(figure, max_width=26.2 * cm, max_height=15.0 * cm),
+                Paragraph(
+                    "Figura técnica íntegra conservada para auditoría. Su lectura debe "
+                    "considerar las fuentes, resolución y limitaciones documentadas.",
+                    styles["landscape_caption"],
+                ),
+            ]
+        )
+    result.append(NextPageTemplate("content"))
+    return result
+
+
+def _methodology_quality_annex(
+    view: ReportViewModel, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    quality = view.quality
+    coverage = (
+        "No disponible"
+        if quality.minimum_valid_pixel_fraction is None
+        else _percent(quality.minimum_valid_pixel_fraction)
+    )
+    observation_range = (
+        "No disponible"
+        if quality.minimum_mean_observation_count is None
+        or quality.maximum_mean_observation_count is None
+        else (
+            f"{quality.minimum_mean_observation_count:.1f} a "
+            f"{quality.maximum_mean_observation_count:.1f}"
+        ).replace(".", ",")
+    )
+    return [
+        PageBreak(),
+        _section_heading(
+            "9.4. Metodología y calidad observacional",
+            styles["subheading"],
+            "annex-methodology",
+            level=1,
+        ),
+        Paragraph(
+            "El análisis utiliza una línea base forestal 2020, detección multitemporal, "
+            "evaluación de persistencia y atribución del uso posterior. Este anexo resume "
+            "parámetros de lectura sin reemplazar los artefactos estructurados del expediente.",
+            styles["body"],
+        ),
+        _two_column_table(
+            [
+                ("Fecha de corte", _EUDR_CUTOFF),
+                ("Períodos estacionales", str(quality.seasonal_period_count)),
+                ("Cobertura válida mínima", coverage),
+                (
+                    "Períodos de detección evaluables",
+                    f"{quality.evaluable_detection_period_count} de "
+                    f"{quality.detection_period_count}",
+                ),
+                ("Observaciones medias por período", observation_range),
+                ("Umbral operativo de superficie", _ha(view.geometry.threshold_ha)),
+                ("CRS de cálculo", view.geometry.calculation_crs),
+                ("Método de superficie", view.geometry.area_method),
+            ],
+            styles,
+        ),
+        Spacer(1, 0.45 * cm),
+        Paragraph("Limitaciones", styles["subheading"]),
+        *[_bullet(item, styles) for item in view.limitations],
+    ]
+
+
+def _sources_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    return [
+        PageBreak(),
+        _section_heading(
+            "9.5. Fuentes y licencias", styles["subheading"], "annex-sources", level=1
+        ),
+        _datasets_table(view.datasets, styles),
+        Spacer(1, 0.35 * cm),
+        Paragraph(
+            "Las fuentes cumplen roles distintos. Ningún producto global se interpreta como "
+            "verdad de terreno individual.",
+            styles["body"],
+        ),
+    ]
+
+
+def _traceability_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    return [
+        PageBreak(),
+        _section_heading(
+            "9.6. Trazabilidad técnica", styles["subheading"], "annex-traceability", level=1
+        ),
+        _two_column_table(
+            [
+                ("ID completo del análisis", view.analysis.analysis_id),
+                ("Contrato editorial", view.schema_version),
+                ("Fecha registrada", view.analysis.recorded_at.isoformat()),
+                ("Assets verificados", str(view.verified_asset_count)),
+                ("CRS de intercambio", view.geometry.normalized_crs),
+                ("CRS de cálculo", view.geometry.calculation_crs),
+            ],
+            styles,
+        ),
+        Spacer(1, 0.5 * cm),
+        Paragraph("Estado de componentes", styles["subheading"]),
+        _components_table(view, styles),
+        Spacer(1, 0.45 * cm),
+        Paragraph(
+            "Los archivos declarados por report_assets/index.json se verifican por tamaño y "
+            "SHA-256 antes del renderizado. Los hashes individuales, versiones, fuentes y "
+            "artefactos estructurados permanecen en el expediente descargable.",
+            styles["body"],
+        ),
+        Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
     ]
 
 
@@ -338,7 +1192,7 @@ def _annual_forest_pages(
     return [
         [
             Paragraph(
-                "2.1.a. Cobertura forestal anual y pérdidas candidatas: clases",
+                "7.1. Cobertura forestal anual: referencia y trayectoria",
                 styles["landscape_heading"],
             ),
             Paragraph(
@@ -357,7 +1211,7 @@ def _annual_forest_pages(
         ],
         [
             Paragraph(
-                "2.1.b. Pérdidas candidatas respecto de 2020",
+                "7.2. Cambios anuales respecto de la referencia 2020",
                 styles["landscape_heading"],
             ),
             Paragraph(
@@ -411,7 +1265,7 @@ def _rgb_timeline_pages(
     return [
         [
             Paragraph(
-                "2.2.a. Evolución visual estacional en color natural: 2020-2022",
+                "7.3. Referencia 2020 y primeras ventanas de cambio",
                 styles["landscape_heading"],
             ),
             Paragraph(
@@ -429,7 +1283,7 @@ def _rgb_timeline_pages(
         ],
         [
             Paragraph(
-                "2.2.b. Evolución visual estacional: 2023-2025",
+                "7.4. Período posterior y situación reciente",
                 styles["landscape_heading"],
             ),
             Paragraph(
@@ -560,7 +1414,7 @@ def _event_sections(
     basemap = (
         osm_basemap_provider.get(
             agricultural_map_bounds(
-                event.event_geometry,
+                event.candidate_geometry or event.event_geometry,
                 width=map_width,
                 height=map_height,
             )
@@ -571,25 +1425,29 @@ def _event_sections(
     result: list[Any] = [
         PageBreak(),
         Paragraph(
-            f"3.{event.ordinal}. Evento E{event.ordinal}: {_event_status_label(event)}",
+            f"3.{event.ordinal}. {_record_title(event)}: {_event_status_label(event)}",
             styles["heading"],
         ),
         Paragraph(
-            f"Identificador técnico: {_escape(event.event_id)}. Inicio estimado: "
+            f"Identificador técnico: {_escape(event.candidate_id)}. Inicio estimado: "
             f"{_event_onset(event)}.",
             styles["body"],
         ),
         _event_summary_table(event, styles),
         Spacer(1, 0.4 * cm),
-        Paragraph("Interpretación del evento", styles["subheading"]),
+        Paragraph(f"Interpretación {_record_genitive(event)}", styles["subheading"]),
         Paragraph(_event_interpretation(event), styles["body"]),
         Paragraph("Condiciones evaluadas", styles["subheading"]),
         _gates_table(event, styles),
         Spacer(1, 0.45 * cm),
-        Paragraph("Evolución de la cobertura forestal dentro del evento", styles["subheading"]),
+        Paragraph(
+            f"Evolución de la cobertura forestal dentro {_record_genitive(event)}",
+            styles["subheading"],
+        ),
         forest_trajectory_chart(event, width=15.3 * cm, height=5.0 * cm),
         Paragraph(
-            "La fracción anual representa una clasificación binaria dentro del evento; no es "
+            "La fracción anual representa una clasificación binaria dentro del área "
+            "analizada; no es "
             "una probabilidad calibrada de deforestación ni de incumplimiento EUDR.",
             styles["fine_left"],
         ),
@@ -600,13 +1458,13 @@ def _event_sections(
                 NextPageTemplate("landscape"),
                 PageBreak(),
                 Paragraph(
-                    f"Evidencia espectral complementaria del evento E{event.ordinal}",
+                    f"Evidencia espectral complementaria {_record_genitive(event)}",
                     styles["landscape_heading"],
                 ),
                 Paragraph(
                     "La figura compara NDVI previo al corte con la ventana estimada de inicio, "
                     "muestra su diferencia espacial y resume la trayectoria media de índices "
-                    "dentro del evento.",
+                    "dentro del área analizada.",
                     styles["landscape_body"],
                 ),
                 Spacer(1, 0.15 * cm),
@@ -659,7 +1517,7 @@ def _event_sections(
             Paragraph(
                 "El rango de sensibilidad muestra cómo cambia la superficie al variar el umbral "
                 "técnico; no es un intervalo de confianza estadístico. Dynamic World V1 es la "
-                "única fuente temporal agrícola operativa de este MVP.",
+                "fuente temporal agrícola operativa del análisis.",
                 styles["fine_left"],
             ),
         ]
@@ -672,7 +1530,7 @@ def _event_client_figure(view: ReportViewModel, event: EventSummary) -> ClientFi
         (
             figure
             for figure in view.client_figures
-            if figure.kind == "event_spectral_evidence" and figure.event_id == event.event_id
+            if figure.kind == "event_spectral_evidence" and figure.event_id == event.candidate_id
         ),
         None,
     )
@@ -846,11 +1704,21 @@ def _metrics_summary_table(view: ReportViewModel, styles: dict[str, ParagraphSty
     rows = [
         ("Superficie declarada", _ha(metrics.establishment_area_ha)),
         ("Bosque automático 2020", _ha(metrics.forest_area_2020_ha)),
-        ("Eventos detectados", _number(metrics.detected_event_count)),
-        ("Superficie con eventos", _ha(metrics.detected_event_area_ha)),
-        ("Área compatible con conversión", _ha(metrics.likely_conversion_area_ha)),
-        ("Eventos con esa evidencia", _number(metrics.conversion_likely_count)),
+        ("Componentes espectrales candidatos", _number(metrics.spectral_candidate_count)),
+        ("Superficie candidata conservada", _ha(metrics.spectral_candidate_area_ha)),
+        (
+            "Episodios candidatos espacialmente coherentes",
+            _number(metrics.candidate_episode_count),
+        ),
+        ("Superficie de episodios candidatos", _ha(metrics.candidate_episode_area_ha)),
     ]
+    if any(event.record_type == "conversion_likely_event" for event in view.events):
+        rows.extend(
+            [
+                ("Área compatible con conversión", _ha(metrics.likely_conversion_area_ha)),
+                ("Eventos de conversión probable", _number(metrics.conversion_likely_count)),
+            ]
+        )
     return _two_column_table(rows, styles)
 
 
@@ -870,7 +1738,7 @@ def _event_inventory_table(
     for event in events:
         data.append(
             [
-                Paragraph(f"E{event.ordinal}", styles["table_cell_bold"]),
+                Paragraph(_record_code(event), styles["table_cell_bold"]),
                 Paragraph(_escape(_event_onset(event)), styles["table_cell"]),
                 Paragraph(_ha(event.area_ha), styles["table_cell"]),
                 Paragraph(_ha(event.persistent_agricultural_area_ha), styles["table_cell"]),
@@ -891,18 +1759,25 @@ def _event_summary_table(event: EventSummary, styles: dict[str, ParagraphStyle])
     agreement = "no disponible"
     if event.dual_detector_pixel_count is not None and event.pixel_count:
         agreement = _percent(event.dual_detector_pixel_count / event.pixel_count)
-    return _two_column_table(
-        [
-            ("Resultado automático", _event_status_label(event)),
-            ("Superficie del evento", _ha(event.area_ha)),
-            ("Área compatible con conversión", _ha(event.likely_conversion_area_ha)),
-            ("Uso posterior", _post_use_label(event.post_change_use)),
-            ("Coincidencia espacial de dos detectores", agreement),
-            ("Confianza numérica", _confidence(event)),
-            ("Revisión humana", "requerida" if event.human_review_required else "no requerida"),
-        ],
-        styles,
-    )
+    rows = [
+        ("Resultado automático", _event_status_label(event)),
+        ("Superficie observada", _ha(event.area_ha)),
+        ("Uso posterior", _post_use_label(event.post_change_use)),
+        ("Coincidencia espacial de dos detectores", agreement),
+        ("Confianza numérica", _confidence(event)),
+        ("Revisión humana", "requerida" if event.human_review_required else "no requerida"),
+    ]
+    if event.record_type == "conversion_likely_event":
+        rows.insert(2, ("Área compatible con conversión", _ha(event.likely_conversion_area_ha)))
+    elif event.conjunctive_conversion_evidence_area_ha > 0:
+        rows.insert(
+            2,
+            (
+                "Área de conjunción científica bajo umbral",
+                _ha(event.conjunctive_conversion_evidence_area_ha),
+            ),
+        )
+    return _two_column_table(rows, styles)
 
 
 def _gates_table(event: EventSummary, styles: dict[str, ParagraphStyle]) -> Table:
@@ -995,6 +1870,7 @@ def _components_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) 
         [
             Paragraph("Componente", styles["table_header"]),
             Paragraph("Estado", styles["table_header"]),
+            Paragraph("Disponibilidad / motivo", styles["table_header"]),
         ]
     ]
     for component in view.components:
@@ -1002,14 +1878,28 @@ def _components_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) 
             [
                 Paragraph(_escape(_component_label(component.name)), styles["table_cell"]),
                 Paragraph(_escape(_component_status_label(component.status)), styles["table_cell"]),
+                Paragraph(
+                    _escape(
+                        "Disponible"
+                        if component.available
+                        else f"No disponible: {component.reason or component.status}"
+                    ),
+                    styles["table_cell"],
+                ),
             ]
         )
-    table = Table(data, colWidths=[8.4 * cm, 6.9 * cm], repeatRows=1)
+    table = Table(data, colWidths=[5.0 * cm, 3.7 * cm, 6.6 * cm], repeatRows=1)
     table.setStyle(_table_style())
     return table
 
 
-def _two_column_table(rows: list[tuple[str, str]], styles: dict[str, ParagraphStyle]) -> Table:
+def _two_column_table(
+    rows: list[tuple[str, str]],
+    styles: dict[str, ParagraphStyle],
+    *,
+    widths: tuple[float, float] = (8.2 * cm, 7.1 * cm),
+    compact: bool = False,
+) -> Table:
     data = [
         [
             Paragraph(_escape(label), styles["table_cell_bold"]),
@@ -1017,7 +1907,8 @@ def _two_column_table(rows: list[tuple[str, str]], styles: dict[str, ParagraphSt
         ]
         for label, value in rows
     ]
-    table = Table(data, colWidths=[8.2 * cm, 7.1 * cm])
+    table = Table(data, colWidths=list(widths))
+    padding = 3 if compact else 5
     table.setStyle(
         TableStyle(
             [
@@ -1026,8 +1917,8 @@ def _two_column_table(rows: list[tuple[str, str]], styles: dict[str, ParagraphSt
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), padding),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
             ]
         )
     )
@@ -1049,6 +1940,35 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=31,
             textColor=_BLUE,
             alignment=TA_CENTER,
+        ),
+        "cover_field_label": ParagraphStyle(
+            "CoverFieldLabel",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=9.5,
+            leading=12.5,
+            textColor=_BLUE,
+        ),
+        "cover_field_value": ParagraphStyle(
+            "CoverFieldValue",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=9.5,
+            leading=12.5,
+            textColor=_TEXT,
+        ),
+        "cover_result": ParagraphStyle(
+            "CoverResult",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=15,
+            leading=20,
+            textColor=_GREEN,
+            alignment=TA_CENTER,
+            borderColor=_GREEN,
+            borderWidth=1,
+            borderPadding=12,
+            backColor=_LIGHT_GREEN,
         ),
         "cover_subtitle": ParagraphStyle(
             "CoverSubtitle",
@@ -1175,8 +2095,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "Body",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=9.2,
-            leading=13.2,
+            fontSize=9.7,
+            leading=14.0,
             textColor=_TEXT,
             alignment=TA_LEFT,
             spaceAfter=6,
@@ -1185,8 +2105,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "Bullet",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=8.7,
-            leading=12,
+            fontSize=9.5,
+            leading=13.5,
             leftIndent=10,
             firstLineIndent=-7,
             textColor=_TEXT,
@@ -1196,8 +2116,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "FineLeft",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=6.8,
-            leading=9.2,
+            fontSize=7.8,
+            leading=10.2,
             textColor=_MUTED,
             alignment=TA_LEFT,
         ),
@@ -1214,8 +2134,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "LandscapeBody",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=8.2,
-            leading=10.5,
+            fontSize=9.5,
+            leading=12.5,
             textColor=_TEXT,
             spaceAfter=3,
         ),
@@ -1223,8 +2143,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             "LandscapeCaption",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=7.2,
-            leading=9.2,
+            fontSize=8.0,
+            leading=10.2,
             textColor=_MUTED,
         ),
         "disclaimer": ParagraphStyle(
@@ -1244,38 +2164,145 @@ def _styles() -> dict[str, ParagraphStyle]:
             "TableHeader",
             parent=base["BodyText"],
             fontName=_FONT_BOLD,
-            fontSize=7.2,
-            leading=9,
+            fontSize=8.0,
+            leading=9.8,
             textColor=colors.white,
         ),
         "table_cell": ParagraphStyle(
             "TableCell",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=6.8,
-            leading=8.7,
+            fontSize=7.8,
+            leading=9.7,
             textColor=_TEXT,
         ),
         "table_cell_bold": ParagraphStyle(
             "TableCellBold",
             parent=base["BodyText"],
             fontName=_FONT_BOLD,
-            fontSize=6.8,
+            fontSize=7.8,
+            leading=9.7,
+            textColor=_TEXT,
+        ),
+        "headline_primary": ParagraphStyle(
+            "HeadlinePrimary",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=14,
+            leading=18,
+            textColor=_BLUE,
+            spaceAfter=8,
+        ),
+        "headline_secondary": ParagraphStyle(
+            "HeadlineSecondary",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=10,
+            leading=14,
+            textColor=_TEXT,
+            spaceAfter=3,
+        ),
+        "dashboard_label": ParagraphStyle(
+            "DashboardLabel",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=8.2,
+            leading=10,
+            textColor=_MUTED,
+        ),
+        "dashboard_value": ParagraphStyle(
+            "DashboardValue",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=12,
+            leading=15,
+            textColor=_TEXT,
+        ),
+        "landscape_subheading": ParagraphStyle(
+            "LandscapeSubheading",
+            parent=base["Heading2"],
+            fontName=_FONT_BOLD,
+            fontSize=12.5,
+            leading=15,
+            textColor=_BLUE,
+            spaceAfter=4,
+        ),
+        "panel_heading": ParagraphStyle(
+            "PanelHeading",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=8.5,
+            leading=10.5,
+            textColor=_BLUE,
+            alignment=TA_CENTER,
+        ),
+        "status_banner": ParagraphStyle(
+            "StatusBanner",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=9.2,
+            leading=12,
+            textColor=_AMBER,
+            backColor=_LIGHT_AMBER,
+            borderColor=_AMBER,
+            borderWidth=0.6,
+            borderPadding=5,
+        ),
+        "annex_event_heading": ParagraphStyle(
+            "AnnexEventHeading",
+            parent=base["Heading3"],
+            fontName=_FONT_BOLD,
+            fontSize=9.5,
+            leading=12,
+            textColor=_BLUE,
+            spaceAfter=3,
+        ),
+        "annex_label": ParagraphStyle(
+            "AnnexLabel",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=7.2,
+            leading=8.7,
+            textColor=_MUTED,
+        ),
+        "annex_value": ParagraphStyle(
+            "AnnexValue",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=7.2,
             leading=8.7,
             textColor=_TEXT,
         ),
     }
 
 
-def _table_style() -> TableStyle:
+def _table_style(*, header: bool = True, compact: bool = False) -> TableStyle:
+    first_data_row = 1 if header else 0
+    padding = 2 if compact else 4
+    commands: list[tuple[Any, ...]] = [
+        ("ROWBACKGROUNDS", (0, first_data_row), (-1, -1), [colors.white, _LIGHT_BLUE]),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), padding),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+    ]
+    if header:
+        commands.insert(0, ("BACKGROUND", (0, 0), (-1, 0), _BLUE))
+    return TableStyle(commands)
+
+
+def _panel_table_style() -> TableStyle:
     return TableStyle(
         [
-            ("BACKGROUND", (0, 0), (-1, 0), _BLUE),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _LIGHT_BLUE]),
-            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("BACKGROUND", (0, 0), (-1, 0), _LIGHT_BLUE),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7DEE7")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]
@@ -1285,6 +2312,7 @@ def _table_style() -> TableStyle:
 def _page_template(
     template_id: str,
     view: ReportViewModel,
+    emission_time: datetime,
     *,
     cover: bool,
     pagesize: tuple[float, float],
@@ -1307,6 +2335,7 @@ def _page_template(
             pdf,
             doc,
             view,
+            emission_time,
             cover=cover,
             pagesize=pagesize,
         ),
@@ -1317,6 +2346,7 @@ def _decorate_page(
     pdf: canvas.Canvas,
     _doc: Any,
     view: ReportViewModel,
+    emission_time: datetime,
     *,
     cover: bool,
     pagesize: tuple[float, float],
@@ -1325,8 +2355,10 @@ def _decorate_page(
     horizontal_margin = 1.4 * cm if page_width > page_height else 1.7 * cm
     pdf.saveState()
     pdf.setTitle(view.title)
-    pdf.setAuthor("Deforestation Evidence Pipeline")
+    pdf.setAuthor("Sistema de evidencia geoespacial EUDR")
+    pdf.setCreator("Renderer de informes geoespaciales auditables")
     pdf.setSubject("Evidencia técnica geoespacial sujeta a revisión humana")
+    pdf.setKeywords("EUDR, evidencia geoespacial, deforestación, auditoría, revisión humana")
     if not cover:
         pdf.setStrokeColor(colors.HexColor("#D1D5DB"))
         pdf.line(
@@ -1345,18 +2377,39 @@ def _decorate_page(
         pdf.drawRightString(
             page_width - horizontal_margin,
             page_height - 0.85 * cm,
-            view.analysis.analysis_id,
+            f"Análisis {view.analysis.analysis_id[:8]}",
         )
     pdf.setFont(_FONT_REGULAR, 7)
     pdf.setFillColor(_MUTED)
-    pdf.drawCentredString(page_width / 2, 0.85 * cm, f"Página {pdf.getPageNumber()}")
+    pdf.drawString(horizontal_margin, 0.72 * cm, f"Contrato editorial {view.schema_version}")
+    pdf.drawCentredString(page_width / 2, 0.72 * cm, emission_time.date().isoformat())
+    pdf.drawRightString(
+        page_width - horizontal_margin,
+        0.72 * cm,
+        f"Página {pdf.getPageNumber()}",
+    )
     pdf.restoreState()
 
 
-def _deterministic_canvas(filename: str, **kwargs: Any) -> canvas.Canvas:
+def _dated_canvas(
+    filename: str,
+    *,
+    creation_time: datetime,
+    **kwargs: Any,
+) -> canvas.Canvas:
     kwargs["invariant"] = 1
     kwargs["pageCompression"] = 1
-    return canvas.Canvas(filename, **kwargs)
+    pdf = canvas.Canvas(filename, **kwargs)
+    previous_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    try:
+        os.environ["SOURCE_DATE_EPOCH"] = str(int(creation_time.timestamp()))
+        pdf._doc._timeStamp = TimeStamp(invariant=True)
+    finally:
+        if previous_epoch is None:
+            os.environ.pop("SOURCE_DATE_EPOCH", None)
+        else:
+            os.environ["SOURCE_DATE_EPOCH"] = previous_epoch
+    return pdf
 
 
 def _result_status_label(status: str) -> str:
@@ -1370,22 +2423,32 @@ def _result_status_label(status: str) -> str:
 
 
 def _event_status_label(event: EventSummary) -> str:
-    if not event.area_threshold_met:
-        return "Revisión requerida - evento menor a 0,5 ha"
+    if event.record_type == "conversion_likely_event":
+        return "Evidencia compatible con conversión"
     return {
-        "conversion_likely": "Evidencia compatible con conversión",
-        "review_required": "Revisión requerida",
-        "low_risk": "Riesgo técnico bajo",
-        "insufficient_data": "Datos insuficientes",
-    }.get(event.automatic_status, "Revisión requerida")
+        "candidate_only": "Candidato sin persistencia suficiente",
+        "temporary_or_recovered": "Candidato temporal o recuperado",
+        "persistent_unattributed": "Candidato persistente sin uso atribuido",
+        "insufficient_data": "Candidato con datos insuficientes",
+        "subthreshold_conversion_evidence": (
+            "Evidencia conjunta bajo umbral operativo; no es evento probable"
+        ),
+    }.get(event.interpretation_status, "Candidato de perturbación")
 
 
 def _post_use_label(value: str) -> str:
     return {
         "agriculture_likely": "Uso agrícola probable",
         "cropland": "Cultivo probable",
+        "forest_recovery": "Recuperación forestal",
+        "forest_or_regeneration": "Bosque o regeneración",
+        "pasture": "Pastura",
+        "bare_soil": "Suelo desnudo persistente",
+        "infrastructure": "Infraestructura",
+        "water": "Agua",
+        "temporary_disturbance": "Perturbación temporal",
         "unknown": "Uso posterior no determinado",
-    }.get(value, value.replace("_", " "))
+    }.get(value, value.replace("_", " ").capitalize())
 
 
 def _gate_label(key: str) -> str:
@@ -1396,6 +2459,9 @@ def _gate_label(key: str) -> str:
         "agricultural_or_livestock_post_use": "Uso agrícola o ganadero posterior",
         "defensible_area_and_geometry": "Superficie y geometría defendibles",
         "strong_alternative_explanation_absent": "Sin explicación alternativa respaldada",
+        "visec_operational_area_strictly_greater_than_threshold": (
+            "Conjunción estrictamente mayor a 0,5 ha"
+        ),
     }[key]
 
 
@@ -1412,6 +2478,9 @@ def _gate_interpretation(key: str, passed: bool) -> str:
             "strong_alternative_explanation_absent": (
                 "No se registró una explicación alternativa fuerte."
             ),
+            "visec_operational_area_strictly_greater_than_threshold": (
+                "La conjunción científica supera estrictamente el umbral operativo."
+            ),
         }[key]
     return {
         "forest_at_cutoff": "No se estableció bosque automático al corte.",
@@ -1424,6 +2493,9 @@ def _gate_interpretation(key: str, passed: bool) -> str:
         "strong_alternative_explanation_absent": (
             "Existe una explicación alternativa que debe evaluarse."
         ),
+        "visec_operational_area_strictly_greater_than_threshold": (
+            "La conjunción científica no supera estrictamente 0,5 ha y permanece candidata."
+        ),
     }[key]
 
 
@@ -1435,22 +2507,54 @@ def _event_interpretation(event: EventSummary) -> str:
             "agrícola posterior convergen espacialmente. Por eso el evento se clasifica como "
             "evidencia compatible con conversión, siempre sujeta a revisión humana."
         )
+    if event.interpretation_status == "temporary_or_recovered":
+        return (
+            "La perturbación se conserva como candidato auditable, pero la trayectoria indica "
+            "recuperación o carácter temporal. No se promueve a evento probable."
+        )
+    if event.interpretation_status == "candidate_only":
+        return (
+            "La señal no presenta persistencia suficiente para constituir un evento. Se conserva "
+            "como candidato espectral y no modifica por sí sola el estado del establecimiento."
+        )
+    if event.interpretation_status == "subthreshold_conversion_evidence":
+        return (
+            "La perturbación reúne las condiciones científicas conjuntas, pero la superficie "
+            "materializada no supera estrictamente 0,5 ha. Se conserva para revisión como "
+            "candidata y no se presenta como evento probable."
+        )
     if failed:
         return (
             "La evidencia disponible no satisface todas las condiciones necesarias para una "
             f"atribución fuerte. Requieren revisión: {', '.join(failed).lower()}."
         )
     return (
-        "El evento conserva evidencia automática de cambio, pero su interpretación final "
+        "El candidato conserva evidencia automática de cambio, pero su interpretación final "
         "permanece sujeta a revisión humana documentada."
     )
+
+
+def _record_code(event: EventSummary) -> str:
+    prefix = "E" if event.record_type == "conversion_likely_event" else "C"
+    return f"{prefix}{event.ordinal}"
+
+
+def _record_title(event: EventSummary) -> str:
+    noun = "Evento probable" if event.record_type == "conversion_likely_event" else "Candidato"
+    return f"{noun} {_record_code(event)}"
+
+
+def _record_genitive(event: EventSummary) -> str:
+    if event.record_type == "conversion_likely_event":
+        return f"del evento probable {_record_code(event)}"
+    return f"del candidato {_record_code(event)}"
 
 
 def _agricultural_interpretation(event: EventSummary) -> str:
     if event.persistent_agricultural_area_ha > 0:
         return (
             f"Se identificaron {_ha(event.persistent_agricultural_area_ha)} con soporte "
-            "agrícola persistente dentro del evento. Esta evidencia es automática y no "
+            "agrícola persistente dentro del área analizada. Esta evidencia es automática y no "
             "determina por sí sola la finalidad legal del uso del suelo."
         )
     return (

@@ -11,8 +11,12 @@ implementado y validado contra el expediente real en una versión cliente de
 quince páginas que combina GIS, estadísticas y evidencia, con índice, narrativa
 y mapas orientados mediante geometría declarada verificada y contexto vectorial
 OSM al 50 %. Su generación y publicación ya están integradas como postproceso
-del worker, con descarga verificada desde API y cliente web. El siguiente bloque
-operativo es contenerizar API y worker por separado.
+del worker, con descarga verificada desde API y cliente web. Antes de
+contenerizar, el bloque operativo vigente optimiza la materialización remota:
+el Incremento 1 ya consolidó transportes HLS/RF y agregó perfiles `lean/debug`;
+el incremento de robustez ya estabilizó la detección y separó evidencia
+candidata de métricas operativas; el Incremento 2 debe trasladar agregaciones agrícolas temporales a GEE y
+descargar tablas más un conjunto raster mínimo.
 
 El objetivo del siguiente bloque es cerrar esa brecha sin ampliar el MVP hacia
 un LULC completo, otra familia de detectores o una certificación automática.
@@ -60,18 +64,77 @@ fallido, aunque la misma selección de 15 figuras funciona después sobre una
 copia sellada del expediente; registrar el error secundario exacto antes de
 repetir el smoke.
 
-**Reparación operativa `2026-08-13`:** el collector dejó de descargar cada
-mes por separado para cada evento. La configuración `1.1.0` agrupa eventos por
-ventana, descarga una grilla mensual común, obtiene en una sola evaluación los
-conteos de escenas específicos de cada evento y recorta localmente el mismo
-raster alineado a cada grilla evento. Para costa-uru, el plan baja de 2.686
+**Reparación operativa `2026-08-24`:** el collector dejó de descargar cada
+mes por separado para cada candidato. La configuración `1.2.0` agrupa por
+ventana, descarga una grilla mensual común y divide únicamente la evaluación
+de conteos de escenas en lotes determinísticos de hasta 100 candidatos. El
+límite ya no rechaza inventarios mayores ni elimina subumbrales. Una prueba
+local sin GEE cubre 122 candidatos en lotes 100 + 22, con dos meses, dos
+descargas compartidas y los 244 rasters candidato-mes derivados localmente.
+Para costa-uru, el plan baja de 2.686
 productos evento-mes a **55 adquisiciones mensuales** (`48,84×` de reúso); la
 grilla común es 438 × 286, 125.268 píxeles, bajo el tope versionado de
 1.000.000. Se mantienen los 2.686 rasters evento-mes, footprints, áreas,
 `nodata`, hashes y contratos downstream. Un micro-smoke real sobre noviembre
 de 2025 contó seis escenas en cada uno de los 58 eventos y descargó un GeoTIFF
 de cuatro bandas válido, 517.630 bytes, sin persistir URL. Aún falta repetir
-el run completo para cerrar el criterio de salida.
+el run completo de `costa-prueba` para cerrar el criterio de salida remoto.
+
+**Optimización lean `2026-08-20` — Incremento 1 cerrado:** la configuración
+`1.12.0` usa `output.artifact_profile: lean` por defecto. HLS reúne sus cinco
+productos en un transporte multibanda efímero y RF reduce el caso normal de 18
+a seis transportes para 2020–2024 más P0; ambos reconstruyen localmente los
+mismos TIFF científicos y conservan fallback ante el límite de descarga
+directa. Agricultura deja de persistir el raster mensual `_shared` en `lean`,
+pero mantiene los raster evento-mes que requiere el gate actual. `debug`
+conserva el transporte compartido. No se cambió la ciencia ni se ejecutó un
+nuevo smoke remoto.
+
+**Prueba real grande `2026-08-20`:** `plantaciones-uru.geojson` contiene un
+Polygon válido de 74.949,64 ha. Su grilla HLS a 30 m mide 1.224 × 922
+(1.128.528 píxeles) y las 24 estaciones 2020–2025 representarían 1,68 GB sin
+comprimir frente al presupuesto de serie de 256 MB. Además, el producto de ocho
+índices por período estima 36,11 MB frente al límite directo de 32 MB. El
+preflight detuvo correctamente el run antes de descargar rasters con
+`direct_download_limit_exceeded`. Este caso confirma que el Incremento 2 debe
+evitar materializar el cubo estacional completo para AOI grandes; no corresponde
+elevar los límites ni alterar la geometría para forzar la corrida.
+
+**Prueba real pequeña `2026-08-21`:** `prueba-pequeña.geojson` cubre 1.198,06
+ha y completó los seis componentes científicos bajo el perfil `lean`.
+`report_assets` reunió 53 archivos y 26 figuras, y permitió renderizar y revisar
+un PDF cliente de 37 páginas. RF activó correctamente el fallback individual
+ante `download_url_failed`. El único fallo ocurrió al renombrar atómicamente el
+directorio final por un bloqueo transitorio de Windows (`WinError 5`), después
+de completar ciencia y reporte; el orquestador ahora usa el helper de rename
+con reintentos tanto para publicación final como fallida. El expediente
+original permanece en `.staging` con el sobre de infraestructura para conservar
+la evidencia del incidente. Falta repetir el run para cerrar el gate operativo.
+
+**Robustez espacial, estadística y semántica `2026-08-21` — cerrada localmente:** la
+configuración `1.13.0` evita amplificar MAD locales casi nulos mediante un piso
+cuantílico espacial por estación e índice, sin rellenar MAD nulos ni suavizar la
+reflectancia. La colección técnica `1.1.0` conserva todos los componentes
+persistentes como candidatos auditables y usa 0,5 ha únicamente como evidencia
+de área defendible. La atribución `4.0.0` separa el inventario completo de
+`candidates` y reserva `events` a conversiones probables que satisfacen todas
+las compuertas conjuntivas. Los
+píxeles del borde evaluable se marcan con `EDGE_PIXEL`, pero no se filtran. El
+PDF distingue candidatos de eventos probables, incluso al leer datasets
+editoriales previos. Esto elimina la sobreestimación semántica sin esconder
+salpicado, sin atribuir causas y sin fingir independencia
+entre el detector robusto y CCDC, que comparten HLS.
+
+**Smoke real de robustez `2026-08-21`:** `nativo.geojson` completó los seis
+componentes como `nativo-robustness-retry`. Frente al run anterior del mismo
+archivo, mantuvo 34 componentes candidatos y 15 de un píxel, redujo el área
+candidata de 10,35 a 9,81 ha y el subconjunto por área de 8 a 6 candidatos
+(6,39 a 4,95 ha). Ninguno reunió persistencia más uso agropecuario posterior,
+por lo que el resultado semántico esperado es cero eventos probables. Es
+evidencia de funcionamiento, no calibración temática. Un
+intento previo agotó reintentos HTTP 5xx sobre `rf_transport_2021.tif`; el
+fallback RF multibanda cubre ahora `remote_server_error` además de límite y
+fallo de URL.
 
 El `2026-08-17` se cerró por separado el plumbing local de producto con un gate
 multiproceso sintético: API HTTP, SQLite, worker, `report_assets`, assets y ZIP.

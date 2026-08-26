@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import rasterio
 from pyproj import Transformer
 from rasterio.transform import from_origin
+from shapely.geometry import shape
+from shapely.ops import unary_union
 
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceObservation,
@@ -21,7 +25,11 @@ from deforestation_pipeline.agricultural_evidence import (
 from deforestation_pipeline.post_change_attribution import (
     AgriculturalAttributionSupport,
     AttributionContext,
+    AttributionRules,
     EventTrajectory,
+    _normalize_disjoint_event_geometries,
+    _normalize_likely_event_geometries,
+    _validate_attribution_payload_v5,
     _validate_disjoint_event_geometries,
     attribute_post_change_event,
     materialize_post_change_attribution,
@@ -77,6 +85,11 @@ def test_persistent_rf_loss_without_post_use_evidence_stays_unknown() -> None:
 
     assert result["post_change_use"] == "unknown"
     assert result["automatic_status"] == "review_required"
+    assert result["record_type"] == "disturbance_candidate"
+    assert result["interpretation_level"] == "candidate_episode"
+    assert result["interpretation_status"] == "persistent_unattributed"
+    assert result["candidate_id"] == "PDE-1"
+    assert result["event_id"] is None
     assert "agricultural_use_evidence_missing" in result["reason_codes"]
     assert result["human_review_required"] is True
     assert result["conversion_confirmed"] is False
@@ -102,11 +115,98 @@ def test_policy_eligible_crop_evidence_can_reach_conversion_likely_when_all_gate
 
     assert result["post_change_use"] == "agriculture_likely"
     assert result["automatic_status"] == "conversion_likely"
+    assert result["record_type"] == "conversion_likely_event"
+    assert result["interpretation_level"] == "event"
+    assert result["interpretation_status"] == "conversion_likely"
+    assert result["candidate_id"] == "PDE-1"
+    assert result["event_id"] == "PDE-1"
     assert result["gates"]["all_conversion_likely_gates"] is True
     assert result["conversion_confirmed"] is False
     assert result["persistent_agricultural_area_ha"] == 1.4
     assert result["likely_conversion_area_ha"] == 1.2
     assert "all_conjunctive_conversion_gates_passed" in result["reasons_for"]
+
+
+def test_visec_publication_gate_uses_strict_conjunctive_area_not_candidate_footprint() -> None:
+    result = attribute_post_change_event(
+        event=_event(),
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="crop", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=1.4,
+            conjunctive_likely_area_ha=0.5,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="c" * 64,
+        ),
+    )
+
+    assert result["candidate_area_ha"] == 2.0
+    assert result["conjunctive_conversion_evidence_area_ha"] == 0.5
+    assert result["post_change_use"] == "agriculture_likely"
+    assert result["record_type"] == "disturbance_candidate"
+    assert result["interpretation_status"] == "subthreshold_conversion_evidence"
+    assert result["automatic_status"] == "review_required"
+    assert result["event_id"] is None
+    assert result["likely_conversion_area_ha"] == 0.0
+    assert result["gates"]["visec_operational_area_strictly_greater_than_threshold"] is False
+    assert result["gates"]["all_scientific_conversion_evidence_gates"] is True
+    assert "visec_operational_event_area_not_exceeded" in result["reason_codes"]
+
+
+def test_visec_publication_gate_promotes_conjunctive_area_strictly_above_half_hectare() -> None:
+    result = attribute_post_change_event(
+        event={**_event(), "area_ha": 0.51, "area_threshold_met": False},
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="pasture", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=0.7,
+            conjunctive_likely_area_ha=0.500001,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="d" * 64,
+        ),
+    )
+
+    assert result["record_type"] == "conversion_likely_event"
+    assert result["likely_conversion_area_ha"] == 0.500001
+    assert result["gates"]["visec_operational_area_strictly_greater_than_threshold"] is True
+    assert result["conversion_confirmed"] is False
+
+
+def test_visec_operational_area_reference_is_not_a_tunable_model_threshold() -> None:
+    with np.testing.assert_raises_regex(
+        ValueError,
+        "visec_operational_event_area_threshold_ha debe ser 0.5",
+    ):
+        AttributionRules(visec_operational_event_area_threshold_ha=0.6)
+
+
+def test_alternative_explanations_report_only_evidence_sources_actually_evaluated() -> None:
+    result = attribute_post_change_event(
+        event=_event(),
+        trajectory=_trajectory((1.0, 0.9, 0.1, 0.4, 0.8)),
+        context=AttributionContext(),
+    )
+
+    assert result["alternative_explanation_assessment"] == {
+        "supported_explanations": ["forest_recovery_after_trough"],
+        "evaluated_sources": ["rf_annual_recovery_trajectory"],
+        "unevaluated_explanation_types": [
+            "fire",
+            "flood",
+            "drought",
+            "field_or_high_resolution_evidence",
+        ],
+    }
 
 
 def test_policy_evidence_without_materialized_spatial_conjunction_stays_review_required() -> None:
@@ -144,6 +244,10 @@ def test_recovery_zeroes_likely_area_even_with_agricultural_spatial_support() ->
     )
 
     assert result["post_change_use"] == "forest_recovery"
+    assert result["record_type"] == "disturbance_candidate"
+    assert result["interpretation_status"] == "temporary_or_recovered"
+    assert result["automatic_status"] == "low_risk"
+    assert result["human_review_required"] is False
     assert result["likely_conversion_area_ha"] == 0.0
     assert "strong_alternative_explanation_present" in result["reasons_against"]
 
@@ -164,6 +268,204 @@ def test_overlapping_event_geometries_are_rejected_to_prevent_double_counting() 
         assert "overlap" in str(exc)
     else:
         raise AssertionError("overlapping event geometries accepted")
+
+
+def test_subpixel_topology_sliver_is_removed_without_losing_candidates_or_area() -> None:
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [-59.5, -31.1],
+                        [-59.4999, -31.1],
+                        [-59.4999, -31.0999],
+                        [-59.5, -31.0999],
+                        [-59.5, -31.1],
+                    ]
+                ],
+            },
+            "properties": {"event_id": "PDE-EARLY"},
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [-59.49990005, -31.1],
+                        [-59.4998, -31.1],
+                        [-59.4998, -31.0999],
+                        [-59.49990005, -31.0999],
+                        [-59.49990005, -31.1],
+                    ]
+                ],
+            },
+            "properties": {"event_id": "PDE-LATE"},
+        },
+    ]
+    original_geometries = [shape(cast(dict[str, Any], feature["geometry"])) for feature in features]
+    assert original_geometries[0].intersection(original_geometries[1]).area > 0
+
+    normalized = _normalize_disjoint_event_geometries(features)
+
+    normalized_geometries = [shape(feature["geometry"]) for feature in normalized]
+    assert len(normalized) == 2
+    assert [feature["properties"]["event_id"] for feature in normalized] == [
+        "PDE-EARLY",
+        "PDE-LATE",
+    ]
+    assert normalized_geometries[0].intersection(normalized_geometries[1]).area == 0
+    assert normalized[0]["properties"].get("candidate_topology_overlap_trimmed_ha", 0.0) == 0.0
+    assert normalized[1]["properties"]["candidate_topology_overlap_trimmed_ha"] > 0.0
+    assert math.isclose(
+        unary_union(normalized_geometries).area,
+        unary_union(original_geometries).area,
+        abs_tol=1e-15,
+    )
+    assert (
+        shape(cast(dict[str, Any], features[1]["geometry"]))
+        .intersection(shape(cast(dict[str, Any], features[0]["geometry"])))
+        .area
+        > 0
+    )
+    assert "candidate_topology_overlap_trimmed_ha" not in features[1]["properties"]
+
+
+def test_real_nativo_numeric_overlap_is_not_classified_as_substantive() -> None:
+    """Regresión del par que bloqueó la atribución del smoke frontend."""
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [
+                        [
+                            [-59.49521174, -31.05767872],
+                            [-59.49520468, -31.05740828],
+                            [-59.49489054, -31.05741436],
+                            [-59.4948976, -31.0576848],
+                            [-59.49521174, -31.05767872],
+                        ]
+                    ],
+                    [
+                        [
+                            [-59.49519761, -31.05713785],
+                            [-59.49520468, -31.05740828],
+                            [-59.49551881, -31.0574022],
+                            [-59.49551175, -31.05713177],
+                            [-59.49519761, -31.05713785],
+                        ]
+                    ],
+                ],
+            },
+            "properties": {"event_id": "PDE-6CBC6EEC9E47"},
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [-59.49518349, -31.05659697],
+                        [-59.49519055, -31.05686741],
+                        [-59.49550469, -31.05686133],
+                        [-59.49551175, -31.05713177],
+                        [-59.49488348, -31.05714393],
+                        [-59.49486936, -31.05660305],
+                        [-59.49518349, -31.05659697],
+                    ]
+                ],
+            },
+            "properties": {"event_id": "PDE-25F4AB6C9F41"},
+        },
+    ]
+
+    # La validación clasifica por superficie equivalente, no por grados².
+    _validate_disjoint_event_geometries(features)
+    normalized = _normalize_disjoint_event_geometries(features)
+    geometries = [shape(feature["geometry"]) for feature in normalized]
+    assert geometries[0].intersection(geometries[1]).area == 0.0
+    assert (
+        sum(
+            float(feature["properties"].get("candidate_topology_overlap_trimmed_ha", 0.0))
+            for feature in normalized
+        )
+        > 0.0
+    )
+
+
+def test_substantive_overlap_is_not_normalized_away() -> None:
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [
+            [[-59.5, -31.1], [-59.4, -31.1], [-59.4, -31], [-59.5, -31], [-59.5, -31.1]]
+        ],
+    }
+    features = [
+        {"type": "Feature", "geometry": geometry, "properties": {"event_id": event_id}}
+        for event_id in ("PDE-1", "PDE-2")
+    ]
+
+    with np.testing.assert_raises_regex(ValueError, "event geometries overlap:PDE-1:PDE-2"):
+        _normalize_disjoint_event_geometries(features)
+
+
+def test_likely_event_normalization_keeps_area_ledger_and_candidate_geometry() -> None:
+    candidate = {
+        "type": "Polygon",
+        "coordinates": [
+            [[-59.6, -31.2], [-59.3, -31.2], [-59.3, -30.9], [-59.6, -30.9], [-59.6, -31.2]]
+        ],
+    }
+    first = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-59.5, -31.1],
+                [-59.4999, -31.1],
+                [-59.4999, -31.0999],
+                [-59.5, -31.0999],
+                [-59.5, -31.1],
+            ]
+        ],
+    }
+    second = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-59.49990005, -31.1],
+                [-59.4998, -31.1],
+                [-59.4998, -31.0999],
+                [-59.49990005, -31.0999],
+                [-59.49990005, -31.1],
+            ]
+        ],
+    }
+    records = [
+        {
+            "event_id": event_id,
+            "record_type": "conversion_likely_event",
+            "candidate_geometry": candidate,
+            "conjunctive_conversion_evidence_geometry": geometry,
+            "likely_conversion_geometry": geometry,
+            "likely_conversion_area_ha": area,
+        }
+        for event_id, geometry, area in (("PDE-1", first, 0.7), ("PDE-2", second, 0.8))
+    ]
+
+    normalized = _normalize_likely_event_geometries(records)
+
+    geometries = [shape(record["likely_conversion_geometry"]) for record in normalized]
+    assert geometries[0].intersection(geometries[1]).area == 0
+    assert [record["likely_conversion_area_ha"] for record in normalized] == [0.7, 0.8]
+    assert [record["candidate_geometry"] for record in normalized] == [candidate, candidate]
+    assert all(
+        record["conjunctive_conversion_evidence_geometry"] == record["likely_conversion_geometry"]
+        for record in normalized
+    )
 
 
 def test_duplicate_event_ids_are_rejected_even_when_geometries_do_not_overlap() -> None:
@@ -209,8 +511,25 @@ def test_recovery_without_managed_context_is_forest_recovery() -> None:
     )
 
     assert result["post_change_use"] == "forest_recovery"
-    assert result["automatic_status"] == "review_required"
+    assert result["automatic_status"] == "low_risk"
+    assert result["interpretation_status"] == "temporary_or_recovered"
+    assert result["human_review_required"] is False
     assert "forest_recovery_after_trough" in result["reason_codes"]
+
+
+def test_nonpersistent_signal_remains_candidate_without_forcing_review() -> None:
+    result = attribute_post_change_event(
+        event=_event(),
+        trajectory=_trajectory((1.0, 1.0, 0.4, 0.4, 0.4)),
+        context=AttributionContext(),
+    )
+
+    assert result["record_type"] == "disturbance_candidate"
+    assert result["interpretation_level"] == "candidate_episode"
+    assert result["interpretation_status"] == "candidate_only"
+    assert result["automatic_status"] == "low_risk"
+    assert result["human_review_required"] is False
+    assert result["event_id"] is None
 
 
 def test_policy_ineligible_agricultural_claim_cannot_unlock_conversion_likely() -> None:
@@ -353,6 +672,7 @@ def _write_persistence_bundle(
     source_event_artifact_sha: str | None = None,
     evidence_set_id: str = "33333333-3333-5333-8333-333333333333",
     declared_support_fraction: float = 1.0,
+    support_values: np.ndarray | None = None,
 ) -> Path:
     bundle = root / "agriculture"
     artifacts: list[dict[str, object]] = []
@@ -387,7 +707,12 @@ def _write_persistence_bundle(
         transform=from_origin(left, top, (right - left) / 2, (top - bottom) / 2),
         nodata=-9999.0,
     ) as dataset:
-        dataset.write(np.ones((1, 2, 2), dtype="float32"))
+        values = (
+            np.ones((2, 2), dtype="float32")
+            if support_values is None
+            else np.asarray(support_values, dtype="float32")
+        )
+        dataset.write(values[np.newaxis, ...])
     raster_content = path.read_bytes()
     raster_sha = hashlib.sha256(raster_content).hexdigest()
     artifacts.append({"path": raster_path, "size_bytes": len(raster_content), "sha256": raster_sha})
@@ -404,6 +729,7 @@ def _write_persistence_bundle(
     }
     pixel_area_ha = ((right - left) / 2) * ((top - bottom) / 2) / 10000
     event_area = pixel_area_ha * 4
+    declared_persistent_area = float(np.sum(values, dtype=np.float64) * pixel_area_ha)
     evidence = {
         "schema_version": "1.0.0",
         "evidence_set_id": evidence_set_id,
@@ -424,9 +750,11 @@ def _write_persistence_bundle(
                     "source_resolution_m": 10.0,
                     "event_area_ha": event_area,
                     "valid_area_ha": event_area,
-                    "attributed_area_ha": event_area * declared_support_fraction,
+                    "attributed_area_ha": declared_persistent_area * declared_support_fraction,
                     "event_coverage_fraction": 1.0,
-                    "attributed_event_fraction": declared_support_fraction,
+                    "attributed_event_fraction": (
+                        declared_persistent_area / event_area * declared_support_fraction
+                    ),
                     "resampling_method": "none_native_equal_area_grid",
                 },
                 "temporal_support": {
@@ -476,8 +804,10 @@ def _write_persistence_bundle(
         "cross_source_disagreement_state": "single_source_not_assessed",
         "forest_recovery_assessed": False,
         "event_area_ha": event_area,
-        "persistent_crop_area_ha": event_area * declared_support_fraction,
-        "persistent_event_fraction": declared_support_fraction,
+        "persistent_crop_area_ha": declared_persistent_area * declared_support_fraction,
+        "persistent_event_fraction": (
+            declared_persistent_area / event_area * declared_support_fraction
+        ),
         "support_raster_path": raster_path,
         "support_raster_sha256": raster_sha,
         "sensitivity": [],
@@ -545,8 +875,13 @@ def test_materializer_overlays_events_with_rf_trajectory_and_publishes_manifest(
     payload = json.loads(
         (output / "json/evidence/post_change_attribution.json").read_text(encoding="utf-8")
     )
-    assert payload["events"][0]["post_change_use"] == "managed_harvest"
-    assert payload["events"][0]["conversion_confirmed"] is False
+    assert payload["status"] == "review_required"
+    assert payload["event_count"] == 0
+    assert payload["candidate_count"] == 1
+    assert payload["events"] == []
+    assert payload["candidates"][0]["post_change_use"] == "managed_harvest"
+    assert payload["candidates"][0]["conversion_confirmed"] is False
+    assert payload["records"] == payload["candidates"]
     manifest = json.loads((output / "json/run/manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["artifacts"]) == 6
     assert all((output / item["path"]).is_file() for item in manifest["artifacts"])
@@ -608,6 +943,10 @@ def test_persistent_bundle_materializes_conjunctive_area_and_reversible_sources(
 
     payload = json.loads((output / "json/evidence/post_change_attribution.json").read_text("utf-8"))
     event = payload["events"][0]
+    assert payload["event_count"] == 1
+    assert payload["candidate_count"] == 0
+    assert payload["candidates"] == []
+    assert payload["records"] == payload["events"]
     assert event["automatic_status"] == "conversion_likely"
     assert event["likely_conversion_area_ha"] > 0
     assert payload["likely_conversion_area_ha"] == event["likely_conversion_area_ha"]
@@ -621,6 +960,61 @@ def test_persistent_bundle_materializes_conjunctive_area_and_reversible_sources(
     assert manifest["visualizations"][0]["path"] == figure.relative_to(output).as_posix()
     assert (
         manifest["visualizations"][0]["sha256"] == hashlib.sha256(figure.read_bytes()).hexdigest()
+    )
+
+
+def test_probable_event_geometry_is_materialized_conjunction_and_candidate_is_preserved(
+    tmp_path: Path,
+) -> None:
+    events = _write_source_bundle(tmp_path, input_sha="a" * 64, rf=False)
+    rf = _write_source_bundle(
+        tmp_path,
+        input_sha="a" * 64,
+        rf=True,
+        rf_forests=(1, 1, 0, 0, 0),
+    )
+    agriculture = _write_persistence_bundle(
+        tmp_path,
+        input_sha="a" * 64,
+        source_event_manifest_sha="b" * 64,
+        source_event_artifact_sha=hashlib.sha256(
+            (events / "json/evidence/disturbance_events.geojson").read_bytes()
+        ).hexdigest(),
+        support_values=np.asarray([[1.0, 0.0], [0.0, 0.0]], dtype="float32"),
+    )
+
+    output = materialize_post_change_attribution(
+        source_event_bundle=events,
+        source_rf_bundle=rf,
+        source_agricultural_bundle=agriculture,
+        agricultural_policy=load_agricultural_evidence_policy(
+            Path(__file__).resolve().parents[1] / "configs/agricultural-evidence.yml"
+        ),
+        output_root=tmp_path / "out",
+        establishment_id="field",
+        context=AttributionContext(),
+        created_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    payload = json.loads((output / "json/evidence/post_change_attribution.json").read_text("utf-8"))
+    feature_collection = json.loads(
+        (output / "json/evidence/post_change_attribution.geojson").read_text("utf-8")
+    )
+    event = payload["events"][0]
+    event_feature = feature_collection["features"][0]
+    csv_row = next(
+        csv.DictReader(
+            (output / "tables/evidence/post_change_attribution.csv").read_text("utf-8").splitlines()
+        )
+    )
+    assert event["candidate_geometry"]["coordinates"] == [[[0, 1], [1, 1], [1, 2], [0, 2], [0, 1]]]
+    assert event["likely_conversion_geometry"] == event_feature["geometry"]
+    assert shape(event_feature["geometry"]).area < shape(event["candidate_geometry"]).area
+    assert event["likely_conversion_area_ha"] == event["conjunctive_conversion_evidence_area_ha"]
+    assert float(csv_row["candidate_area_ha"]) == event["candidate_area_ha"]
+    assert (
+        float(csv_row["conjunctive_conversion_evidence_area_ha"])
+        == event["conjunctive_conversion_evidence_area_ha"]
     )
 
 
@@ -734,3 +1128,90 @@ def test_persistent_raster_area_must_match_declared_contract_area(tmp_path: Path
             context=AttributionContext(),
             created_at=datetime(2026, 8, 11, tzinfo=UTC),
         )
+
+
+def _v5_record(*, event: bool) -> dict[str, Any]:
+    polygon = {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]],
+    }
+    return {
+        "schema_version": "5.0.0",
+        "candidate_id": "PDE-1",
+        "event_id": "EVT-1" if event else None,
+        "record_type": "conversion_likely_event" if event else "disturbance_candidate",
+        "interpretation_level": "event" if event else "candidate_episode",
+        "interpretation_status": "conversion_likely" if event else "candidate_only",
+        "post_change_use": "agriculture_likely" if event else "unknown",
+        "automatic_status": "conversion_likely" if event else "review_required",
+        "conversion_confirmed": False,
+        "human_review_required": not event,
+        "gates": {
+            "forest_at_cutoff": event,
+            "post_cutoff_loss": event,
+            "persistent_change": event,
+            "agricultural_or_livestock_post_use": event,
+            "defensible_area_and_geometry": event,
+            "strong_alternative_explanation_absent": event,
+            "visec_operational_area_strictly_greater_than_0_5_ha": event,
+        },
+        "reason_codes": [],
+        "reasons_for": [],
+        "reasons_against": [],
+        "candidate_area_ha": 1.0,
+        "persistent_agricultural_area_ha": 0.6 if event else 0.0,
+        "conjunctive_conversion_evidence_area_ha": 0.6 if event else 0.0,
+        "likely_conversion_area_ha": 0.6 if event else 0.0,
+        "candidate_geometry": polygon,
+        "conjunctive_conversion_evidence_geometry": polygon if event else None,
+        "likely_conversion_geometry": polygon if event else None,
+        "alternative_explanation_assessment": {},
+        "trajectory": {},
+        "context": {},
+        "quality_flags": [],
+    }
+
+
+def _v5_payload() -> dict[str, Any]:
+    event = _v5_record(event=True)
+    candidate = _v5_record(event=False) | {"candidate_id": "PDE-2"}
+    return {
+        "schema_version": "5.0.0",
+        "analysis_id": "12345678-1234-5678-9234-567812345678",
+        "establishment_id": "field",
+        "created_at": "2026-08-24T00:00:00+00:00",
+        "status": "conversion_likely",
+        "automatic_final_assessment_generated": False,
+        "conversion_confirmed_count": 0,
+        "conversion_likely_count": 1,
+        "observed_candidate_count": 2,
+        "candidate_count": 1,
+        "event_count": 1,
+        "likely_conversion_area_ha": 0.6,
+        "counts_by_post_change_use": {"agriculture_likely": 1, "unknown": 1},
+        "counts_by_interpretation_status": {"conversion_likely": 1, "candidate_only": 1},
+        "records": [event, candidate],
+        "candidates": [candidate],
+        "events": [event],
+    }
+
+
+def test_attribution_v5_runtime_validates_partition_and_geometries() -> None:
+    _validate_attribution_payload_v5(_v5_payload())
+
+
+def test_attribution_v5_runtime_rejects_inconsistent_partition() -> None:
+    payload = _v5_payload()
+    payload["events"] = []
+
+    with np.testing.assert_raises_regex(ValueError, "attribution_v5_partition_mismatch"):
+        _validate_attribution_payload_v5(payload)
+
+
+def test_attribution_v5_runtime_rejects_event_without_probable_geometry() -> None:
+    payload = _v5_payload()
+    payload["records"][0]["likely_conversion_geometry"] = None
+    payload["events"][0]["likely_conversion_geometry"] = None
+
+    with np.testing.assert_raises_regex(ValueError, "attribution_v5_event_geometry_invalid"):
+        _validate_attribution_payload_v5(payload)

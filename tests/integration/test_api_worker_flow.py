@@ -104,12 +104,18 @@ def test_api_and_worker_complete_a_synthetic_analysis_across_processes(
         status = _request_json(f"{base_url}{created['status_url']}")
         report = _request_json(f"{base_url}/api/v1/analyses/{analysis_id}/report")
         events = _request_json(f"{base_url}/api/v1/analyses/{analysis_id}/events")
+        candidates = _request_json(f"{base_url}/api/v1/analyses/{analysis_id}/candidates")
         assets = _request_json(f"{base_url}/api/v1/analyses/{analysis_id}/assets")
 
         assert status["status"] == "completed"
         assert status["stage"] == "completed"
         assert report["analysis"]["analysis_id"] == analysis_id
-        assert events["items"] == [{"event_id": "synthetic-event-1", "area_ha": 0.75}]
+        assert [item["event_id"] for item in events["items"]] == ["synthetic-event-1"]
+        assert events["items"][0]["likely_conversion_area_ha"] == 0.75
+        assert [item["candidate_id"] for item in candidates["items"]] == ["synthetic-candidate-2"]
+        assert candidates["items"][0]["interpretation_status"] == (
+            "subthreshold_conversion_evidence"
+        )
         assert assets["total"] == 2
 
         image = next(item for item in assets["items"] if item["media_type"] == "image/png")

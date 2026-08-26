@@ -13,11 +13,13 @@ de linaje, pero exige revisión humana antes de sostener una conversión.
 Este archivo es la referencia canónica del estado actual. El orden de trabajo
 pendiente vive únicamente en [`NEXT_STEPS.md`](NEXT_STEPS.md). Las reglas de
 dominio y de desarrollo que deben respetar humanos y agentes viven en
-[`AGENTS.md`](AGENTS.md).
+[`AGENTS.md`](AGENTS.md). La semántica científica que separa perturbaciones,
+episodios candidatos y eventos probables vive en
+[`DISTURBANCE_INTERPRETATION.md`](DISTURBANCE_INTERPRETATION.md).
 
 ## Checkpoint actual
 
-**Fecha del checkpoint:** 18 de agosto de 2026.
+**Fecha del checkpoint:** 20 de agosto de 2026.
 
 La etapa de detección de perturbaciones está implementada de extremo a extremo
 para rangos estacionales HLS. El pipeline puede:
@@ -40,28 +42,33 @@ para rangos estacionales HLS. El pipeline puede:
     insuficientes, y conservar señales temporales en los tres dominios;
 14. segmentar los candidatos persistentes dentro de `automated_forest` con
     ocho vecinos, asignar IDs determinísticos y medir cada componente;
-15. publicar todos los eventos en CSV, JSON y GeoJSON, más un mapa general y
-    hasta cinco fichas de los eventos de mayor superficie;
-16. atribuir conservadoramente cada evento mediante su trayectoria RF, evidencia
+15. publicar todos los episodios candidatos en CSV, JSON y GeoJSON, más un mapa
+    general y hasta cinco fichas de los candidatos de mayor superficie;
+16. atribuir conservadoramente cada candidato mediante su trayectoria RF, evidencia
     opcional habilitada por política y explicaciones alternativas declaradas;
-17. publicar la atribución v1 por evento en CSV, JSON, GeoJSON y PNG, con hashes
-    de sus bundles fuente y sin emitir confirmación automática.
+17. publicar la atribución v4 con inventarios separados: `records` auditables,
+    `candidates` no finales y `events` sólo para `conversion_likely`, sin emitir
+    confirmación automática;
 18. validar polígonos mediante una API interna `/api/v1`, registrar solicitudes
     idempotentes en SQLite y ejecutarlas con un worker local separado del
     proceso HTTP;
 19. construir un modelo editorial acotado desde `report_assets` verificados y
     renderizar un informe PDF técnico determinístico, sin reinterpretar la
-    evidencia científica.
+    evidencia científica;
+20. ejecutar por defecto con perfil de artefactos `lean`: los contenedores TIFF
+    usados sólo como transporte desde GEE son efímeros, mientras los productos
+    científicos y los insumos de figuras conservan sus grillas, hashes y linaje.
 
 La frontera actual es deliberada:
 
 - **detección de perturbaciones:** implementada;
-- **atribución post-cambio v1:** implementada por evento; distingue agricultura
+- **atribución post-cambio v4:** implementada por candidato; distingue agricultura
   probable, recuperación, cosecha forestal, perturbación temporal y desconocido;
   todavía requiere recolectar evidencia agrícola y ampliar causas alternativas;
-- **eventos persistentes de detección:** vectorizados y medidos; el umbral de
-  0,5 ha se informa sin descartar eventos menores;
-- **agregación final luego de atribuir uso posterior:** pendiente;
+- **episodios candidatos persistentes:** vectorizados y medidos; el umbral de
+  0,5 ha clasifica superficie defendible, pero NO convierte una señal en evento;
+- **eventos de conversión probable:** sólo existen cuando se satisfacen todas
+  las compuertas de atribución definidas en la guía de interpretación;
 - **evaluación automática final:** no generada;
 - **confirmación de conversión o certificación legal:** fuera de la capacidad
   automática actual.
@@ -88,7 +95,8 @@ La API publica:
 - `POST /api/v1/analyses` con `Idempotency-Key` y respuesta `202`;
 - `GET /api/v1/analyses/{analysis_id}`;
 - `GET /api/v1/analyses/{analysis_id}/report`;
-- `GET /api/v1/analyses/{analysis_id}/events` con paginación;
+- `GET /api/v1/analyses/{analysis_id}/candidates` con perturbaciones no finales;
+- `GET /api/v1/analyses/{analysis_id}/events` reservado a conversiones probables;
 - `GET /api/v1/analyses/{analysis_id}/assets` y descarga por ID opaco;
 - `GET /api/v1/analyses/{analysis_id}/report.pdf` para el informe cliente;
 - `GET /api/v1/analyses/{analysis_id}/download` para el ZIP verificable;
@@ -106,30 +114,43 @@ inventario y archivos se verifican por tamaño y SHA-256. Después de esa
 verificación, el worker genera el PDF cliente como postproceso, sella su tamaño
 y SHA-256, y lo agrega sin modificar la allowlist científica. Antes de completar
 el job crea tanto el ZIP determinístico como una copia curada bajo
-`storage_root/analyses/{analysis_id}/results`. FastAPI lee únicamente esa copia
+`storage_root/analyses/{analysis_id}/results/attempt-{attempt}`. El intento que
+completa mediante CAS en SQLite es la referencia visible; FastAPI lee únicamente esa copia
 privada durable: `output_prefix` queda como procedencia y la desaparición del
-workspace científico no rompe `/report`, `/events` ni `/assets`. La expiración
+workspace científico no rompe `/report`, `/candidates`, `/events` ni `/assets`. La expiración
 local responde `410`, impide adquirir jobs vencidos y limpia únicamente objetos
 privados, nunca los runs científicos.
 
 ### Informe técnico PDF - versión cliente
 
-`packages/reporting` `0.6.0`, con contrato editorial `2.3.0`, implementa el
+`packages/reporting` `0.11.0`, con contrato editorial `2.8.0`, implementa el
 informe como una frontera independiente. Verifica el tamaño y SHA-256 de
 `report_assets/index.json`, su dataset y todos los assets allowlisted; luego
 proyecta JSON, CSV y GeoJSON verificados a un modelo Pydantic editorial. También
 recupera la geometría declarada desde el `input.geojson` sellado por el
 `run_manifest.json`; una diferencia de tamaño o hash invalida el render. El
-cuerpo cliente conserva métricas, eventos, condiciones de evidencia, calidad,
+cuerpo cliente conserva métricas, candidatos, eventos probables, condiciones de evidencia, calidad,
 fuentes, limitaciones y trazabilidad, pero excluye comparaciones internas de
 modelos, votos candidatos y diagnósticos crudos sin interpretación.
 
-El renderer ReportLab produce de forma atómica y determinística un PDF A4 con
-índice en portada, introducciones de lectura, resumen ejecutivo, distribución
-de cobertura 2020, mapa e inventario completo de eventos, matrices de
-condiciones, trayectorias forestales, soporte
-agrícola, sensibilidad, calidad, fuentes y descargo legal. El resumen usa una
-tabla técnica compacta, no tarjetas de dashboard. La selección GIS incorpora la
+`report_assets` `2.1.0` y su dataset `1.4.0` declaran para cada componente si
+su evidencia está disponible, junto con el estado y motivo de indisponibilidad.
+Un run parcial puede renderizar las tablas y figuras verificadas que sí existen;
+si persistencia o atribución no se completaron, el PDF lo identifica como
+evidencia incompleta y NO afirma riesgo bajo ni ausencia de conversión. En
+cambio, si un componente declara `completed`, la falta de un asset requerido
+continúa siendo un error de integridad.
+El dataset `1.4.0` mantiene además el inventario completo de perturbaciones del
+detector como fuente de `/candidates` aunque la atribución falle; `/events`
+permanece vacío y el estado parcial conserva explícitamente la incertidumbre.
+
+El renderer ReportLab produce de forma atómica y determinística un PDF A4 orientado
+a revisión y auditoría: portada mínima, resumen ejecutivo en dashboard, identificación,
+alcance EUDR, resultado cartográfico, eventos prioritarios, evidencia temporal,
+conclusión humana y anexos técnicos. Distingue explícitamente cambio detectado,
+evidencia compatible con conversión y decisión humana. El cuerpo sólo rotula cuatro
+registros prioritarios; el inventario completo y las fichas secundarias permanecen en
+el anexo. La selección GIS incorpora la
 cobertura RF anual 2020-2024 con pérdidas candidatas, el timeline RGB estacional
 y la evidencia espectral de cada evento detallado. Los mapas vectoriales agregan
 perímetro declarado, grilla WGS 84, norte, escala aproximada y un localizador del
@@ -143,27 +164,52 @@ del cuerpo, pero siguen verificados y disponibles en el bundle técnico.
 
 El rediseño cliente se validó contra el expediente real preservado: 41 assets,
 cuatro eventos y dos fichas detalladas. Su PDF final tiene quince páginas -nueve
-verticales y seis apaisadas- inspeccionadas una por una. El worker `0.2.0`
+verticales y seis apaisadas- inspeccionadas una por una. El worker `0.3.0`
 invoca el renderer fuera del pipeline científico y fuera del request HTTP,
 publica `client_report/informe-tecnico.pdf` con metadatos verificables y lo
-incluye en el ZIP. La API `0.2.0` sirve el archivo sólo para jobs publicables y
-el cliente web `0.2.0` ofrece una descarga directa junto al expediente completo.
+incluye en el ZIP. La API `0.4.0` sirve el archivo sólo para jobs publicables,
+separa `/candidates` de `/events`, y el cliente web `0.5.0` presenta ambos
+inventarios sin equiparar una perturbación con deforestación.
 
-Para desarrollo local:
+La integración downstream actual consume atribución `5.0.0`: conserva
+`candidate_geometry` para auditoría y usa `likely_conversion_geometry` sólo en
+eventos probables. La evidencia conjuntiva que no supera estrictamente 0,5 ha
+permanece como `subthreshold_conversion_evidence` en `/candidates`; nunca se
+mezcla con `/events`. El PDF muestra únicamente las clases presentes y un run
+sin eventos no incorpora leyenda ni texto de conversión.
+
+Para desarrollo local, la entrada recomendada es un único supervisor. Inicia
+API, **exactamente un worker** y Vite con la misma SQLite, almacenamiento privado
+y raíz de runs; valida ambos puertos, `/health`, el servidor web y que el worker
+siga vivo antes de declarar el stack listo:
 
 ```powershell
-uv run --package deforestation-api deforestation-api
-uv run --package deforestation-worker deforestation-worker
+uv run python scripts/run_local_stack.py
 ```
 
-La API escucha sólo en `127.0.0.1:8000` por defecto. El worker reutiliza
-`credentials.json` si existe; las rutas y credenciales se configuran mediante
-variables de entorno y nunca llegan al contrato HTTP.
+El modo foreground es intencional: `Ctrl+C` ejecuta un shutdown de los tres
+procesos iniciados por ese supervisor. Si el trabajo debe sobrevivir al cierre
+de la terminal se puede usar `--background` y luego `--stop`:
+
+```powershell
+uv run python scripts/run_local_stack.py --background
+uv run python scripts/run_local_stack.py --stop
+```
+
+La API escucha sólo en `127.0.0.1:8000` y Vite en `127.0.0.1:5173`. El launcher
+rechaza otro supervisor vivo y puertos ocupados; **no mata procesos ajenos**.
+Los logs sanitizados quedan separados por proceso bajo
+`outputs/local-stack/logs/<fecha>/`. API y worker comparten por defecto
+`outputs/local-stack/private/jobs.sqlite3` y
+`outputs/local-stack/private/objects`; por eso no deben levantarse a la vez con
+los comandos manuales antiguos. El worker reutiliza `credentials.json` si
+existe o hereda `DEFORESTATION_GEE_CREDENTIALS`; el launcher nunca imprime el
+entorno ni las credenciales.
 
 El cliente web minimalista permite cargar un `Polygon`/`MultiPolygon` GeoJSON o
 dibujar un `Polygon`, validarlo, crear el job, consultar su estado, cancelar en
-modo best-effort, descargar el informe PDF y visualizar el resumen, eventos y
-figuras disponibles. Una
+modo best-effort, descargar el informe PDF y visualizar el resumen,
+perturbaciones candidatas, eventos probables y figuras disponibles. Una
 `FeatureCollection` se normaliza únicamente cuando contiene exactamente una
 `Feature` poligonal; las colecciones vacías o múltiples se rechazan para
 conservar la regla un establecimiento–una geometría. El cliente no reimplementa
@@ -178,7 +224,10 @@ en `?analysis=<uuid>`, por lo que recargar o compartir esa URL reanuda el pollin
 sin reconstruir estado científico en el navegador.
 
 El toolchain web actual requiere Node 20.19 o posterior; `.nvmrc` fija Node
-22.12.0. Para ejecutarlo junto a API y worker:
+22.12.0. El launcher comprueba la versión y, si `PATH` todavía apunta a Node 18,
+prioriza el Node compatible del runtime bundled de Codex —actualmente Node 24—
+sin modificar el `PATH` global. Los comandos manuales siguientes quedan sólo
+como alternativa de diagnóstico experto, no como flujo operativo habitual:
 
 ```powershell
 uv run --package deforestation-api deforestation-api
@@ -188,14 +237,17 @@ cd apps/web
 # Primero instalar/activar Node 22.12 o posterior.
 node --version
 npx pnpm@11.19.0 install
+# Copiar .env.example a .env.local y completar VITE_ARCGIS_API_KEY.
 npx pnpm@11.19.0 dev
 ```
 
 Vite publica el cliente en `127.0.0.1:5173` y redirige `/api` y `/health` a
-`127.0.0.1:8000`, por lo que este incremento no abre CORS. El mapa local usa
-teselas públicas de OpenStreetMap con atribución; el navegador solicita el
-viewport al proveedor, pero no le envía el GeoJSON. Antes de producción debe
-definirse un proveedor y una política de teselas propios.
+`127.0.0.1:8000`, por lo que este incremento no abre CORS. El selector del mapa
+alterna entre `arcgis/imagery` y `open/osm-style` mediante ArcGIS Basemap Styles
+Service v2 y MapLibre, sin cambiar las herramientas de dibujo. Requiere
+`VITE_ARCGIS_API_KEY`; la clave del navegador debe restringirse a los orígenes y
+servicios autorizados. Ambos mapas son sólo contexto visual y no integran la
+evidencia científica.
 
 El gate local de integración levanta una API HTTP descartable y un worker
 one-shot en procesos separados. Comparten sólo SQLite y almacenamiento temporal,
@@ -221,9 +273,9 @@ $env:DEFORESTATION_GEE_CREDENTIALS = $credentials
 $env:DEFORESTATION_ANALYSIS_OUTPUT_ROOT = $outputRoot
 ```
 
-Con esas variables en la terminal del worker, levantar API, worker y web en tres
-terminales, cargar `$input` y usar `establecimiento-2`. Ese submit sí ejecuta
-`run_complete_analysis()` y consume recursos GEE; el gate sintético anterior no.
+Con esas variables en la terminal, ejecutar el launcher único, cargar `$input`
+y usar `establecimiento-2`. Ese submit sí ejecuta `run_complete_analysis()` y
+consume recursos GEE; el gate sintético anterior no.
 
 ## Arquitectura ejecutable
 
@@ -356,7 +408,9 @@ La detección comienza después de la fecha de corte:
 - `2021-DJF` se conserva para auditoría, pero se excluye porque cruza el corte;
 - cada período se compara sólo con referencias de la misma estación;
 - centro histórico: mediana;
-- escala robusta: `1.4826 × MAD`;
+- escala robusta local: `1.4826 × MAD`;
+- estabilización: piso cuantílico espacial por estación e índice sobre escalas
+  positivas; los MAD nulos siguen siendo no estandarizables;
 - umbral benchmark: caída estandarizada `>= 3.0`;
 - señal multíndice: al menos dos índices;
 - persistencia: al menos dos períodos consecutivos;
@@ -370,7 +424,8 @@ al menos una observación finita. Los slices completamente vacíos permanecen
 como `NaN` sin emitir warnings ni introducir relleno.
 
 CCDC procesa observaciones densas HLSL30 enmascaradas y funciona como benchmark
-independiente. Los arrays crudos permanecen en Earth Engine; sólo se descarga
+algorítmico complementario. Como comparte HLS con el detector robusto, su
+acuerdo no se presenta como independencia de sensor. Los arrays crudos permanecen en Earth Engine; sólo se descarga
 un resumen escalar sobre la grilla declarada. `changeProb` conserva la
 semántica de pseudoprobabilidad algorítmica de la ruptura y nunca se interpreta
 como probabilidad de deforestación.
@@ -396,8 +451,10 @@ Los píxeles `PERSISTENT_CANDIDATE` se segmentan sólo después de intersectarlo
 con `automated_forest`. La conectividad es de ocho vecinos y cada ID deriva de
 la grilla más el conjunto ordenado de píxeles, por lo que no depende del orden
 de recorrido en memoria. El área se calcula con el determinante afín de la
-grilla proyectada. El umbral de `0,5 ha` agrega una bandera: **no elimina**
-componentes menores. La ventana de inicio informada es la primera composición
+grilla proyectada. El umbral de `0,5 ha` no elimina componentes menores: genera
+una máscara operativa separada de la máscara candidata. Los píxeles evaluables
+contiguos a una celda no evaluable o al borde de grilla reciben `EDGE_PIXEL`
+como bandera de calidad, nunca como filtro. La ventana de inicio informada es la primera composición
 estacional robusta del evento y no una fecha exacta.
 
 ### 5. Datasets P0 y multianual de entrenamiento para Entre Ríos
@@ -600,19 +657,34 @@ cerrar el área del evento.
 
 El bundle atómico publica `agricultural_evidence.csv`,
 `agricultural_evidence.geojson`, `agricultural_evidence.json`,
-`agricultural_evidence_metadata.json`, los rasters auditables y un manifest
+`agricultural_evidence_metadata.json`, los rasters por evento auditables y un manifest
 con hashes y referencias al bundle fuente. La salida cruda **no** afirma
 persistencia ni conversión. El componente de persistencia consume este bundle
 sin reinterpretar una observación mensual como uso permanente.
 
-Desde la configuración del collector `1.1.0`, los eventos que comparten un mes
-reutilizan una única adquisición Dynamic World sobre una grilla común acotada.
-Los conteos de escenas se calculan por evento en una evaluación vectorizada y
-el GeoTIFF común se recorta localmente, con alineación `nearest`, a cada grilla
-de evento. Esto reduce consultas remotas sin fusionar eventos: cada evento
-conserva raster, footprint, área, `nodata`, grid hash y registro de la
-adquisición compartida que lo originó. Los límites versionados controlan tanto
-cantidad de adquisiciones como píxeles de la grilla común.
+Desde la configuración del collector `1.2.0`, los candidatos que comparten un
+mes reutilizan una única adquisición Dynamic World sobre una grilla común
+acotada. `maximum_events_per_batch` limita a 100 candidatos cada evaluación
+vectorizada de conteos de escenas, pero **no limita el inventario científico**:
+todos los lotes se procesan en orden por identificador y el GeoTIFF mensual se
+descarga una sola vez. El raster común se recorta localmente, con alineación
+`nearest`, a cada grilla candidata. Así también se conservan los candidatos
+subumbrales, cada uno con raster, footprint, área, `nodata`, hashes y referencia
+a su adquisición y lote de origen. Los límites independientes siguen
+controlando adquisiciones mensuales y píxeles de la grilla común.
+
+El payload científico `agricultural-collection` permanece en `1.0.0`; el bundle
+sube a `1.3.0` porque su metadata y manifest declaran el plan de lotes. La
+partición modifica transporte y auditoría, no ventanas, áreas ni semántica de
+persistencia.
+
+El perfil `output.artifact_profile: lean`, activo por defecto, no incorpora al
+bundle el GeoTIFF común bajo `_shared`: se usa como transporte efímero y cada
+ventana por evento mantiene el raster que consume persistencia. El perfil
+`debug` conserva además ese raster compartido para diagnóstico. Este incremento
+reduce almacenamiento y transferencia del entregable sin cambiar cálculos,
+ventanas, áreas ni productos downstream; mover la persistencia temporal a GEE
+queda diferido al siguiente incremento.
 
 Cuando existe al menos un período con soporte espacial válido, también publica
 una lámina `agricultural_monthly_evidence_<event-id>.png` por evento. La lámina
@@ -689,21 +761,25 @@ Dynamic World no distingue por sí mismo recuperación forestal. Esa explicació
 alternativa se evalúa después con la trayectoria RF y queda registrada como
 limitación del bundle de persistencia.
 
-### 5.4 Atribución post-cambio v1
+### 5.4 Atribución post-cambio v4
 
-`post_change_attribution.py` cruza cada geometría de perturbación persistente
+`post_change_attribution.py` cruza cada geometría candidata de perturbación persistente
 con las clases y votos RF 2020–2024. Publica CSV, JSON, GeoJSON, metadata y una
 figura con cinco resultados posibles: `agriculture_likely`,
 `forest_recovery`, `managed_harvest`, `temporary_disturbance` y `unknown`.
 
-La regla es deliberadamente conservadora. `agriculture_likely` sólo puede
-alcanzar `conversion_likely` cuando coinciden bosque al corte, pérdida
+La regla es deliberadamente conservadora. Un registro sólo se publica como
+`conversion_likely_event` cuando `agriculture_likely` alcanza
+`conversion_likely` y coinciden bosque al corte, pérdida
 poscorte, persistencia, área defendible, evidencia **habilitada por política** de uso
 agrícola/ganadero posterior y ausencia de una explicación alternativa fuerte.
 Una pérdida RF sola queda `unknown/review_required`. Un contexto declarado de
 plantación forestal se registra como explicación alternativa, nunca como
 evidencia independiente. El atribuidor automático siempre conserva
-`conversion_confirmed: false`.
+`conversion_confirmed: false`. El JSON `5.0.0` publica `records` como inventario
+completo, `candidates` para lo que no completó las compuertas y `events`
+exclusivamente para conversiones probables. Un candidato temporal, recuperado o
+no persistente ya no fuerza por sí solo `review_required` en el establecimiento.
 
 La integración persistente acepta un **bundle**, no un booleano ni un área
 declarada. Para cada evento reproyecta la conjunción RF de bosque 2020, pérdida
@@ -745,9 +821,14 @@ el stack HLS anual real más el candidato, mientras el mismo flujo P0 sí pudo
 descargarse. El componente exacto que lleva ese grafo completo al límite no
 está aislado; por eso no se atribuye causalidad solamente al tamaño del TABLE.
 
-El fallback descarga desde GEE los cinco GeoTIFF de 56 predictores y aplica
-localmente el joblib sklearn exacto, sin reducir árboles ni cambiar el modelo.
-Además conserva por año un GeoTIFF QA de 12 bandas: conteo válido per-pixel
+El fallback descarga desde GEE un transporte multibanda por año con los 56
+predictores, las 12 bandas QA y la completitud, y aplica localmente el joblib
+sklearn exacto, sin reducir árboles ni cambiar el modelo. El transporte se
+divide localmente en los mismos productos científicos y no se persiste. Para
+2020–2024 más P0 esto reduce el caso normal de 18 a 6 transportes; si una
+solicitud consolidada supera el límite directo configurado, vuelve de forma
+adaptativa a las descargas individuales. Se conserva por año un GeoTIFF QA de
+12 bandas: conteo válido per-pixel
 total, L30 y S30 para DJF, MAM, JJA y SON. Cada QA registra nombres de banda,
 semántica, grilla, nodata y SHA-256. La fecha solicitada `2024-12-31` queda como
 `requested_analysis_end_date`; la cobertura efectiva termina en la última
@@ -967,19 +1048,22 @@ figures/evidence/disturbance_detection.png
 tables/evidence/disturbance_period_summary.csv
 ```
 
-La segmentación persistente agrega cuatro activos para la colección completa y
+La segmentación persistente agrega cinco activos para la colección completa y
 como máximo cinco fichas seleccionadas por superficie descendente e ID:
 
 ```text
 tables/evidence/disturbance_events.csv
 json/evidence/disturbance_events.json
 json/evidence/disturbance_events.geojson
+tiffs/evidence/disturbance_event_masks.tif
 figures/evidence/disturbance_events.png
 figures/evidence/disturbance_event_<event-id>.png
 ```
 
 El CSV, JSON y GeoJSON conservan **todos** los eventos, incluidos los menores a
-`0,5 ha`; el límite sólo controla cuántos PNG individuales se renderizan. Las
+`0,5 ha`; el TIFF de dos bandas distingue `persistent_candidate_mask` de
+`operational_event_mask`. El límite espacial no borra evidencia y la selección
+por superficie sólo controla cuántos PNG individuales se renderizan. Las
 fichas comparan NDVI de la última referencia pre-corte con la primera ventana
 del evento de la misma estación y muestran la serie media multíndice. Esta
 comparación es evidencia visual de perturbación, no atribución de causa.
@@ -1062,16 +1146,18 @@ Versiones vigentes:
 | Contrato | Versión |
 | --- | ---: |
 | paquete Python | `0.1.0` |
-| configuración del pipeline | `1.11.0` |
+| configuración del pipeline | `1.13.0` |
 | bundle local | `3.1.0` |
 | bundle derivado con benchmark Hampel | `3.2.0` |
-| bundle experimental de deltas RF multianuales | `3.4.0` |
+| bundle experimental de deltas RF multianuales | `3.5.0` |
 | envelope del análisis completo | `2.3.0` |
-| índice de figuras para informe / política de selección | `1.0.0` |
-| atribución post-cambio por evento | `3.0.0` |
+| índice de figuras para informe / política de selección | `2.0.0` |
+| dataset editorial para informe | `1.4.0` |
+| paquete de reporting / view-model editorial | `0.11.0` / `2.8.0` |
+| atribución post-cambio por candidato/evento | `5.0.0` |
 | evidencia agrícola / política de independencia | `1.0.0` |
 | documento de recolección agrícola mensual | `1.0.0` |
-| bundle de recolección agrícola compartida / configuración | `1.1.0` |
+| bundle de recolección agrícola compartida / configuración | `1.2.0` |
 | persistencia agrícola por evento | `1.0.0` |
 | catálogo de fuentes | `2.1.0` |
 | resumen de análisis | `1.0.0` |
@@ -1079,11 +1165,11 @@ Versiones vigentes:
 | línea base forestal | `1.0.0` |
 | configuración/metadatos RF forestal P0 | `1.0.0` |
 | sampling/export/run de entrenamiento multianual | `1.1.0` |
-| evidencia temporal RF y QA per-pixel | `1.1.0` |
+| evidencia temporal RF y QA per-pixel | `1.2.0` |
 | screening forestal | `1.1.0` |
-| configuración de detección de perturbaciones | `1.4.0` |
+| configuración de detección de perturbaciones | `1.5.0` |
 | evidencia publicada de perturbaciones | `1.2.0` |
-| eventos persistentes de perturbación | `1.0.0` |
+| episodios persistentes candidatos (path legado `disturbance_events`) | `1.1.0` |
 | configuración/metadatos Hampel protegido | `1.0.0` |
 | metadatos HLS estacionales | `2.0.0` |
 | índice del cubo temporal | `2.0.0` |
@@ -1347,6 +1433,55 @@ sin GEE. Ruff, formato sobre 147 archivos, Mypy sobre 146 archivos y
 `git diff --check` aprobaron. No se ejecutó un nuevo análisis remoto ni se
 construyó el frontend o una imagen de contenedor.
 
+La optimización lean y su endurecimiento operativo elevan el gate raíz a **614
+pruebas** y mantienen **90,66 % de cobertura total**. El gate cubre los
+perfiles `lean/debug`, un transporte HLS consolidado, seis transportes RF en el
+caso normal, fallback RF
+por límite directo y retención condicional del raster agrícola compartido.
+Ruff, formato sobre 147 archivos, Mypy sobre 148 archivos y
+`git diff --check` aprobaron. No se ejecutó GEE, frontend ni build de contenedor.
+
+El incremento de robustez eleva el gate raíz vigente a **619 pruebas** y
+**90,69 % de cobertura total**. Incluye el piso de escala robusta, QA de borde,
+máscaras candidata/operativa, compatibilidad editorial retroactiva y lenguaje
+explícito en el PDF. Ruff, formato sobre 147 archivos, Mypy sobre 148 archivos y
+`git diff --check` aprobaron. No se ejecutó GEE ni ningún build.
+
+El incremento semántico candidato/evento eleva el gate raíz a **620 pruebas** y
+**90,71 % de cobertura total**. Los gates específicos aprobaron **16 pruebas de
+API con 90,37 %**, **16 de reporting con 90,29 %** y **16 Vitest**, además de
+typecheck, Ruff, formato, Mypy y `git diff --check`. No se ejecutó GEE, build del
+frontend ni build de contenedores.
+
+El smoke posterior `nativo-robustness-retry` sí ejecutó GEE y cerró los seis
+componentes. Sobre el mismo GeoJSON del run anterior conservó 34 candidatos,
+pero el subconjunto por área bajó de 8 a 6 candidatos y de 6,39 a 4,95 ha. La
+atribución disponible muestra cero eventos probables: ningún candidato reunió
+persistencia y uso agropecuario posterior. Un
+primer intento encontró `remote_server_error` en el transporte RF 2021; el
+fallback multibanda acepta ahora ese fallo remoto sanitizado y puede continuar
+con los productos individuales.
+
+La prueba de consola posterior con `plantaciones-uru.geojson` verificó el guard
+de costo para AOI grandes: 74.949,64 ha producen una grilla HLS de 1.224 × 922 y
+1,68 GB estimados para las 24 estaciones 2020–2025, frente al presupuesto de
+256 MB. El run se detuvo antes de descargar rasters; no se aumentaron límites ni
+se simplificó la geometría. El caso queda como entrada real para el Incremento 2
+de agregación remota y entrega tabular.
+
+La prueba posterior con `prueba-pequeña.geojson` (1.198,06 ha) sí completó los
+seis componentes científicos: pipeline principal, Hampel, RF, colección
+agrícola, persistencia y atribución. `report_assets` reunió 53 archivos y 26
+figuras, y desde ese expediente se renderizó e inspeccionó un PDF cliente de 37
+páginas. El transporte RF consolidado necesitó el fallback individual porque
+Earth Engine no pudo generar la URL remota; el fallback ahora cubre también
+`download_url_failed`. La publicación final del run encontró un bloqueo
+transitorio de Windows (`WinError 5`) y dejó el expediente en `.staging` con un
+sobre `partial`, aunque todos los componentes constan como `completed`. El
+orquestador reutiliza ahora el mismo rename atómico con reintentos que ya usa el
+runner local. Falta repetir el smoke para validar ese último cierre; no se
+interpreta el expediente interrumpido como estabilidad operativa completa.
+
 El smoke web real `c938a1c0-ca33-42a4-94b3-81c7276a3ef8` terminó `partial` por
 la indisponibilidad diagnóstica y no bloqueante de Hampel; los otros cinco
 componentes completaron y dejaron cuatro eventos y 41 assets verificables. Su
@@ -1512,3 +1647,9 @@ afirmación binaria.
    locales sensibles.
 7. Avanzar en incrementos pequeños: contrato, pruebas, implementación,
    verificación y recién entonces el siguiente incremento.
+
+
+# Lanzar proyecto
+
+cd C:\Users\Facu\Desktop\deforestaciones-EUDR
+uv run python scripts/run_local_stack.py

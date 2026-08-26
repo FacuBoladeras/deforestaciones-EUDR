@@ -34,7 +34,7 @@ from deforestation_pipeline.catalog import (
     build_agricultural_evidence_source_plan,
     load_source_catalog,
 )
-from deforestation_pipeline.config import load_config
+from deforestation_pipeline.config import ArtifactProfile, load_config
 from deforestation_pipeline.gee import GeeSession
 from deforestation_pipeline.raster_grid import derive_raster_grid_spec
 from deforestation_pipeline.raster_products import RasterDownloadError
@@ -49,6 +49,8 @@ def _event_feature(
     event_id: str = "PDE-1",
     onset: bool = True,
     longitude_offset: float = 0.0,
+    area_ha: float = 0.5,
+    area_threshold_met: bool = True,
 ) -> dict[str, Any]:
     return {
         "type": "Feature",
@@ -67,8 +69,8 @@ def _event_feature(
             "event_id": event_id,
             "event_type": "persistent_disturbance_event",
             "estimated_onset_window_end": "2022-05-31" if onset else None,
-            "area_ha": 0.5,
-            "area_threshold_met": True,
+            "area_ha": area_ha,
+            "area_threshold_met": area_threshold_met,
         },
     }
 
@@ -137,6 +139,7 @@ def _run(
     provider: Any,
     *,
     features: list[dict[str, Any]] | None = None,
+    artifact_profile: ArtifactProfile = ArtifactProfile.LEAN,
 ) -> Path:
     return materialize_agricultural_evidence_collection(
         source_event_bundle=_event_bundle(tmp_path, features or [_event_feature()]),
@@ -148,18 +151,20 @@ def _run(
         licenses_path=PROJECT_ROOT / "data/licenses.yml",
         created_at=CREATED,
         raster_provider=provider,
+        artifact_profile=artifact_profile,
     )
 
 
 def test_production_collector_config_is_versioned_and_bounded() -> None:
     config = load_agricultural_collector_config(PROJECT_ROOT / "configs/agricultural-collector.yml")
 
-    assert config.schema_version == "1.1.0"
+    assert config.schema_version == "1.2.0"
     assert config.source_id == "dynamic_world_v1"
     assert config.target_crs == "EPSG:6933"
     assert config.resolution_m == 10
     assert config.temporal_cadence == "calendar_month"
-    assert config.maximum_events <= 100
+    assert config.maximum_events_per_batch == 100
+    assert "maximum_events" not in type(config).model_fields
     assert config.maximum_windows_per_event <= 72
     assert config.maximum_remote_acquisitions == 500
     assert config.maximum_shared_grid_pixels == 1_000_000
@@ -230,14 +235,22 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert len(geojson["features"]) == 1
     assert geojson["features"][0]["properties"]["collection_status"] == "collected"
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
-    assert manifest["schema_version"] == "1.1.0"
+    assert manifest["schema_version"] == "1.3.0"
     assert manifest["source_event_bundle"]["input_sha256"] == "c" * 64
     assert manifest["remote_data_accessed"] is True
     assert all((output / item["path"]).is_file() for item in manifest["artifacts"])
     assert any(
         item["path"].endswith("event_footprint_fraction.tif") for item in manifest["artifacts"]
     )
-    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 4
+    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 2
+    assert not any(
+        item["path"].startswith("tiffs/evidence/agricultural/_shared/")
+        for item in manifest["artifacts"]
+    )
+    assert metadata["artifact_profile"] == "lean"
+    assert all(
+        acquisition["raster_retained"] is False for acquisition in metadata["shared_acquisitions"]
+    )
     pngs = [
         item
         for item in manifest["artifacts"]
@@ -289,6 +302,27 @@ def test_collector_shares_remote_monthly_acquisitions_across_events(
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
     assert manifest["query_count"] == 4
     assert manifest["remote_acquisition_count"] == 2
+    assert not any(
+        item["path"].startswith("tiffs/evidence/agricultural/_shared/")
+        for item in manifest["artifacts"]
+    )
+    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 4
+
+
+def test_debug_profile_retains_shared_agricultural_transport_rasters(tmp_path: Path) -> None:
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+        return CollectedSharedWindowRaster(
+            content=_raster_bytes(query, mode="crop"),
+            matched_scene_counts={event.event_id: 4 for event in query.events},
+            retrieved_at=CREATED,
+        )
+
+    output = _run(tmp_path, provider, artifact_profile=ArtifactProfile.DEBUG)
+    manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
+    metadata = json.loads(
+        (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
+    )
+
     assert (
         sum(
             item["path"].startswith("tiffs/evidence/agricultural/_shared/")
@@ -296,7 +330,10 @@ def test_collector_shares_remote_monthly_acquisitions_across_events(
         )
         == 2
     )
-    assert sum(item["path"].endswith("dynamic_world.tif") for item in manifest["artifacts"]) == 6
+    assert metadata["artifact_profile"] == "debug"
+    assert all(
+        acquisition["raster_retained"] is True for acquisition in metadata["shared_acquisitions"]
+    )
 
 
 def test_shared_plan_budgets_unique_months_not_event_month_products() -> None:
@@ -311,6 +348,83 @@ def test_shared_plan_budgets_unique_months_not_event_month_products() -> None:
     assert sum(len(items) for items in windows.values()) == 4_300
     assert len(plan) == 43
     assert all(len(participants) == 100 for *_, participants in plan)
+
+
+def test_collector_batches_122_candidates_without_duplicate_monthly_downloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    acquisitions: list[DynamicWorldSharedWindowQuery] = []
+
+    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+        acquisitions.append(query)
+        return CollectedSharedWindowRaster(
+            content=_raster_bytes(query, mode="crop"),
+            matched_scene_counts={event.event_id: 4 for event in query.events},
+            retrieved_at=CREATED,
+        )
+
+    monkeypatch.setattr(
+        collector_module,
+        "render_monthly_agricultural_evidence",
+        lambda **_: None,
+    )
+    features = [
+        _event_feature(
+            event_id=f"PDE-{index:03d}",
+            area_ha=0.1 if index % 2 else 0.8,
+            area_threshold_met=index % 2 == 0,
+        )
+        for index in reversed(range(122))
+    ]
+
+    output = _run(tmp_path, provider, features=features)
+
+    assert [query.window_id for query in acquisitions] == ["2022-06", "2022-07"]
+    assert all(len(query.events) == 122 for query in acquisitions)
+    assert [len(batch) for batch in acquisitions[0].event_batches] == [100, 22]
+    assert [event.event_id for batch in acquisitions[0].event_batches for event in batch] == [
+        f"PDE-{index:03d}" for index in range(122)
+    ]
+    payload = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
+    assert len(payload["events"]) == 122
+    assert {event["event_id"] for event in payload["events"]} == {
+        f"PDE-{index:03d}" for index in range(122)
+    }
+    assert {
+        event["event_id"]
+        for event in payload["events"]
+        if int(event["event_id"].removeprefix("PDE-")) % 2
+    } == {f"PDE-{index:03d}" for index in range(1, 122, 2)}
+    assert len(payload["rows"]) == 122 * 2 * 3
+    assert all(event["event_area_exact_ha"] > 0 for event in payload["events"])
+    assert sum(row["class_name"] == "nodata" for row in payload["rows"]) == 122 * 2
+    metadata = json.loads(
+        (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
+    )
+    assert metadata["method"] == "dynamic_world_shared_monthly_collector_v2"
+    assert metadata["query_count"] == 244
+    assert metadata["remote_acquisition_count"] == 2
+    assert metadata["event_batch_count"] == 4
+    assert metadata["event_batch_budget_semantics"] == (
+        "maximum_events_per_shared_month_scene_count_batch"
+    )
+    assert all(
+        [batch["event_count"] for batch in acquisition["event_batches"]] == [100, 22]
+        for acquisition in metadata["shared_acquisitions"]
+    )
+    assert len({row["raster_path"] for row in metadata["queries"]}) == 244
+    assert all(len(row["grid_sha256"]) == 64 for row in metadata["queries"])
+    assert all(len(row["raster_sha256"]) == 64 for row in metadata["queries"])
+    assert len({item["acquisition_id"] for item in metadata["shared_acquisitions"]}) == 2
+    manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
+    assert manifest["schema_version"] == "1.3.0"
+    assert manifest["event_batch_count"] == 4
+    assert manifest["remote_acquisition_count"] == 2
+    assert manifest["source_event_bundle"]["manifest_sha256"]
+    assert manifest["source_event_bundle"]["event_artifact_sha256"]
 
 
 def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> None:
@@ -513,6 +627,7 @@ class _FakeEe:
         self.bounds: object | None = None
         self.date_filter: tuple[str, str] | None = None
         self.mapped_expression: str | None = None
+        self.feature_collection_sizes: list[int] = []
 
     def Geometry(self, payload: object) -> object:
         return payload
@@ -531,6 +646,7 @@ class _FakeEe:
         return _Feature(geometry, properties)
 
     def FeatureCollection(self, features: list[_Feature]) -> _FeatureCollection:
+        self.feature_collection_sizes.append(len(features))
         return _FeatureCollection(features)
 
 
@@ -567,6 +683,10 @@ def _dynamic_world_shared_query() -> DynamicWorldSharedWindowQuery:
         load_source_catalog(PROJECT_ROOT / "data/catalog.yml")
     ).candidate_source
     union = unary_union([first, second])
+    events = (
+        DynamicWorldSharedEvent("PDE-1", first),
+        DynamicWorldSharedEvent("PDE-2", second),
+    )
     return DynamicWorldSharedWindowQuery(
         window_id="2022-06",
         start_date=date(2022, 6, 1),
@@ -578,10 +698,8 @@ def _dynamic_world_shared_query() -> DynamicWorldSharedWindowQuery:
             resolution_m=float(config.resolution_m),
             nodata=config.raster_nodata,
         ),
-        events=(
-            DynamicWorldSharedEvent("PDE-1", first),
-            DynamicWorldSharedEvent("PDE-2", second),
-        ),
+        events=events,
+        event_batches=(events,),
         source=source,
         minimum_top1_probability=0.6,
     )
@@ -647,6 +765,51 @@ def test_gee_shared_provider_downloads_month_once_and_counts_each_event(
         "tiffs/evidence/agricultural/_shared/2022-06_dynamic_world.tif"
     )
     assert captured[0]["grid_spec"].grid_sha256 == _dynamic_world_shared_query().grid.grid_sha256
+    assert module.feature_collection_sizes == [2]
+
+
+def test_gee_shared_provider_batches_scene_counts_but_downloads_month_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    base = _dynamic_world_shared_query()
+    geometry = base.events[0].geometry_wgs84
+    events = tuple(
+        DynamicWorldSharedEvent(event_id=f"PDE-{index:03d}", geometry_wgs84=geometry)
+        for index in range(122)
+    )
+    query = DynamicWorldSharedWindowQuery(
+        window_id=base.window_id,
+        start_date=base.start_date,
+        end_date_exclusive=base.end_date_exclusive,
+        geometry_wgs84=base.geometry_wgs84,
+        grid=base.grid,
+        events=events,
+        event_batches=(events[:100], events[100:]),
+        source=base.source,
+        minimum_top1_probability=base.minimum_top1_probability,
+    )
+    module = _FakeEe()
+    downloads: list[dict[str, Any]] = []
+
+    def materialize(**kwargs: Any) -> Any:
+        downloads.append(kwargs)
+        return type("Result", (), {"content": b"normalized"})()
+
+    monkeypatch.setattr(collector_module, "materialize_ee_image_to_grid", materialize)
+
+    result = collect_dynamic_world_shared_window(
+        query=query,
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+
+    assert len(result.matched_scene_counts) == 122
+    assert set(result.matched_scene_counts.values()) == {3}
+    assert module.feature_collection_sizes == [100, 22]
+    assert len(downloads) == 1
 
 
 def test_gee_provider_skips_download_when_month_has_no_scenes(

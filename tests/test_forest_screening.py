@@ -126,7 +126,7 @@ def test_temporal_detection_preserves_signals_across_the_entire_aoi() -> None:
 def test_default_screening_config_is_versioned_and_not_tunable_as_probability() -> None:
     config = load_config(ROOT / "configs" / "default.yml")
 
-    assert config.schema_version == "1.11.0"
+    assert config.schema_version == "1.13.0"
     assert config.forest_screening.schema_version == "1.1.0"
     assert config.forest_screening.forest_vote_fraction_minimum == 0.8
     assert config.forest_screening.nonforest_vote_fraction_maximum == 0.2

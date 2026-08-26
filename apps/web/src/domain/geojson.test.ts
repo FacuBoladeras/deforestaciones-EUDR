@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { closePolygonRing, parsePolygonDocument } from "./geojson";
+import { closePolygonRing, featureFromBounds, parsePolygonDocument } from "./geojson";
 
 describe("parsePolygonDocument", () => {
   it("normaliza una geometría Polygon a Feature sin inventar propiedades", () => {
@@ -79,5 +79,28 @@ describe("parsePolygonDocument", () => {
 
     expect(ring).toEqual([...vertices, vertices[0]]);
     expect(vertices).toHaveLength(3);
+  });
+
+  it("crea un rectángulo cerrado desde esquinas arrastradas en cualquier dirección", () => {
+    const feature = featureFromBounds([-60.2, -32.0], [-60.3, -32.1]);
+
+    expect(feature.geometry).toEqual({
+      type: "Polygon",
+      coordinates: [
+        [
+          [-60.3, -32.1],
+          [-60.2, -32.1],
+          [-60.2, -32.0],
+          [-60.3, -32.0],
+          [-60.3, -32.1],
+        ],
+      ],
+    });
+  });
+
+  it("rechaza un arrastre sin ancho o sin alto", () => {
+    expect(() => featureFromBounds([-60.2, -32.0], [-60.2, -32.1])).toThrow(
+      "El rectángulo debe tener ancho y alto",
+    );
   });
 });

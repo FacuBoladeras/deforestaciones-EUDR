@@ -284,6 +284,9 @@ def _build_source_bundle(root: Path, input_path: Path) -> Path:
     event = segment_persistent_disturbance_events(
         persistent_mask=state == 3,
         automated_forest_mask=np.ones_like(state, dtype=np.bool_),
+        first_anomalous_period_index=summary[2],
+        maximum_onset_period_difference=1,
+        missing_onset_policy="separate_unknown_episode",
         grid_spec=grid,
         connectivity=8,
         area_threshold_ha=0.5,
@@ -332,7 +335,12 @@ def _build_source_bundle(root: Path, input_path: Path) -> Path:
                 "score_semantics": "uncalibrated_binary_tree_vote_fraction",
                 "automatic_final_assessment_allowed": False,
             },
-            "disturbance_events": {"connectivity": 8, "area_threshold_ha": 0.5},
+            "disturbance_events": {
+                "connectivity": 8,
+                "visec_operational_event_area_threshold_ha": 0.5,
+                "maximum_onset_period_difference": 1,
+                "missing_onset_policy": "separate_unknown_episode",
+            },
         },
         "json/evidence/disturbance_events.json": {"events": [{"event_id": event.event_id}]},
         "json/input/ingestion.json": {

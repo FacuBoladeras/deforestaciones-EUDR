@@ -40,7 +40,9 @@ from deforestation_pipeline.forest_rf import (
 from deforestation_pipeline.raster_products import (
     DirectDownloadEstimate,
     FetchBytes,
+    RasterDownloadError,
     RasterValidation,
+    extract_geotiff_band_group,
     materialize_ee_image_to_grid,
 )
 from deforestation_pipeline.rf_model_release import verify_local_rf_model_release
@@ -54,9 +56,16 @@ from deforestation_pipeline.seasonal_feature_stack import (
 matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
-FOREST_RF_TEMPORAL_SCHEMA_VERSION: Final = "1.1.0"
-FOREST_RF_TEMPORAL_BUNDLE_SCHEMA_VERSION: Final = "3.4.0"
+FOREST_RF_TEMPORAL_SCHEMA_VERSION: Final = "1.2.0"
+FOREST_RF_TEMPORAL_BUNDLE_SCHEMA_VERSION: Final = "3.5.0"
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
+_MULTIBAND_TRANSPORT_FALLBACK_CODES: Final = frozenset(
+    {
+        "direct_download_limit_exceeded",
+        "download_url_failed",
+        "remote_server_error",
+    }
+)
 
 
 class ForestTransitionCode(IntEnum):
@@ -453,6 +462,8 @@ def materialize_forest_rf_temporal(
     files: dict[str, bytes] = {}
     estimates: list[DirectDownloadEstimate] = []
     validations: list[RasterValidation] = []
+    used_individual_fallback = False
+    transport_fallback_codes: list[str] = []
     model_bundle = _load_local_model_bundle(config)
     candidate_arrays: dict[int, dict[str, np.ndarray]] = {}
 
@@ -470,49 +481,107 @@ def materialize_forest_rf_temporal(
         missing_qa = tuple(name for name in qa_names if name not in feature_stack.feature_columns)
         if missing_qa:
             raise ValueError(f"faltan bandas QA per-pixel para {year}: {missing_qa}")
-        predictor_raster = materialize_ee_image_to_grid(
-            image=select_forest_rf_predictors(canonical),
-            band_names=predictor_names,
-            artifact_path=paths[f"predictors_{year}"],
-            download_name=f"rf_predictor_stack_{year}",
-            output_config=output_config,
-            grid_spec=grid_spec,
-            output_type="float32",
-            fetch_bytes=fetch_bytes,
-        )
-        qa_raster = materialize_ee_image_to_grid(
-            image=feature_stack.image.select(list(qa_names)),
-            band_names=qa_names,
-            artifact_path=paths[f"observation_qa_{year}"],
-            download_name=f"rf_observation_qa_{year}",
-            output_config=output_config,
-            grid_spec=grid_spec,
-            output_type="int16",
-            fetch_bytes=fetch_bytes,
-        )
-        complete_raster = materialize_ee_image_to_grid(
-            image=images.input_complete,
-            band_names=(names["input_complete"],),
-            artifact_path=paths[f"complete_{year}"],
-            download_name=f"rf_forest_input_complete_{year}",
-            output_config=output_config,
-            grid_spec=grid_spec,
-            output_type="int16",
-            fetch_bytes=fetch_bytes,
-        )
-        files[paths[f"predictors_{year}"]] = predictor_raster.content
-        files[paths[f"observation_qa_{year}"]] = qa_raster.content
-        files[paths[f"complete_{year}"]] = complete_raster.content
-        estimates.extend((predictor_raster.estimate, qa_raster.estimate, complete_raster.estimate))
-        validations.extend(
-            (predictor_raster.validation, qa_raster.validation, complete_raster.validation)
-        )
+        transport_names = (*predictor_names, *qa_names, names["input_complete"])
+        predictor_image = select_forest_rf_predictors(canonical)
+        qa_image = feature_stack.image.select(list(qa_names))
+        transport_image = predictor_image.addBands(qa_image)
+        transport_image = transport_image.addBands(images.input_complete)
+        try:
+            transport = materialize_ee_image_to_grid(
+                image=transport_image,
+                band_names=transport_names,
+                artifact_path=f"internal/rf_transport_{year}.tif",
+                download_name=f"rf_transport_{year}",
+                output_config=output_config,
+                grid_spec=grid_spec,
+                output_type="float32",
+                fetch_bytes=fetch_bytes,
+            )
+        except RasterDownloadError as error:
+            if error.code not in _MULTIBAND_TRANSPORT_FALLBACK_CODES:
+                raise
+            used_individual_fallback = True
+            if error.code not in transport_fallback_codes:
+                transport_fallback_codes.append(error.code)
+            individual_specs = (
+                (
+                    predictor_image,
+                    predictor_names,
+                    paths[f"predictors_{year}"],
+                    f"rf_predictor_stack_{year}",
+                    "float32",
+                ),
+                (
+                    qa_image,
+                    qa_names,
+                    paths[f"observation_qa_{year}"],
+                    f"rf_observation_qa_{year}",
+                    "int16",
+                ),
+                (
+                    images.input_complete,
+                    (names["input_complete"],),
+                    paths[f"complete_{year}"],
+                    f"rf_forest_input_complete_{year}",
+                    "int16",
+                ),
+            )
+            individual = tuple(
+                materialize_ee_image_to_grid(
+                    image=image,
+                    band_names=band_names,
+                    artifact_path=artifact_path,
+                    download_name=product,
+                    output_config=output_config,
+                    grid_spec=grid_spec,
+                    output_type=cast(Literal["float32", "int16"], output_type),
+                    fetch_bytes=fetch_bytes,
+                )
+                for image, band_names, artifact_path, product, output_type in individual_specs
+            )
+            predictor_content, qa_content, complete_content = (
+                raster.content for raster in individual
+            )
+            predictor_validation, qa_validation, complete_validation = (
+                raster.validation for raster in individual
+            )
+            estimates.extend(raster.estimate for raster in individual)
+        else:
+            predictor_content, predictor_validation = extract_geotiff_band_group(
+                transport.content,
+                band_names=predictor_names,
+                artifact_path=paths[f"predictors_{year}"],
+                product=f"rf_predictor_stack_{year}",
+                output_type="float32",
+                expected_grid=grid_spec,
+            )
+            qa_content, qa_validation = extract_geotiff_band_group(
+                transport.content,
+                band_names=qa_names,
+                artifact_path=paths[f"observation_qa_{year}"],
+                product=f"rf_observation_qa_{year}",
+                output_type="int16",
+                expected_grid=grid_spec,
+            )
+            complete_content, complete_validation = extract_geotiff_band_group(
+                transport.content,
+                band_names=(names["input_complete"],),
+                artifact_path=paths[f"complete_{year}"],
+                product=f"rf_forest_input_complete_{year}",
+                output_type="int16",
+                expected_grid=grid_spec,
+            )
+            estimates.append(transport.estimate)
+        files[paths[f"predictors_{year}"]] = predictor_content
+        files[paths[f"observation_qa_{year}"]] = qa_content
+        files[paths[f"complete_{year}"]] = complete_content
+        validations.extend((predictor_validation, qa_validation, complete_validation))
         predictor_cube = _read_multiband(
-            predictor_raster.content,
+            predictor_content,
             grid_spec=grid_spec,
             expected_band_names=predictor_names,
         )
-        complete = _read_single_band(complete_raster.content, grid_spec)
+        complete = _read_single_band(complete_content, grid_spec)
         aoi_footprint = np.asarray(complete != grid_spec.nodata, dtype=bool)
         prediction = predict_forest_rf_locally(
             predictor_cube=predictor_cube,
@@ -546,20 +615,53 @@ def materialize_forest_rf_temporal(
         ("p0_vote_2020", p0_images.forest_vote_fraction, p0_names["vote_fraction"], "float32"),
         ("p0_complete_2020", p0_images.input_complete, p0_names["input_complete"], "int16"),
     )
-    for key, image, band_name, output_type in p0_specs:
-        raster = materialize_ee_image_to_grid(
-            image=image,
-            band_names=(band_name,),
-            artifact_path=paths[key],
-            download_name=paths[key].rsplit("/", 1)[-1].removesuffix(".tif"),
+    p0_transport = p0_images.forest_class.addBands(p0_images.forest_vote_fraction)
+    p0_transport = p0_transport.addBands(p0_images.input_complete)
+    p0_band_names = tuple(spec[2] for spec in p0_specs)
+    try:
+        p0_raster = materialize_ee_image_to_grid(
+            image=p0_transport,
+            band_names=p0_band_names,
+            artifact_path="internal/rf_p0_transport_2020.tif",
+            download_name="rf_p0_transport_2020",
             output_config=output_config,
             grid_spec=grid_spec,
-            output_type=output_type,
+            output_type="float32",
             fetch_bytes=fetch_bytes,
         )
-        files[paths[key]] = raster.content
-        estimates.append(raster.estimate)
-        validations.append(raster.validation)
+    except RasterDownloadError as error:
+        if error.code not in _MULTIBAND_TRANSPORT_FALLBACK_CODES:
+            raise
+        used_individual_fallback = True
+        if error.code not in transport_fallback_codes:
+            transport_fallback_codes.append(error.code)
+        for key, image, band_name, output_type in p0_specs:
+            raster = materialize_ee_image_to_grid(
+                image=image,
+                band_names=(band_name,),
+                artifact_path=paths[key],
+                download_name=paths[key].rsplit("/", 1)[-1].removesuffix(".tif"),
+                output_config=output_config,
+                grid_spec=grid_spec,
+                output_type=output_type,
+                fetch_bytes=fetch_bytes,
+            )
+            files[paths[key]] = raster.content
+            estimates.append(raster.estimate)
+            validations.append(raster.validation)
+    else:
+        estimates.append(p0_raster.estimate)
+        for key, _image, band_name, output_type in p0_specs:
+            content, validation = extract_geotiff_band_group(
+                p0_raster.content,
+                band_names=(band_name,),
+                artifact_path=paths[key],
+                product=paths[key].rsplit("/", 1)[-1].removesuffix(".tif"),
+                output_type=output_type,
+                expected_grid=grid_spec,
+            )
+            files[paths[key]] = content
+            validations.append(validation)
 
     reference = candidate_arrays[2020]
     aoi_footprint = np.asarray(reference["complete"] != grid_spec.nodata, dtype=bool)
@@ -702,6 +804,13 @@ def materialize_forest_rf_temporal(
             "raster_materialization": {
                 "download_method": "ee.Image.getDownloadURL",
                 "signed_urls_persisted": False,
+                "transport_strategy": (
+                    "adaptive_multiband_with_individual_fallback"
+                    if used_individual_fallback
+                    else "single_multiband_geotiff_per_year"
+                ),
+                "transport_request_count": len(estimates),
+                "transport_fallback_codes": transport_fallback_codes,
                 "estimates": [item.model_dump(mode="json") for item in estimates],
                 "raster_validations": [item.model_dump(mode="json") for item in validations],
             },

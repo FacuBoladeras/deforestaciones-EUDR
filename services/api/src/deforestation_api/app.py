@@ -224,6 +224,7 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
             report, digest = client_report_download(
                 active_settings.storage_root,
                 job.analysis_id,
+                job.attempt,
             )
         except ResultIntegrityError as error:
             raise ApiError(
@@ -261,6 +262,31 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
             page=page,
             page_size=page_size,
             total=len(events),
+            next_page=next_page,
+        )
+
+    @app.get(
+        "/api/v1/analyses/{analysis_id}/candidates",
+        response_model=EventPageResponse,
+        responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+        tags=["results"],
+    )
+    def analysis_candidates(
+        analysis_id: UUID,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> EventPageResponse:
+        job = _ready_job(repository, active_settings, analysis_id)
+        try:
+            candidates = result_catalog.candidates(job)
+        except ResultIntegrityError as error:
+            raise _result_integrity_api_error(error) from error
+        items, next_page = _paginate(candidates, page, page_size)
+        return EventPageResponse(
+            items=items,
+            page=page,
+            page_size=page_size,
+            total=len(candidates),
             next_page=next_page,
         )
 
@@ -322,7 +348,11 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     def analysis_package_download(analysis_id: UUID) -> FileResponse:
         job = _ready_job(repository, active_settings, analysis_id)
         try:
-            package, digest = packaged_download(active_settings.storage_root, job.analysis_id)
+            package, digest = packaged_download(
+                active_settings.storage_root,
+                job.analysis_id,
+                job.attempt,
+            )
         except ResultIntegrityError as error:
             raise ApiError(
                 409,

@@ -99,9 +99,18 @@ def _loaders() -> dict[str, Any]:
     }
 
 
-def test_runs_components_in_order_and_publishes_relative_references(tmp_path: Path) -> None:
+def test_runs_components_in_order_and_publishes_relative_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     paths = _inputs(tmp_path)
     calls: list[tuple[str, dict[str, Any]]] = []
+    rename_calls: list[tuple[Path, Path]] = []
+
+    def retrying_rename(source: Path, target: Path) -> None:
+        rename_calls.append((source, target))
+        source.rename(target)
+
+    monkeypatch.setattr(complete_module, "_rename_directory_with_retry", retrying_rename)
 
     def full(**kwargs: Any) -> Path:
         calls.append(("full", kwargs))
@@ -172,6 +181,8 @@ def test_runs_components_in_order_and_publishes_relative_references(tmp_path: Pa
     assert all(item["child_created_at"] == CREATED.isoformat() for item in manifest["components"])
     assert len(manifest["parameters_hash"]) == 64
     assert manifest["parameters_hash"] == _parameters_hash(manifest)
+    assert rename_calls == [(rename_calls[0][0], output)]
+    assert rename_calls[0][0].name.endswith(".staging")
 
 
 def test_expected_hampel_unavailability_continues_as_partial_run(tmp_path: Path) -> None:
@@ -341,9 +352,18 @@ def test_persistent_agricultural_bundle_is_forwarded_reversibly_to_attribution(
 
 
 @pytest.mark.parametrize("failing", ["full", "hampel", "deltas", "attribution"])
-def test_failure_is_fail_fast_and_preserves_failure_envelope(tmp_path: Path, failing: str) -> None:
+def test_failure_is_fail_fast_and_preserves_failure_envelope(
+    tmp_path: Path, failing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     paths = _inputs(tmp_path)
     calls: list[str] = []
+    rename_calls: list[tuple[Path, Path]] = []
+
+    def retrying_rename(source: Path, target: Path) -> None:
+        rename_calls.append((source, target))
+        source.rename(target)
+
+    monkeypatch.setattr(complete_module, "_rename_directory_with_retry", retrying_rename)
 
     def runner(name: str) -> Any:
         def call(**kwargs: Any) -> Path:
@@ -382,6 +402,8 @@ def test_failure_is_fail_fast_and_preserves_failure_envelope(tmp_path: Path, fai
         "attribution": ["full", "hampel", "deltas", "attribution"],
     }
     assert calls == expected[failing]
+    assert rename_calls == [(rename_calls[0][0], error.value.failure_path)]
+    assert rename_calls[0][0].name.endswith(".staging")
     assert error.value.failure_path.name.endswith(".failed")
     report = json.loads(
         (error.value.failure_path / "run_manifest.json").read_text(encoding="utf-8")

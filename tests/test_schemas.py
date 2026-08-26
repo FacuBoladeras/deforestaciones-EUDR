@@ -130,3 +130,20 @@ def test_committed_disturbance_evidence_schema_matches_pydantic_model() -> None:
 def test_committed_agricultural_schemas_match_pydantic_models(filename: str, factory: Any) -> None:
     committed = json.loads((PROJECT_ROOT / "data" / "schemas" / filename).read_text("utf-8"))
     assert committed == factory()
+
+
+def test_post_change_attribution_v5_schema_formalizes_polygonal_event_geometry() -> None:
+    schema = json.loads(
+        (PROJECT_ROOT / "data/schemas/post-change-attribution-v5.0.0.json").read_text("utf-8")
+    )
+    record = schema["$defs"]["record"]
+    required = set(record["required"])
+
+    assert {
+        "candidate_geometry",
+        "conjunctive_conversion_evidence_geometry",
+        "likely_conversion_geometry",
+    } <= required
+    event_then = record["allOf"][1]["then"]["properties"]
+    assert event_then["likely_conversion_area_ha"]["exclusiveMinimum"] == 0.5
+    assert event_then["likely_conversion_geometry"] == {"$ref": "#/$defs/polygonalGeometry"}

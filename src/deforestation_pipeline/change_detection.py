@@ -19,8 +19,8 @@ from deforestation_pipeline.artifact_layout import (
 )
 from deforestation_pipeline.schemas import EUDR_CUTOFF_DATE
 
-DISTURBANCE_DETECTION_SCHEMA_VERSION: Literal["1.4.0"] = "1.4.0"
-DISTURBANCE_DETECTION_SCHEMA_ID = "urn:deforestation-pipeline:disturbance-detection:1.4.0"
+DISTURBANCE_DETECTION_SCHEMA_VERSION: Literal["1.5.0"] = "1.5.0"
+DISTURBANCE_DETECTION_SCHEMA_ID = "urn:deforestation-pipeline:disturbance-detection:1.5.0"
 
 
 class DisturbanceStateCode(IntEnum):
@@ -46,6 +46,7 @@ class DisturbanceQualityBit(IntEnum):
     CCDC_FIT_FAILURE = 7
     EDGE_PIXEL = 8
     CCDC_INSUFFICIENT_OBSERVATIONS = 9
+    ROBUST_SCALE_STABILIZED = 10
 
 
 class DetectorConvergenceReasonCode(IntEnum):
@@ -115,6 +116,8 @@ DISTURBANCE_SUMMARY_BAND_NAMES = (
 DISTURBANCE_DIAGNOSTIC_BAND_NAMES = (
     "robust_multi_index_support_count",
     "robust_max_standardized_anomaly",
+    "robust_scale_floor_maximum",
+    "robust_scale_stabilization_count",
     "ccdc_break_day_offset_from_cutoff",
     "ccdc_change_magnitude",
     "recovery_indicator",
@@ -127,12 +130,16 @@ class RobustSeasonalDetectorConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.1.0"] = "1.1.0"
+    schema_version: Literal["1.2.0"] = "1.2.0"
     minimum_reference_observations: Annotated[int, Field(ge=1, strict=True)]
     mad_scale_constant: Annotated[float, Field(gt=0, strict=True)]
     vegetation_loss_direction: Literal["decrease_is_positive"]
     reference_comparison_policy: Literal["same_season_only"]
     zero_scale_policy: Literal["not_standardizable"]
+    scale_stabilization_policy: Literal["seasonal_index_spatial_quantile_floor"]
+    scale_floor_quantile: Annotated[float, Field(gt=0, le=0.5, strict=True)]
+    scale_floor_minimum_valid_pixels: Annotated[int, Field(ge=4, strict=True)]
+    scale_floor_fallback_policy: Literal["leave_local_scale_unchanged"]
     missing_data_policy: Literal["preserve_nan_without_interpolation"]
     standardized_magnitude_threshold: Annotated[float, Field(gt=0, strict=True)]
     minimum_index_support_count: Annotated[int, Field(ge=2, strict=True)]
@@ -230,7 +237,7 @@ class DisturbanceDetectionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.4.0"] = DISTURBANCE_DETECTION_SCHEMA_VERSION
+    schema_version: Literal["1.5.0"] = DISTURBANCE_DETECTION_SCHEMA_VERSION
     reference_history_start_date: date
     analysis_start_date: date
     minimum_baseline_source_count: Annotated[int, Field(ge=2)]
@@ -312,6 +319,8 @@ class RobustSeasonalDiagnostics:
 
     reference_center: NDArray[np.float64]
     robust_scale: NDArray[np.float64]
+    scale_floor: NDArray[np.float64]
+    standardization_scale: NDArray[np.float64]
     raw_directional_delta: NDArray[np.float64]
     standardized_magnitude: NDArray[np.float64]
     reference_valid_count: NDArray[np.uint16]
@@ -370,6 +379,23 @@ class DetectorConvergenceResult:
     quality_flags_bitmask: NDArray[np.uint16]
 
 
+def _evaluable_edge_mask(evaluable: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Marca celdas evaluables contiguas al exterior o a una celda no evaluable."""
+    padded = np.pad(evaluable, pad_width=1, mode="constant", constant_values=False)
+    edge = np.zeros(evaluable.shape, dtype=np.bool_)
+    height, width = evaluable.shape
+    for row_offset in range(3):
+        for column_offset in range(3):
+            if row_offset == 1 and column_offset == 1:
+                continue
+            neighbor = padded[
+                row_offset : row_offset + height,
+                column_offset : column_offset + width,
+            ]
+            edge |= evaluable & ~neighbor
+    return edge
+
+
 def build_forest_evaluation_domain(
     *,
     source_count: NDArray[Any],
@@ -406,6 +432,8 @@ def build_forest_evaluation_domain(
     quality_flags = np.zeros(counts.shape, dtype=np.uint16)
     baseline_uncertain_mask = np.uint16(1 << DisturbanceQualityBit.BASELINE_UNCERTAIN)
     quality_flags[baseline_uncertain] |= baseline_uncertain_mask
+    edge_bit = np.uint16(1 << DisturbanceQualityBit.EDGE_PIXEL)
+    quality_flags[_evaluable_edge_mask(evaluable)] |= edge_bit
     arrays = (domain_code, evaluable, baseline_uncertain, quality_flags)
     for array in arrays:
         array.setflags(write=False)
@@ -577,6 +605,8 @@ def compute_robust_seasonal_diagnostics(
     output_shape = post_float.shape
     center_output = np.full(output_shape, np.nan, dtype=np.float64)
     scale_output = np.full(output_shape, np.nan, dtype=np.float64)
+    scale_floor_output = np.full(output_shape, np.nan, dtype=np.float64)
+    standardization_scale_output = np.full(output_shape, np.nan, dtype=np.float64)
     raw_delta_output = np.full(output_shape, np.nan, dtype=np.float64)
     standardized_output = np.full(output_shape, np.nan, dtype=np.float64)
     valid_count_output = np.zeros(output_shape, dtype=np.uint16)
@@ -621,19 +651,52 @@ def compute_robust_seasonal_diagnostics(
         absolute_deviation = np.abs(seasonal_reference - center[np.newaxis])
         mad = _safe_temporal_nanmedian(absolute_deviation)
         scale = mad * robust_config.mad_scale_constant
+        standardization_scale = scale.copy()
+        scale_floor = np.full(scale.shape, np.nan, dtype=np.float64)
+        for index_position in range(scale.shape[0]):
+            positive_scale = (
+                sufficient[index_position]
+                & np.isfinite(scale[index_position])
+                & (scale[index_position] > 0)
+            )
+            if np.count_nonzero(positive_scale) < robust_config.scale_floor_minimum_valid_pixels:
+                continue
+            floor = float(
+                np.quantile(
+                    scale[index_position][positive_scale],
+                    robust_config.scale_floor_quantile,
+                )
+            )
+            if not np.isfinite(floor) or floor <= 0:
+                continue
+            eligible = sufficient[index_position]
+            scale_floor[index_position][eligible] = floor
+            standardization_scale[index_position][positive_scale] = np.maximum(
+                scale[index_position][positive_scale],
+                floor,
+            )
         raw_delta = center - post_float[post_index]
 
         center_output[post_index][diagnostic_mask] = center[diagnostic_mask]
         scale_output[post_index][diagnostic_mask] = scale[diagnostic_mask]
+        scale_floor_output[post_index][diagnostic_mask] = scale_floor[diagnostic_mask]
+        standardization_scale_output[post_index][diagnostic_mask] = standardization_scale[
+            diagnostic_mask
+        ]
         raw_delta_output[post_index][diagnostic_mask] = raw_delta[diagnostic_mask]
-        standardizable = diagnostic_mask & (scale > 0)
+        stabilized = diagnostic_mask & (standardization_scale > scale) & (scale > 0)
+        stabilized_bit = np.uint16(1 << DisturbanceQualityBit.ROBUST_SCALE_STABILIZED)
+        quality_flags[post_index][stabilized] |= stabilized_bit
+        standardizable = diagnostic_mask & (standardization_scale > 0)
         standardized_output[post_index][standardizable] = (
-            raw_delta[standardizable] / scale[standardizable]
+            raw_delta[standardizable] / standardization_scale[standardizable]
         )
 
     arrays = (
         center_output,
         scale_output,
+        scale_floor_output,
+        standardization_scale_output,
         raw_delta_output,
         standardized_output,
         valid_count_output,
@@ -644,6 +707,8 @@ def compute_robust_seasonal_diagnostics(
     return RobustSeasonalDiagnostics(
         reference_center=center_output,
         robust_scale=scale_output,
+        scale_floor=scale_floor_output,
+        standardization_scale=standardization_scale_output,
         raw_directional_delta=raw_delta_output,
         standardized_magnitude=standardized_output,
         reference_valid_count=valid_count_output,
@@ -1144,6 +1209,8 @@ def _validate_robust_signal_inputs(
     for field_name in (
         "reference_center",
         "robust_scale",
+        "scale_floor",
+        "standardization_scale",
         "raw_directional_delta",
         "reference_valid_count",
         "quality_flags_bitmask",

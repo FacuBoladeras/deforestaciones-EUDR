@@ -1096,7 +1096,7 @@ def test_local_runner_uses_same_2020_stack_for_opt_in_model_comparison(
     assert candidate_2020["feature_stack"] is p0_2020["feature_stack"] is stacks[2020]
     assert all((run_directory / path).is_file() for path in paths.values())
     summary = json.loads((run_directory / "json/run/summary.json").read_text(encoding="utf-8"))
-    assert summary["schema_version"] == "3.4.0"
+    assert summary["schema_version"] == "3.5.0"
     assert summary["analysis_end_date"] == "2024-11-30"
     assert summary["requested_analysis_end_date"] == "2024-12-31"
     assert summary["status"] == "review_required"

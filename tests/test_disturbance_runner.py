@@ -329,8 +329,8 @@ def test_range_pipeline_uses_internal_2017_support_and_publishes_five_outputs(
     event_summary = summary["disturbance_detection"]["persistent_events"]
     assert event_summary["event_count"] == 1
     assert event_summary["total_event_area_ha"] == 0.36
-    assert event_summary["area_threshold_event_count"] == 0
-    assert event_summary["below_area_threshold_event_count"] == 1
+    assert event_summary["above_visec_area_reference_candidate_count"] == 0
+    assert event_summary["above_visec_area_reference_candidate_area_ha"] == 0.0
     assert event_summary["automatic_final_assessment_generated"] is False
     assert event_summary["attribution_generated"] is False
     serialized_disturbance_summary = json.dumps(

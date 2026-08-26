@@ -35,7 +35,7 @@ from deforestation_pipeline.catalog import (
     build_agricultural_evidence_source_plan,
     load_source_catalog,
 )
-from deforestation_pipeline.config import OutputConfig, load_license_registry
+from deforestation_pipeline.config import ArtifactProfile, OutputConfig, load_license_registry
 from deforestation_pipeline.gee import GeeSession
 from deforestation_pipeline.local_runner import _publish_bundle
 from deforestation_pipeline.raster_grid import derive_raster_grid_spec
@@ -48,7 +48,7 @@ from deforestation_pipeline.raster_products import (
 from deforestation_pipeline.schemas import NonEmptyString, RasterGridSpec, StrictModel
 
 AGRICULTURAL_COLLECTION_SCHEMA_VERSION: Final = "1.0.0"
-AGRICULTURAL_COLLECTION_BUNDLE_SCHEMA_VERSION: Final = "1.1.0"
+AGRICULTURAL_COLLECTION_BUNDLE_SCHEMA_VERSION: Final = "1.3.0"
 DYNAMIC_WORLD_RASTER_BANDS: Final = (
     "valid_observation_count",
     "qualifying_crop_count",
@@ -62,7 +62,7 @@ _SAFE_IDENTIFIER = re.compile(r"[^A-Za-z0-9_-]+")
 class AgriculturalCollectorConfig(StrictModel):
     """Parámetros acotados del recolector, separados del gate de persistencia."""
 
-    schema_version: Literal["1.1.0"]
+    schema_version: Literal["1.2.0"]
     source_id: Literal["dynamic_world_v1"]
     target_crs: Literal["EPSG:6933"]
     resolution_m: Literal[10]
@@ -71,7 +71,7 @@ class AgriculturalCollectorConfig(StrictModel):
     minimum_top1_probability: Annotated[float, Field(gt=0.5, le=1, strict=True)]
     minimum_valid_observations_per_pixel: Annotated[int, Field(ge=1, le=31, strict=True)]
     minimum_crop_observation_fraction: Annotated[float, Field(gt=0, le=1, strict=True)]
-    maximum_events: Annotated[int, Field(ge=1, le=100, strict=True)]
+    maximum_events_per_batch: Annotated[int, Field(ge=1, le=100, strict=True)]
     maximum_windows_per_event: Annotated[int, Field(ge=1, le=72, strict=True)]
     maximum_remote_acquisitions: Annotated[int, Field(ge=1, le=500, strict=True)]
     maximum_shared_grid_pixels: Annotated[int, Field(ge=1, le=5_000_000, strict=True)]
@@ -239,8 +239,19 @@ class DynamicWorldSharedWindowQuery:
     geometry_wgs84: BaseGeometry
     grid: RasterGridSpec
     events: tuple[DynamicWorldSharedEvent, ...]
+    event_batches: tuple[tuple[DynamicWorldSharedEvent, ...], ...]
     source: AgriculturalCatalogSource
     minimum_top1_probability: float
+
+    def __post_init__(self) -> None:
+        event_ids = tuple(event.event_id for event in self.events)
+        batched_ids = tuple(event.event_id for batch in self.event_batches for event in batch)
+        if not event_ids or len(event_ids) != len(set(event_ids)):
+            raise ValueError("shared_window_events_empty_or_duplicate")
+        if not self.event_batches or any(not batch for batch in self.event_batches):
+            raise ValueError("shared_window_event_batches_empty")
+        if batched_ids != event_ids:
+            raise ValueError("shared_window_event_batches_must_partition_events")
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,8 +316,10 @@ def materialize_agricultural_evidence_collection(
     licenses_path: Path,
     created_at: datetime,
     raster_provider: RasterProvider,
+    artifact_profile: ArtifactProfile = ArtifactProfile.LEAN,
 ) -> Path:
     """Consulta meses pos-onset y publica evidencia espacial cruda por evento."""
+    artifact_profile = ArtifactProfile(artifact_profile)
     if not establishment_id.strip():
         raise ValueError("agricultural_collector_establishment_id_empty")
     if created_at.tzinfo is None or created_at.utcoffset() is None:
@@ -319,8 +332,6 @@ def materialize_agricultural_evidence_collection(
     license_record = _license_for_source(source, licenses_path)
     source_bundle, source_manifest, event_collection = _load_event_bundle(source_event_bundle)
     events = _parse_events(event_collection)
-    if len(events) > config.maximum_events:
-        raise ValueError("agricultural_collector_event_budget_exceeded")
 
     event_windows = {
         event.event_id: _monthly_windows(event.onset_end, analysis_end_date) for event in events
@@ -343,7 +354,7 @@ def materialize_agricultural_evidence_collection(
     }
     analysis_id = uuid5(
         NAMESPACE_URL,
-        "agricultural-collector-v1-shared-monthly:"
+        "agricultural-collector-v2-shared-monthly-batched:"
         + json.dumps(identity, sort_keys=True, separators=(",", ":")),
     )
     files: dict[str, bytes] = {}
@@ -390,19 +401,25 @@ def materialize_agricultural_evidence_collection(
         raise ValueError("agricultural_collector_shared_grid_budget_exceeded")
     for window_id, start_date, end_date_exclusive, participants in acquisition_plan:
         assert shared_grid is not None
+        shared_events = tuple(
+            DynamicWorldSharedEvent(
+                event_id=event.event_id,
+                geometry_wgs84=event.geometry,
+            )
+            for event in participants
+        )
+        event_batches = _event_batches(
+            shared_events,
+            maximum_events_per_batch=config.maximum_events_per_batch,
+        )
         query = DynamicWorldSharedWindowQuery(
             window_id=window_id,
             start_date=start_date,
             end_date_exclusive=end_date_exclusive,
             geometry_wgs84=unary_union([event.geometry for event in participants]),
             grid=shared_grid,
-            events=tuple(
-                DynamicWorldSharedEvent(
-                    event_id=event.event_id,
-                    geometry_wgs84=event.geometry,
-                )
-                for event in participants
-            ),
+            events=shared_events,
+            event_batches=event_batches,
             source=source,
             minimum_top1_probability=config.minimum_top1_probability,
         )
@@ -420,7 +437,8 @@ def materialize_agricultural_evidence_collection(
             product="dynamic_world_shared_monthly_crop_support",
             all_nodata_band_policy="allow_for_missing_period",
         )
-        files[shared_path] = normalized_shared
+        if artifact_profile == ArtifactProfile.DEBUG:
+            files[shared_path] = normalized_shared
         shared_sha256 = hashlib.sha256(normalized_shared).hexdigest()
         acquisition_records.append(
             {
@@ -430,9 +448,19 @@ def materialize_agricultural_evidence_collection(
                 "end_date_exclusive": end_date_exclusive.isoformat(),
                 "event_count": len(participants),
                 "event_ids": sorted(participant_ids),
+                "batch_count": len(event_batches),
+                "event_batches": [
+                    {
+                        "batch_id": f"dynamic-world-{window_id}-batch-{index:03d}",
+                        "event_count": len(batch),
+                        "event_ids": [event.event_id for event in batch],
+                    }
+                    for index, batch in enumerate(event_batches, start=1)
+                ],
                 "retrieved_at": collected.retrieved_at.isoformat(),
                 "grid_sha256": shared_grid.grid_sha256,
-                "raster_path": shared_path,
+                "raster_path": (shared_path if artifact_profile == ArtifactProfile.DEBUG else None),
+                "raster_retained": artifact_profile == ArtifactProfile.DEBUG,
                 "raster_sha256": shared_sha256,
                 "raster_validation": shared_validation.model_dump(mode="json"),
             }
@@ -474,7 +502,9 @@ def materialize_agricultural_evidence_collection(
                     "matched_scene_count": matched_scene_count,
                     "retrieved_at": collected.retrieved_at.isoformat(),
                     "shared_acquisition_id": f"dynamic-world-{window_id}",
-                    "shared_raster_path": shared_path,
+                    "shared_raster_path": (
+                        shared_path if artifact_profile == ArtifactProfile.DEBUG else None
+                    ),
                     "shared_raster_sha256": shared_sha256,
                     "grid_sha256": grid.grid_sha256,
                     "raster_path": raster_path,
@@ -562,7 +592,7 @@ def materialize_agricultural_evidence_collection(
     metadata = {
         "schema_version": AGRICULTURAL_COLLECTION_SCHEMA_VERSION,
         "analysis_id": str(analysis_id),
-        "method": "dynamic_world_shared_monthly_collector_v1",
+        "method": "dynamic_world_shared_monthly_collector_v2",
         "source": source_identity,
         "configuration": config.model_dump(mode="json"),
         "spatial_method": {
@@ -586,10 +616,15 @@ def materialize_agricultural_evidence_collection(
         "query_count": len(query_records),
         "queries": query_records,
         "remote_acquisition_count": len(acquisition_records),
+        "event_batch_count": sum(
+            int(acquisition["batch_count"]) for acquisition in acquisition_records
+        ),
         "event_window_reuse_ratio": (
             len(query_records) / len(acquisition_records) if acquisition_records else 0.0
         ),
         "remote_query_budget_semantics": "unique_shared_monthly_acquisitions",
+        "event_batch_budget_semantics": ("maximum_events_per_shared_month_scene_count_batch"),
+        "artifact_profile": artifact_profile.value,
         "shared_acquisitions": acquisition_records,
         "signed_urls_persisted": False,
         "visualizations": visualizations,
@@ -621,7 +656,7 @@ def materialize_agricultural_evidence_collection(
         "event_artifact_sha256": _sha256_file(source_bundle / _EVENT_ARTIFACT),
     }
     run_name = (
-        f"{_safe_id(establishment_id)}-agriculture-v1__"
+        f"{_safe_id(establishment_id)}-agriculture-v2__"
         f"{created_at.strftime('%Y%m%dT%H%M%S%fZ')}__{str(analysis_id)[:8]}"
     )
     run_directory = output_root.resolve() / run_name
@@ -641,6 +676,10 @@ def materialize_agricultural_evidence_collection(
             "licenses_sha256": identity["licenses_sha256"],
             "query_count": len(query_records),
             "remote_acquisition_count": len(acquisition_records),
+            "event_batch_count": sum(
+                int(acquisition["batch_count"]) for acquisition in acquisition_records
+            ),
+            "artifact_profile": artifact_profile.value,
             "signed_urls_persisted": False,
             "persistence_evaluated": False,
             "visualizations": visualizations,
@@ -678,7 +717,7 @@ def collect_dynamic_world_shared_window(
     fetch_bytes: FetchBytes | None = None,
     retrieved_at: datetime | None = None,
 ) -> CollectedSharedWindowRaster:
-    """Descarga una vez el mes y obtiene conteos por evento en una sola evaluación."""
+    """Descarga una vez el mes y obtiene conteos por evento en lotes acotados."""
     module = session.module
     timestamp = retrieved_at or datetime.now(UTC)
     try:
@@ -688,11 +727,20 @@ def collect_dynamic_world_shared_window(
             .filterBounds(remote_geometry)
             .filterDate(query.start_date.isoformat(), query.end_date_exclusive.isoformat())
         )
-        matched_scene_counts = _shared_event_scene_counts(
-            module=module,
-            collection=collection,
-            events=query.events,
-        )
+        matched_scene_counts: dict[str, int] = {}
+        for batch in query.event_batches:
+            batch_counts = _shared_event_scene_counts(
+                module=module,
+                collection=collection,
+                events=batch,
+            )
+            if set(matched_scene_counts).intersection(batch_counts):
+                raise AgriculturalCollectorRemoteError(
+                    "dynamic_world_shared_scene_counts_duplicate"
+                )
+            matched_scene_counts.update(batch_counts)
+        if set(matched_scene_counts) != {event.event_id for event in query.events}:
+            raise AgriculturalCollectorRemoteError("dynamic_world_shared_scene_counts_incomplete")
         if not any(matched_scene_counts.values()):
             return CollectedSharedWindowRaster(
                 content=None,
@@ -999,6 +1047,21 @@ def _shared_acquisition_plan(
         for (window_id, start_date, end_date_exclusive), participants in sorted(
             grouped.items(), key=lambda item: (item[0][1], item[0][2], item[0][0])
         )
+    )
+
+
+def _event_batches(
+    events: Sequence[DynamicWorldSharedEvent],
+    *,
+    maximum_events_per_batch: int,
+) -> tuple[tuple[DynamicWorldSharedEvent, ...], ...]:
+    """Particiona inventarios completos en lotes determinísticos sin descartarlos."""
+    if maximum_events_per_batch < 1:
+        raise ValueError("maximum_events_per_batch_must_be_positive")
+    ordered = tuple(sorted(events, key=lambda event: event.event_id))
+    return tuple(
+        ordered[offset : offset + maximum_events_per_batch]
+        for offset in range(0, len(ordered), maximum_events_per_batch)
     )
 
 

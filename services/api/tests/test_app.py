@@ -75,7 +75,7 @@ def test_health_and_openapi_expose_versioned_contract(tmp_path: Path) -> None:
         schema = client.get("/openapi.json").json()
 
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "service": "deforestation-api", "version": "0.2.0"}
+    assert health.json() == {"status": "ok", "service": "deforestation-api", "version": "0.4.0"}
     assert "/api/v1/geometries/validate" in schema["paths"]
     assert "/api/v1/analyses" in schema["paths"]
     assert "/api/v1/analyses/{analysis_id}" in schema["paths"]

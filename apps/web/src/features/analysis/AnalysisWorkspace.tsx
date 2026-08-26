@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -18,20 +18,29 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 export function AnalysisWorkspace() {
   const api = useMemo(() => new ApiClient(), []);
   const queryClient = useQueryClient();
-  const [geometry, setGeometry] = useState<PolygonFeature | null>(null);
+  const [draftGeometry, setDraftGeometry] = useState<PolygonFeature | null>(null);
+  const draftGeometryRef = useRef<PolygonFeature | null>(null);
+  const geometryRevisionRef = useRef(0);
+  const [acceptedGeometry, setAcceptedGeometry] = useState<PolygonFeature | null>(null);
+  const [geometryEditing, setGeometryEditing] = useState(false);
   const [validation, setValidation] = useState<GeometryValidation | null>(null);
   const [establishmentId, setEstablishmentId] = useState("");
   const [analysisId, setAnalysisId] = useState<string | null>(analysisIdFromLocation);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const validationMutation = useMutation({
-    mutationFn: (candidate: PolygonFeature) => api.validateGeometry(candidate),
-    onSuccess: setValidation,
+    mutationFn: ({ candidate }: { candidate: PolygonFeature; revision: number }) =>
+      api.validateGeometry(candidate),
+    onSuccess: (result, { candidate, revision }) => {
+      if (draftGeometryRef.current !== candidate || geometryRevisionRef.current !== revision) return;
+      setValidation(result);
+      setAcceptedGeometry(candidate);
+    },
   });
   const createMutation = useMutation({
     mutationFn: () => {
-      if (!geometry) throw new Error("geometry_missing");
-      return api.createAnalysis({ establishmentId, geometry });
+      if (!acceptedGeometry) throw new Error("geometry_missing");
+      return api.createAnalysis({ establishmentId, geometry: acceptedGeometry });
     },
     onSuccess: (created) => trackAnalysis(created.analysis_id),
   });
@@ -53,6 +62,11 @@ export function AnalysisWorkspace() {
     queryFn: () => api.getEvents(analysisId ?? ""),
     enabled: Boolean(analysisId && canReadResults),
   });
+  const candidatesQuery = useQuery({
+    queryKey: ["analysis-candidates", analysisId],
+    queryFn: () => api.getCandidates(analysisId ?? ""),
+    enabled: Boolean(analysisId && canReadResults),
+  });
   const assetsQuery = useQuery({
     queryKey: ["analysis-assets", analysisId],
     queryFn: () => api.getAssets(analysisId ?? ""),
@@ -63,11 +77,39 @@ export function AnalysisWorkspace() {
     onSuccess: (status) => queryClient.setQueryData(["analysis-status", analysisId], status),
   });
 
-  const updateGeometry = (candidate: PolygonFeature) => {
-    setGeometry(candidate);
+  const invalidateAcceptance = () => {
+    geometryRevisionRef.current += 1;
+    validationMutation.reset();
+    setAcceptedGeometry(null);
     setValidation(null);
     trackAnalysis(null);
     setLocalError(null);
+  };
+
+  const updateGeometry = (candidate: PolygonFeature) => {
+    draftGeometryRef.current = candidate;
+    setDraftGeometry(candidate);
+    setGeometryEditing(false);
+    invalidateAcceptance();
+  };
+
+  const startEditingGeometry = () => {
+    geometryRevisionRef.current += 1;
+    validationMutation.reset();
+    setGeometryEditing(true);
+    setLocalError(null);
+    if (!acceptedGeometry) setValidation(null);
+  };
+
+  const cancelEditingGeometry = () => {
+    setGeometryEditing(false);
+  };
+
+  const clearGeometry = () => {
+    draftGeometryRef.current = null;
+    setDraftGeometry(null);
+    setGeometryEditing(false);
+    invalidateAcceptance();
   };
 
   const trackAnalysis = (identifier: string | null) => {
@@ -87,16 +129,33 @@ export function AnalysisWorkspace() {
     }
   };
 
-  const validateGeometry = () => {
-    if (geometry) validationMutation.mutate(geometry);
+  const acceptGeometry = () => {
+    if (draftGeometry) {
+      validationMutation.mutate({ candidate: draftGeometry, revision: geometryRevisionRef.current });
+    }
   };
+
+  const geometryFeedback = geometryFeedbackFor({
+    accepted: Boolean(acceptedGeometry),
+    hasDraft: Boolean(draftGeometry),
+    validating: validationMutation.isPending,
+  });
+
+  const resultQueries = [reportQuery, eventsQuery, candidatesQuery, assetsQuery] as const;
+  const resultsLoading = canReadResults && resultQueries.some((query) => query.isPending);
+  const resultsReady = canReadResults && resultQueries.every((query) => query.isSuccess);
+  const resultQueryError = resultQueries
+    .map((query) => mutationError(query.error))
+    .find((message): message is string => message !== null);
 
   const visibleError =
     localError ??
     mutationError(validationMutation.error) ??
     mutationError(createMutation.error) ??
     mutationError(statusQuery.error) ??
-    mutationError(cancelMutation.error);
+    mutationError(cancelMutation.error) ??
+    resultQueryError ??
+    null;
 
   return (
     <main className="shell">
@@ -105,14 +164,21 @@ export function AnalysisWorkspace() {
           <p className="eyebrow">Herramienta interna</p>
           <h1>Evidencia territorial EUDR</h1>
           <p className="hero-copy">
-            Cargá o dibujá un polígono, validalo y seguí el análisis sin ejecutar comandos.
+            Cargá o dibujá una geometría, aceptala y seguí el análisis sin ejecutar comandos.
           </p>
         </div>
         <div className="technical-badge">Resultado técnico · No certifica cumplimiento legal</div>
       </header>
 
       <div className="workspace-grid">
-        <GeometryMap geometry={geometry} onGeometryChange={updateGeometry} />
+        <GeometryMap
+          geometry={draftGeometry}
+          status={acceptedGeometry ? "accepted" : draftGeometry ? "draft" : "empty"}
+          onEditingStart={startEditingGeometry}
+          onEditingCancel={cancelEditingGeometry}
+          onGeometryChange={updateGeometry}
+          onGeometryClear={clearGeometry}
+        />
 
         <section className="control-card" aria-labelledby="request-title">
           <p className="eyebrow">Solicitud</p>
@@ -140,22 +206,33 @@ export function AnalysisWorkspace() {
             <button
               type="button"
               className="button button-secondary"
-              disabled={!geometry || validationMutation.isPending}
-              onClick={validateGeometry}
+              disabled={!draftGeometry || Boolean(acceptedGeometry) || validationMutation.isPending}
+              onClick={acceptGeometry}
             >
-              {validationMutation.isPending ? "Validando…" : "Validar geometría"}
+              {validationMutation.isPending ? "Validando…" : "Aceptar geometría"}
             </button>
             <button
               type="button"
               className="button button-primary"
-              disabled={!validation?.valid || !establishmentId.trim() || createMutation.isPending}
+              disabled={
+                !acceptedGeometry ||
+                geometryEditing ||
+                !establishmentId.trim() ||
+                createMutation.isPending
+              }
               onClick={() => createMutation.mutate()}
             >
               {createMutation.isPending ? "Creando…" : "Crear análisis"}
             </button>
           </div>
 
-          {geometry && <p className="success-line">Geometría cargada en el mapa.</p>}
+          <p
+            className={`geometry-feedback geometry-feedback-${geometryFeedback.kind}`}
+            role="status"
+          >
+            <strong>{geometryFeedback.title}</strong>
+            <span>{geometryFeedback.detail}</span>
+          </p>
           {validation && (
             <div className="validation-card">
               <strong>{formatArea(validation.area_ha_estimate)}</strong>
@@ -181,12 +258,19 @@ export function AnalysisWorkspace() {
         />
       )}
 
-      {analysisId && canReadResults && (
+      {analysisId && resultsLoading && (
+        <p className="results-loading" role="status">
+          Cargando resultados…
+        </p>
+      )}
+
+      {analysisId && resultsReady && (
         <ResultsPanel
           analysisId={analysisId}
           api={api}
           report={reportQuery.data}
           events={eventsQuery.data?.items ?? []}
+          candidates={candidatesQuery.data?.items ?? []}
           assets={assetsQuery.data?.items ?? []}
         />
       )}
@@ -261,16 +345,19 @@ function ResultsPanel({
   api,
   report,
   events,
+  candidates,
   assets,
 }: {
   analysisId: string;
   api: ApiClient;
   report: Record<string, unknown> | undefined;
   events: Record<string, unknown>[];
+  candidates: Record<string, unknown>[];
   assets: Awaited<ReturnType<ApiClient["getAssets"]>>["items"];
 }) {
   const metrics = recordValue(report?.headline_metrics);
-  const scientificStatus = stringValue(recordValue(report?.analysis)?.status) ?? "No informado";
+  const scientificStatus =
+    stringValue(recordValue(report?.analysis)?.overall_status) ?? "No informado";
   const images = assets.filter((asset) => asset.media_type.startsWith("image/"));
   return (
     <section className="results-section">
@@ -303,16 +390,48 @@ function ResultsPanel({
 
       <div className="result-grid">
         <div>
-          <h3>Eventos ({events.length})</h3>
+          <h3>Eventos probables ({events.length})</h3>
           <div className="event-list">
-            {events.slice(0, 12).map((event, index) => (
+            {events.map((event, index) => (
               <article className="event-card" key={stringValue(event.event_id) ?? index}>
                 <strong>{stringValue(event.event_id) ?? `Evento ${index + 1}`}</strong>
-                <span>{stringValue(event.status) ?? stringValue(event.classification) ?? "Revisar evidencia"}</span>
-                {typeof event.area_ha === "number" && <small>{formatArea(event.area_ha)}</small>}
+                <span>
+                  {interpretationLabel(
+                    stringValue(event.interpretation_status) ??
+                      stringValue(event.status) ??
+                      "conversion_likely",
+                  )}
+                </span>
+                {resultArea(event, "event") !== null && (
+                  <small>{formatArea(resultArea(event, "event") ?? 0)}</small>
+                )}
               </article>
             ))}
-            {events.length === 0 && <p className="empty-state">No hay eventos para mostrar.</p>}
+            {events.length === 0 && (
+              <p className="empty-state">No se detectaron eventos de conversión probable.</p>
+            )}
+          </div>
+          <h3>Perturbaciones candidatas ({candidates.length})</h3>
+          <div className="event-list">
+            {candidates.map((candidate, index) => (
+              <article
+                className="event-card"
+                key={stringValue(candidate.candidate_id) ?? index}
+              >
+                <strong>{stringValue(candidate.candidate_id) ?? `Candidato ${index + 1}`}</strong>
+                <span>
+                  {interpretationLabel(
+                    stringValue(candidate.interpretation_status) ?? "candidate_only",
+                  )}
+                </span>
+                {resultArea(candidate, "candidate") !== null && (
+                  <small>{formatArea(resultArea(candidate, "candidate") ?? 0)}</small>
+                )}
+              </article>
+            ))}
+            {candidates.length === 0 && (
+              <p className="empty-state">No hay perturbaciones candidatas para mostrar.</p>
+            )}
           </div>
         </div>
         <div>
@@ -365,6 +484,63 @@ function formatValue(value: unknown): string {
 function humanize(value: string): string {
   const spaced = value.replaceAll("_", " ");
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function interpretationLabel(value: string): string {
+  const labels: Record<string, string> = {
+    candidate_only: "Sólo candidata",
+    temporary_or_recovered: "Temporal o recuperada",
+    persistent_unattributed: "Persistente sin atribución",
+    insufficient_data: "Datos insuficientes",
+    subthreshold_conversion_evidence: "Evidencia conjunta bajo umbral; no es evento",
+    conversion_likely: "Conversión probable",
+  };
+  return labels[value] ?? humanize(value);
+}
+
+function resultArea(record: Record<string, unknown>, kind: "event" | "candidate"): number | null {
+  const preferred =
+    kind === "event"
+      ? record.likely_conversion_area_ha
+      : record.candidate_area_ha ?? record.area_ha;
+  return typeof preferred === "number" ? preferred : null;
+}
+
+function geometryFeedbackFor({
+  accepted,
+  hasDraft,
+  validating,
+}: {
+  accepted: boolean;
+  hasDraft: boolean;
+  validating: boolean;
+}): { kind: "empty" | "pending" | "validating" | "accepted"; title: string; detail: string } {
+  if (validating) {
+    return {
+      kind: "validating",
+      title: "Validando geometría…",
+      detail: "Esperá la confirmación antes de crear el análisis.",
+    };
+  }
+  if (accepted) {
+    return {
+      kind: "accepted",
+      title: "Geometría aceptada y validada",
+      detail: "Esta es la geometría que se enviará al crear el análisis.",
+    };
+  }
+  if (hasDraft) {
+    return {
+      kind: "pending",
+      title: "Geometría pendiente de aceptación",
+      detail: "Revisala en el mapa. Si volviste a editar, tenés que aceptarla nuevamente.",
+    };
+  }
+  return {
+    kind: "empty",
+    title: "Aún no hay geometría",
+    detail: "Cargá un GeoJSON, dibujá un polígono o arrastrá un rectángulo sobre el mapa.",
+  };
 }
 
 function mutationError(error: unknown): string | null {

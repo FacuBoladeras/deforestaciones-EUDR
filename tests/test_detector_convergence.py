@@ -152,8 +152,8 @@ def test_default_convergence_contract_is_versioned_and_forbids_score_fusion() ->
     config = load_config(PROJECT_ROOT / "configs" / "default.yml")
     convergence = config.disturbance_detection.convergence
 
-    assert config.schema_version == "1.11.0"
-    assert config.disturbance_detection.schema_version == "1.4.0"
+    assert config.schema_version == "1.13.0"
+    assert config.disturbance_detection.schema_version == "1.5.0"
     assert convergence.schema_version == "1.0.0"
     assert convergence.temporal_compatibility_policy == "ccdc_break_within_robust_signal_interval"
     assert convergence.interval_boundary_policy == "closed_start_open_end"

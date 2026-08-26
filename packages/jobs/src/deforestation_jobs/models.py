@@ -54,6 +54,9 @@ class AnalysisJob:
     parent_manifest_sha256: str | None = None
     report_dataset_sha256: str | None = None
     safe_error_code: str | None = None
+    lease_owner_id: str | None = None
+    lease_expires_at: datetime | None = None
+    scientific_status: JobStatus | None = None
 
     def with_request_sha256(self, digest: str) -> AnalysisJob:
         """Crea una variante para probar o comparar una solicitud idempotente."""

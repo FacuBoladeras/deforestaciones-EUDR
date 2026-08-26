@@ -7,16 +7,18 @@ cliente web sin acoplar la lógica científica a HTTP, AWS o una interfaz.
 Complementa `AGENTS.md`, `README.md` y `NEXT_STEPS.md`; no reemplaza los
 contratos científicos ni constituye un registro histórico de pasos.
 
-**Estado al 18 de agosto de 2026:** los Incrementos 1–4 y su endurecimiento
+**Estado al 20 de agosto de 2026:** los Incrementos 1–4 y su endurecimiento
 previo a contenedores están implementados
 localmente: validación GeoJSON, contrato `/api/v1`, registro SQLite idempotente,
 worker separado con concurrencia uno, resultados verificables y cliente web.
 Un gate multiproceso sin GEE ya verifica HTTP → SQLite → worker →
 `report_assets` → publicación privada → HTTP. El smoke web real completó los
 componentes obligatorios y terminó `partial` sólo por Hampel diagnóstico no
-bloqueante. Además, los Incrementos PDF 1-2 ya aportan un renderer determinístico
-independiente y validado contra el expediente real, todavía sin integración en
-worker/API/web. Antes de contenerizar se completará su publicación. Esto no
+bloqueante. El renderer PDF ya está integrado como postproceso verificado del
+worker y se descarga desde API/web. Antes de contenerizar, el primer incremento
+de eficiencia agregó perfiles `lean/debug`, consolidó transportes TIFF HLS/RF
+y dejó efímero el raster agrícola mensual compartido que no consume el
+expediente final. Esto no
 demuestra todavía estabilidad cloud, escalado concurrente ni validez temática
 independiente.
 
@@ -196,7 +198,8 @@ POST /api/v1/analyses/{analysis_id}/cancel
 - `/download` sirve el ZIP determinístico que preparó el worker desde la misma
   allowlist, con hash y tamaño en un sidecar privado;
 - `/report`, `/events` y `/assets` leen exclusivamente
-  `storage_root/analyses/{analysis_id}/results`; no dependen de que sobreviva el
+  `storage_root/analyses/{analysis_id}/results/attempt-{attempt}`; la generación
+  visible es la del intento terminal fenced en SQLite y no depende de que sobreviva el
   workspace científico registrado en `output_prefix`;
 - en el prototipo local las URLs son internas y directas; en AWS se reemplazan
   por URLs firmadas y breves sin cambiar el catálogo lógico;
@@ -434,7 +437,7 @@ concurrencia uno; el smoke GEE completo sigue pendiente.
 ### Incremento 3 — Resultados y descargas
 
 - proyectar `report_dataset.json` en `/report`;
-- paginar `/events`;
+- paginar `/candidates` y `/events` como inventarios semánticamente distintos;
 - allowlist de `/assets` basada en `report_assets/index.json`;
 - descarga empaquetada con hashes;
 - cancelación best-effort y expiración local.
@@ -443,8 +446,9 @@ concurrencia uno; el smoke GEE completo sigue pendiente.
 
 **Estado:** implementado localmente. El worker copia únicamente el manifest,
 dataset, índice y allowlist verificados a un prefijo privado durable antes de
-marcar el job terminal. La lectura valida allí rutas, tamaños y SHA-256; los
-eventos provienen del inventario completo y los assets se exponen sólo por ID
+marcar el job terminal. La lectura valida allí rutas, tamaños y SHA-256; las
+perturbaciones no finales provienen de `candidates`, `/events` queda reservado
+a `conversion_likely_event` y los assets se exponen sólo por ID
 opaco. `output_prefix` queda como procedencia, no como dependencia operativa.
 El worker crea el ZIP fuera del request HTTP y la
 cancelación usa transiciones condicionales. Los jobs vencidos no se adquieren y
@@ -467,19 +471,22 @@ incluso después de desaparecer su workspace científico.
 TypeScript, Vite, MapLibre y TanStack Query sin mezclar dependencias Node con el
 workspace científico Python. Permite cargar Polygon/MultiPolygon GeoJSON,
 dibujar un Polygon, validar superficie y warnings, crear un análisis, hacer
-polling, cancelar y leer resumen, eventos, figuras y descarga. El proxy de Vite
+polling, cancelar y leer resumen, candidatos, eventos probables, figuras y descarga. El proxy de Vite
 mantiene la API same-origin en desarrollo.
 
-El gate web contiene quince pruebas Vitest, `tsc --noEmit` estricto y auditoría
+El gate web contiene treinta pruebas Vitest, `tsc --noEmit` estricto y auditoría
 de dependencias productivas sin vulnerabilidades conocidas. Requiere Node
 20.19+ y recomienda Node 22.12 mediante `.nvmrc`; MapLibre queda fuera del
 prebundle de Vite para evitar la pérdida de su worker en Windows.
 
 La edición es deliberadamente básica: vértices, deshacer y cierre del polígono;
-no incluye snapping, holes, edición avanzada ni conversión de CRS. El mapa de
-desarrollo usa teselas públicas OpenStreetMap con atribución y debe reemplazarse
-por un proveedor/política operativa antes de producción. El cliente conserva el
-lenguaje de incertidumbre y no presenta ningún estado como certificación.
+no incluye snapping, holes, edición avanzada ni conversión de CRS. El mapa base
+usa ArcGIS Basemap Styles Service v2 y permite alternar entre Esri Imagery y el
+estilo Esri OpenStreetMap. MapLibre vuelve a montar las fuentes y capas de la
+geometría declarada después de cada cambio de estilo para no perder el polígono.
+La configuración exige `VITE_ARCGIS_API_KEY`, restringida a los orígenes y
+servicios autorizados. Las capas son sólo contexto visual. El cliente conserva
+el lenguaje de incertidumbre y no presenta ningún estado como certificación.
 
 Para interoperar con exports GIS habituales sin ampliar el contrato HTTP, el
 parser web acepta además una `FeatureCollection` sólo si contiene exactamente
@@ -492,6 +499,30 @@ pisos visuales y un avance temporal limitado al 92 %; únicamente un estado
 terminal publicable llega a 100 %. El `analysis_id` se conserva como query
 parameter validado para reanudar polling luego de una recarga, sin usar la URL
 como fuente de verdad científica.
+
+#### Operación local unificada
+
+`scripts/run_local_stack.py` es la entrada de desarrollo para operar desde el
+frontend sin coordinar tres terminales. El supervisor inicia API, un único
+worker secuencial y Vite con variables explícitas para una SQLite, un storage
+privado y una raíz de runs compartidos. Antes de aceptar jobs verifica que los
+puertos 8000/5173 estén libres; después exige readiness HTTP de API/web y
+liveness del proceso worker. Un lock con PID e identidad de instancia rechaza
+launchers duplicados, pero nunca libera puertos ni termina PIDs que no haya
+creado él mismo.
+
+El modo normal permanece en foreground para que `Ctrl+C` detenga limpiamente el
+stack. `--background` desacopla el supervisor y `--stop` le solicita shutdown
+mediante una señal de control propia de la instancia, sin usar un `taskkill`
+global. Cada proceso escribe un log persistente y sanitizado separado bajo
+`outputs/local-stack/logs/`; secretos, bearer tokens y firmas de URLs se
+redactan antes de persistir o mostrar líneas. El entorno sí puede heredar
+`DEFORESTATION_GEE_CREDENTIALS`, pero nunca se vuelca a consola.
+
+En Windows, el launcher selecciona un Node >=20 y ante un Node 18 en `PATH`
+prefiere el Node bundled del runtime de Codex, actualmente 24. Esa selección se
+aplica sólo a los procesos hijos. No ejecuta `pnpm build`, no instala
+dependencias y no modifica la configuración científica.
 
 ### Gate de integración local cerrado antes del Incremento 5
 
@@ -550,13 +581,51 @@ respuesta y la cachea por extensión junto al PDF. El contexto no interviene en
 la evidencia científica. Para producción debe usarse un proveedor autorizado o
 servicio propio y revisar la exposición del bounding box de geometrías privadas.
 
-**Incremento PDF 4 - implementado.** El worker `0.2.0` invoca el renderer como
+**Incremento PDF 3.1 de robustez - implementado.** `deforestation-reporting`
+`0.7.0`, con view-model editorial `2.4.0`, consumía `report_dataset.json` `1.1.0`
+y separaba componentes por umbral de área. Ese paso preservó candidatos, pero
+el umbral espacial por sí solo ya no se denomina evento; la frontera autoritativa
+actual es la atribución conjuntiva descripta en el incremento siguiente.
+
+**Incremento semántico candidato/evento - implementado.** La atribución
+`5.0.0` publica `records` como inventario auditable, `candidates` para
+perturbaciones que no completaron la cadena causal y `events` únicamente para
+`conversion_likely_event`. `report_assets` `2.1.0` / dataset `1.4.0` y
+`deforestation-reporting` `0.11.0` / editorial `2.8.0` conservan esa separación.
+El contrato editorial `2.8.0` reorganiza exclusivamente la presentación para
+auditoría: portada mínima, dashboard, tabla de alcance EUDR, mapa general con sólo
+cuatro rótulos prioritarios, fichas prioritarias de una página, inventario íntegro y
+fichas secundarias en anexos, conclusión con campos de revisión, marcadores PDF y
+metadatos de emisión reales. No modifica cálculos, umbrales ni clasificación científica.
+Los componentes requeridos fallidos o salteados declaran disponibilidad y motivo;
+el PDF parcial conserva la evidencia disponible pero no infiere riesgo bajo ni
+ausencia de conversión cuando la atribución post-cambio no se completó.
+Desde dataset `1.4.0`, `complete_candidate_inventory_path` apunta al inventario
+del detector cuando no existe inventario de atribución. La API conserva una
+compatibilidad acotada para datasets parciales `1.3.0` ya publicados: expone la
+allowlist completa `030_disturbance_events.json` como candidatas y no inventa
+eventos. Si ese inventario no fue publicado, conserva el error de integridad en
+lugar de presentar la selección editorial acotada como si fuera completa.
+La API `0.4.0` agrega `/candidates`; `/events` ya no devuelve perturbaciones
+crudas. El cliente web `0.5.0` muestra ambos paneles y el PDF usa identificadores
+`C#` y `E#` con simbología diferente. La guía normativa interna es
+`DISTURBANCE_INTERPRETATION.md`.
+
+La revisión downstream para atribución `5.0.0` toma `records` como inventario
+neutral y particiona de forma conservadora: `conversion_likely_event` coherente
+va a `/events`; `subthreshold_conversion_evidence` y cualquier registro
+contradictorio permanecen en `/candidates`. En eventos, `geometry` proyecta
+`likely_conversion_geometry` y conserva `candidate_geometry`; en candidatos,
+`geometry` representa `candidate_geometry`. Los contratos legacy se admiten
+sin promocionar registros con señales semánticas contradictorias.
+
+**Incremento PDF 4 - implementado.** El worker `0.3.0` invoca el renderer como
 postproceso después de validar `report_assets`, pasándole explícitamente el
 GeoJSON privado sellado para no depender de la disposición del workspace
 científico. Publica el PDF y su metadato de integridad dentro del prefijo privado
-y los incluye en el ZIP determinístico. La API `0.2.0` expone
+y los incluye en el ZIP determinístico. La API `0.4.0` expone
 `GET /api/v1/analyses/{analysis_id}/report.pdf`; verifica esquema, tipo, tamaño,
-cabecera PDF y SHA-256 antes de responder. El cliente web `0.2.0` muestra la
+cabecera PDF y SHA-256 antes de responder. El cliente web `0.5.0` muestra la
 descarga directa sólo cuando el job terminó `completed` o `partial`. El request
 HTTP nunca renderiza el documento.
 

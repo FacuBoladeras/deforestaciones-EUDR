@@ -29,22 +29,51 @@ def synthetic_runner(request: CompleteAnalysisRequest, *, analysis_id: UUID) -> 
 
     _write_json(
         events_path,
-        {"events": [{"event_id": "synthetic-event-1", "area_ha": 0.75}]},
+        {
+            "schema_version": "5.0.0",
+            "records": [
+                {
+                    "candidate_id": "synthetic-candidate-1",
+                    "event_id": "synthetic-event-1",
+                    "record_type": "conversion_likely_event",
+                    "interpretation_status": "conversion_likely",
+                    "automatic_status": "conversion_likely",
+                    "candidate_area_ha": 1.25,
+                    "conjunctive_conversion_evidence_area_ha": 0.75,
+                    "likely_conversion_area_ha": 0.75,
+                    "candidate_geometry": {"type": "Polygon", "coordinates": []},
+                    "likely_conversion_geometry": {"type": "Polygon", "coordinates": []},
+                },
+                {
+                    "candidate_id": "synthetic-candidate-2",
+                    "event_id": None,
+                    "record_type": "disturbance_candidate",
+                    "interpretation_status": "subthreshold_conversion_evidence",
+                    "automatic_status": "review_required",
+                    "candidate_area_ha": 0.8,
+                    "conjunctive_conversion_evidence_area_ha": 0.4,
+                    "likely_conversion_area_ha": 0.0,
+                    "candidate_geometry": {"type": "Polygon", "coordinates": []},
+                    "likely_conversion_geometry": None,
+                },
+            ],
+        },
     )
     image_path.parent.mkdir(parents=True, exist_ok=True)
     image_path.write_bytes(b"synthetic-png")
     _write_json(
         dataset_path,
         {
-            "schema_version": "2.0.0",
+            "schema_version": "1.3.0",
             "analysis": {
                 "analysis_id": str(analysis_id),
                 "establishment_id": request.establishment_id,
                 "status": "complete",
             },
-            "headline_metrics": {"event_count": 1},
-            "event_selection": {
-                "complete_event_inventory_path": ("report_assets/data/main/events.json")
+            "headline_metrics": {"conversion_likely_count": 1},
+            "disturbance_selection": {
+                "complete_event_inventory_path": "report_assets/data/main/events.json",
+                "complete_candidate_inventory_path": "report_assets/data/main/events.json",
             },
             "limitations": ["synthetic integration fixture; no scientific execution"],
         },
@@ -67,7 +96,7 @@ def synthetic_runner(request: CompleteAnalysisRequest, *, analysis_id: UUID) -> 
     _write_json(
         report_root / "index.json",
         {
-            "schema_version": "2.0.0",
+            "schema_version": "2.1.0",
             "dataset_path": "report_assets/report_dataset.json",
             "dataset_sha256": _sha256(dataset_path),
             "files": files,
