@@ -129,6 +129,12 @@ def test_reserved_raster_bands_do_not_claim_probability_or_attribution() -> None
     assert "conversion" not in names
 
 
+def test_disturbance_paths_publish_additive_raw_robust_state_for_fusion() -> None:
+    paths = disturbance_detection_output_paths()
+
+    assert paths["robust_state_raster"] == "tiffs/evidence/disturbance_robust_state.tif"
+
+
 def test_temporal_boundary_and_non_decision_policies_cannot_be_relaxed() -> None:
     payload = load_config(
         PROJECT_ROOT / "configs" / "default.yml"
@@ -170,6 +176,7 @@ def test_disturbance_outputs_reuse_the_flat_evidence_domain() -> None:
         "metadata": "json/evidence/disturbance_detection.json",
         "summary_raster": "tiffs/evidence/disturbance_summary.tif",
         "diagnostics_raster": "tiffs/evidence/disturbance_diagnostics.tif",
+        "robust_state_raster": "tiffs/evidence/disturbance_robust_state.tif",
         "qa_figure": "figures/evidence/disturbance_detection.png",
         "period_summary_table": "tables/evidence/disturbance_period_summary.csv",
     }

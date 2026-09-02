@@ -61,6 +61,50 @@ def _publish_child(root: Path, name: str) -> Path:
             "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
         }
     ]
+    if name == "fusion":
+        for relative, payload in (
+            (
+                "json/evidence/disturbance_candidate_fusion.json",
+                {
+                    "schema_version": "1.0.0",
+                    "candidate_count": 1,
+                    "candidates": [{"candidate_id": "pde-test", "area_ha": 1.2}],
+                },
+            ),
+            (
+                "json/evidence/disturbance_events.geojson",
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"candidate_id": "pde-test", "event_id": "pde-test"},
+                            "geometry": {
+                                "type": "Polygon",
+                                "coordinates": [
+                                    [
+                                        [-60.01, -31.01],
+                                        [-60.0, -31.01],
+                                        [-60.0, -31.0],
+                                        [-60.01, -31.01],
+                                    ]
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ),
+        ):
+            path = bundle / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            artifacts.append(
+                {
+                    "path": relative,
+                    "size_bytes": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
     selected_relative = selected_figure_paths.get(name)
     if selected_relative is not None:
         selected = bundle / selected_relative
@@ -106,7 +150,7 @@ def _request(paths: dict[str, Path], output: Path) -> CompleteAnalysisRequest:
     )
 
 
-def test_auto_mode_runs_six_components_and_forwards_only_same_run_bundles(
+def test_auto_mode_runs_seven_components_and_forwards_only_same_run_bundles(
     tmp_path: Path,
 ) -> None:
     paths = _inputs(tmp_path)
@@ -125,6 +169,7 @@ def test_auto_mode_runs_six_components_and_forwards_only_same_run_bundles(
         pipeline_runner=runner("full"),
         hampel_runner=runner("hampel"),
         delta_runner=runner("rf"),
+        candidate_fusion_runner=runner("fusion"),
         agricultural_collector_runner=runner("collection"),
         agricultural_persistence_runner=runner("persistence"),
         attribution_runner=runner("attribution"),
@@ -141,38 +186,48 @@ def test_auto_mode_runs_six_components_and_forwards_only_same_run_bundles(
         agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
         agricultural_collector_loader=lambda _: object(),
         agricultural_persistence_loader=lambda _: object(),
+        agricultural_persistence_bundle_validator=lambda _: object(),
     )
 
     assert [name for name, _ in calls] == [
         "full",
         "hampel",
         "rf",
+        "fusion",
         "collection",
         "persistence",
         "attribution",
     ]
     full = calls[0][1]["output_root"] / "full"
     rf = calls[2][1]["output_root"] / "rf"
-    collection = calls[3][1]["output_root"] / "collection"
-    persistence = calls[4][1]["output_root"] / "persistence"
+    fusion = calls[3][1]["output_root"] / "fusion"
+    collection = calls[4][1]["output_root"] / "collection"
+    persistence = calls[5][1]["output_root"] / "persistence"
     assert calls[3][1]["source_event_bundle"] == full
-    assert calls[4][1]["source_collection_bundle"] == collection
-    assert calls[5][1]["source_event_bundle"] == full
-    assert calls[5][1]["source_rf_bundle"] == rf
-    assert calls[5][1]["source_agricultural_bundle"] == persistence
+    assert calls[3][1]["source_rf_bundle"] == rf
+    assert calls[4][1]["source_event_bundle"] == fusion
+    assert calls[5][1]["source_collection_bundle"] == collection
+    assert calls[6][1]["source_event_bundle"] == fusion
+    assert calls[6][1]["source_rf_bundle"] == rf
+    assert calls[6][1]["source_agricultural_bundle"] == persistence
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["component_order"] == [
         "full_pipeline",
         "hampel_benchmark",
         "rf_annual_deltas",
+        "disturbance_candidate_fusion",
         "agricultural_collection",
         "agricultural_persistence",
         "post_change_attribution",
     ]
-    assert manifest["dependencies"]["agricultural_collection"] == ["full_pipeline"]
+    assert manifest["dependencies"]["disturbance_candidate_fusion"] == [
+        "full_pipeline",
+        "rf_annual_deltas",
+    ]
+    assert manifest["dependencies"]["agricultural_collection"] == ["disturbance_candidate_fusion"]
     assert manifest["dependencies"]["agricultural_persistence"] == ["agricultural_collection"]
     assert manifest["dependencies"]["post_change_attribution"] == [
-        "full_pipeline",
+        "disturbance_candidate_fusion",
         "rf_annual_deltas",
         "agricultural_persistence",
     ]
@@ -189,7 +244,7 @@ def test_auto_mode_runs_six_components_and_forwards_only_same_run_bundles(
         "2025-12-31"
     )
     assert all(not Path(item["output_bundle"]).is_absolute() for item in manifest["components"])
-    assert manifest["schema_version"] == "2.3.0"
+    assert manifest["schema_version"] == "2.7.0"
     assert manifest["report_assets"]["status"] == "completed"
     assert manifest["report_assets"]["figure_count"] == 6
     report_index_path = output / manifest["report_assets"]["index_path"]
@@ -233,6 +288,9 @@ def test_authenticates_once_and_reuses_session_for_hls_rf_and_dynamic_world(
         pipeline_runner=runner,
         hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
         delta_runner=runner,
+        candidate_fusion_runner=lambda **kwargs: _publish_child(
+            Path(kwargs["output_root"]), "fusion"
+        ),
         agricultural_collector_runner=lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]),
             "collection" if kwargs["raster_provider"] is provider else "wrong-provider",
@@ -253,6 +311,7 @@ def test_authenticates_once_and_reuses_session_for_hls_rf_and_dynamic_world(
         agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
         agricultural_collector_loader=lambda _: object(),
         agricultural_persistence_loader=lambda _: object(),
+        agricultural_persistence_bundle_validator=lambda _: object(),
     )
     assert authenticated == [paths["credentials"].resolve()]
     assert pipeline_sessions == [session, session]
@@ -283,6 +342,9 @@ def test_user_oauth_authenticates_once_and_reuses_session_for_every_remote_compo
         pipeline_runner=runner,
         hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
         delta_runner=runner,
+        candidate_fusion_runner=lambda **kwargs: _publish_child(
+            Path(kwargs["output_root"]), "fusion"
+        ),
         agricultural_collector_runner=lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]), "collection"
         ),
@@ -302,6 +364,7 @@ def test_user_oauth_authenticates_once_and_reuses_session_for_every_remote_compo
         agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
         agricultural_collector_loader=lambda _: object(),
         agricultural_persistence_loader=lambda _: object(),
+        agricultural_persistence_bundle_validator=lambda _: object(),
     )
 
     assert authenticated == ["versioned-ee-project"]
@@ -329,6 +392,7 @@ def test_authentication_failure_publishes_sanitized_failed_parent(
             agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
             agricultural_collector_loader=lambda _: object(),
             agricultural_persistence_loader=lambda _: object(),
+            agricultural_persistence_bundle_validator=lambda _: object(),
         )
 
     assert captured.value.failure_path.name.endswith(".failed")
@@ -370,6 +434,7 @@ def test_failed_parent_records_safe_secondary_report_assets_diagnostic(
             agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
             agricultural_collector_loader=lambda _: object(),
             agricultural_persistence_loader=lambda _: object(),
+            agricultural_persistence_bundle_validator=lambda _: object(),
         )
 
     manifest = json.loads((captured.value.failure_path / "run_manifest.json").read_text("utf-8"))
@@ -403,6 +468,7 @@ def test_agricultural_failure_is_atomic_sanitized_and_skips_downstream(
             pipeline_runner=runner("full"),
             hampel_runner=runner("hampel"),
             delta_runner=runner("rf"),
+            candidate_fusion_runner=runner("fusion"),
             agricultural_collector_runner=runner("collection"),
             agricultural_persistence_runner=runner("persistence"),
             attribution_runner=runner("attribution"),
@@ -416,14 +482,16 @@ def test_agricultural_failure_is_atomic_sanitized_and_skips_downstream(
             agricultural_policy_loader=lambda _: cast(AgriculturalEvidencePolicy, object()),
             agricultural_collector_loader=lambda _: object(),
             agricultural_persistence_loader=lambda _: object(),
+            agricultural_persistence_bundle_validator=lambda _: object(),
         )
     expected = {
-        "collection": ["full", "hampel", "rf", "collection"],
-        "persistence": ["full", "hampel", "rf", "collection", "persistence"],
+        "collection": ["full", "hampel", "rf", "fusion", "collection"],
+        "persistence": ["full", "hampel", "rf", "fusion", "collection", "persistence"],
         "attribution": [
             "full",
             "hampel",
             "rf",
+            "fusion",
             "collection",
             "persistence",
             "attribution",

@@ -11,7 +11,7 @@ from deforestation_reporting.source import (
     load_report_package,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.14.0"
 
 __all__ = [
     "LEGAL_DISCLAIMER",

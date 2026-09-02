@@ -19,8 +19,8 @@ from deforestation_pipeline.change_detection import (
 from deforestation_pipeline.forest_screening import ForestScreeningMetrics
 from deforestation_pipeline.schemas import NonEmptyString, Sha256Digest, StrictModel
 
-DISTURBANCE_EVIDENCE_SCHEMA_VERSION: Literal["1.2.0"] = "1.2.0"
-DISTURBANCE_EVIDENCE_SCHEMA_ID = "urn:deforestation-pipeline:disturbance-evidence:1.2.0"
+DISTURBANCE_EVIDENCE_SCHEMA_VERSION: Literal["1.3.0"] = "1.3.0"
+DISTURBANCE_EVIDENCE_SCHEMA_ID = "urn:deforestation-pipeline:disturbance-evidence:1.3.0"
 NonNegativeCount = Annotated[int, Field(ge=0, strict=True)]
 
 
@@ -231,11 +231,12 @@ class DisturbanceScreeningEvidence(StrictModel):
 
 
 class DisturbanceEvidenceAssets(StrictModel):
-    """Los cinco activos compactos del expediente de perturbaciones."""
+    """Activos compactos, incluido el estado robusto previo a convergencia."""
 
     metadata: NonEmptyString
     summary_raster: NonEmptyString
     diagnostics_raster: NonEmptyString
+    robust_state_raster: NonEmptyString
     qa_figure: NonEmptyString
     period_summary_table: NonEmptyString
 
@@ -243,7 +244,7 @@ class DisturbanceEvidenceAssets(StrictModel):
 class DisturbanceEvidenceMetadata(StrictModel):
     """Contrato 1.0.0 del JSON de evidencia, todavía sin atribución."""
 
-    schema_version: Literal["1.2.0"] = DISTURBANCE_EVIDENCE_SCHEMA_VERSION
+    schema_version: Literal["1.3.0"] = DISTURBANCE_EVIDENCE_SCHEMA_VERSION
     generated_at: datetime
     scientific_parameters_hash: Sha256Digest
     requested_range: DisturbanceRequestedRange

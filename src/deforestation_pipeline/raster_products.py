@@ -368,16 +368,16 @@ def materialize_ee_image_to_grid(
     download_name: str,
     output_config: OutputConfig,
     grid_spec: RasterGridSpec,
-    output_type: Literal["float32", "int16"],
+    output_type: Literal["float32", "int16", "uint8", "uint16"],
     fetch_bytes: FetchBytes | None = None,
     all_nodata_band_policy: AllNodataBandPolicy = "reject",
+    nodata_override: float | None = None,
 ) -> SingleRasterMaterialization:
     """Descarga una imagen GEE arbitraria sin relajar grilla ni presupuesto."""
     product_name = download_name
-    if not math.isclose(
-        grid_spec.nodata,
-        output_config.raster_nodata,
-        abs_tol=1e-9,
+    effective_nodata = grid_spec.nodata if nodata_override is None else nodata_override
+    if nodata_override is None and not math.isclose(
+        grid_spec.nodata, output_config.raster_nodata, abs_tol=1e-9
     ):
         raise RasterDownloadError(
             "grid_nodata_mismatch",
@@ -389,7 +389,9 @@ def materialize_ee_image_to_grid(
             estimate_fixed_grid_download(
                 grid_spec=grid_spec,
                 band_count=len(band_names),
-                bytes_per_sample=4 if output_type == "float32" else 2,
+                bytes_per_sample=(
+                    4 if output_type == "float32" else 1 if output_type == "uint8" else 2
+                ),
             ),
             maximum_bytes=output_config.maximum_direct_download_bytes,
             maximum_dimension=output_config.maximum_direct_download_dimension,
@@ -399,8 +401,15 @@ def materialize_ee_image_to_grid(
             artifact_path=artifact_path,
             product=product_name,
         ) from None
-    prepared = image.toFloat() if output_type == "float32" else image.toInt16()
-    prepared = prepared.unmask(output_config.raster_nodata, False)
+    if output_type == "float32":
+        prepared = image.toFloat()
+    elif output_type == "int16":
+        prepared = image.toInt16()
+    elif output_type == "uint8":
+        prepared = image.toUint8()
+    else:
+        prepared = image.toUint16()
+    prepared = prepared.unmask(effective_nodata, False)
     parameters = {
         "name": download_name,
         "bands": list(band_names),
@@ -443,9 +452,14 @@ def materialize_ee_image_to_grid(
             artifact_path=artifact_path,
             product=product_name,
         )
+    validation_grid = grid_spec
+    if not math.isclose(effective_nodata, grid_spec.nodata, abs_tol=1e-9):
+        grid_payload = grid_spec.model_dump(mode="json")
+        grid_payload["nodata"] = effective_nodata
+        validation_grid = RasterGridSpec.model_validate(grid_payload)
     normalized, validation = validate_geotiff_bytes(
         raw_content,
-        expected_grid=grid_spec,
+        expected_grid=validation_grid,
         expected_band_names=band_names,
         artifact_path=artifact_path,
         product=product_name,

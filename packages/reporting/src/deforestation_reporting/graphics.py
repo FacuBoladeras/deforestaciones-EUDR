@@ -301,16 +301,31 @@ def agricultural_support_map(
     drawing.add(
         String(25, 12, "Perturbación candidata", fontName=_FONT, fontSize=7, fillColor=_TEXT)
     )
+    persistence_unavailable = "agricultural_persistence_unavailable" in event.quality_flags
+    occurrence_contract = event.agricultural_evidence_schema_version in {"2.0.0", "2.1.0"}
     if event.agricultural_geometry:
         drawing.add(Rect(112, 10, 10, 10, fillColor=_AMBER, strokeColor=_RED, strokeWidth=0.6))
-        label = "Soporte agrícola persistente"
+        label = (
+            "Evidencia agrícola post-evento"
+            if occurrence_contract
+            else "Soporte agrícola persistente (legado v1)"
+        )
+    elif persistence_unavailable:
+        drawing.add(
+            Rect(112, 10, 10, 10, fillColor=colors.white, strokeColor=_GRAY, strokeWidth=0.6)
+        )
+        label = "Evidencia agrícola no evaluada"
     else:
         drawing.add(
             Rect(112, 10, 10, 10, fillColor=colors.white, strokeColor=_GRAY, strokeWidth=0.6)
         )
         drawing.add(Line(112, 10, 122, 20, strokeColor=_GRAY, strokeWidth=0.7))
         drawing.add(Line(112, 20, 122, 10, strokeColor=_GRAY, strokeWidth=0.7))
-        label = "No se delimitó soporte agrícola persistente"
+        label = (
+            "No se delimitó evidencia agrícola post-evento"
+            if occurrence_contract
+            else "No se delimitó soporte agrícola persistente (legado v1)"
+        )
     drawing.add(String(127, 12, label, fontName=_FONT, fontSize=7, fillColor=_TEXT))
     return drawing
 
@@ -331,7 +346,7 @@ def sensitivity_chart(event: EventSummary, *, width: float, height: float) -> Dr
     minimum = event.sensitivity_min_area_ha
     maximum = event.sensitivity_max_area_ha
     primary = event.persistent_agricultural_area_ha
-    if minimum is None or maximum is None or maximum <= 0:
+    if primary is None or minimum is None or maximum is None or maximum <= 0:
         drawing.add(
             String(
                 0,

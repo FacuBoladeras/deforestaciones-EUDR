@@ -14,6 +14,7 @@ import pytest
 import deforestation_pipeline.complete_analysis as complete_module
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
+    AgriculturalEvidenceDocumentV2,
     AgriculturalEvidencePolicy,
 )
 from deforestation_pipeline.complete_analysis import (
@@ -24,6 +25,9 @@ from deforestation_pipeline.complete_analysis import (
     _parameters_hash,
     _sanitize,
     run_complete_analysis,
+)
+from deforestation_pipeline.disturbance_candidate_fusion_materialization import (
+    CandidateFusionUnavailableError,
 )
 from deforestation_pipeline.hampel_benchmark import HampelDiagnosticUnavailableError
 
@@ -86,12 +90,16 @@ def _loaders() -> dict[str, Any]:
         "hampel_loader": lambda _: object(),
         "agricultural_collector_loader": lambda _: object(),
         "agricultural_persistence_loader": lambda _: object(),
+        "agricultural_persistence_bundle_validator": lambda _: object(),
         "raster_provider": lambda _: None,
         "agricultural_collector_runner": lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]), "agricultural-collection-child"
         ),
         "agricultural_persistence_runner": lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]), "agricultural-persistence-child"
+        ),
+        "candidate_fusion_runner": lambda **kwargs: _publish_child(
+            Path(kwargs["output_root"]), "candidate-fusion-child"
         ),
         "attribution_runner": lambda **kwargs: _publish_child(
             Path(kwargs["output_root"]), "attribution-child"
@@ -125,9 +133,15 @@ def test_runs_components_in_order_and_publishes_relative_references(
         calls.append(("deltas", kwargs))
         return _publish_child(Path(kwargs["output_root"]), "delta-child")
 
+    def fusion(**kwargs: Any) -> Path:
+        calls.append(("fusion", kwargs))
+        assert kwargs["source_event_bundle"] == calls[0][1]["output_root"] / "full-child"
+        assert kwargs["source_rf_bundle"] == calls[2][1]["output_root"] / "delta-child"
+        return _publish_child(Path(kwargs["output_root"]), "fusion-child")
+
     def attribution(**kwargs: Any) -> Path:
         calls.append(("attribution", kwargs))
-        assert kwargs["source_event_bundle"] == calls[0][1]["output_root"] / "full-child"
+        assert kwargs["source_event_bundle"] == calls[3][1]["output_root"] / "fusion-child"
         assert kwargs["source_rf_bundle"] == calls[2][1]["output_root"] / "delta-child"
         return _publish_child(Path(kwargs["output_root"]), "attribution-child")
 
@@ -151,16 +165,27 @@ def test_runs_components_in_order_and_publishes_relative_references(
         pipeline_runner=full,
         hampel_runner=hampel,
         delta_runner=deltas,
+        candidate_fusion_runner=fusion,
         attribution_runner=attribution,
-        **{key: value for key, value in _loaders().items() if key != "attribution_runner"},
+        **{
+            key: value
+            for key, value in _loaders().items()
+            if key not in {"attribution_runner", "candidate_fusion_runner"}
+        },
     )
 
-    assert [name for name, _ in calls] == ["full", "hampel", "deltas", "attribution"]
+    assert [name for name, _ in calls] == ["full", "hampel", "deltas", "fusion", "attribution"]
     assert output.parent == (tmp_path / "runs").resolve()
     assert ".." not in output.name and "field-a" in output.name
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["overall_status"] == "complete"
-    assert [item["status"] for item in manifest["components"]] == ["completed"] * 6
+    assert manifest["scientific_flags"]["candidate_fusion_applied"] is True
+    assert manifest["scientific_flags"]["candidate_fusion_fallback_to_historical_events"] is False
+    assert manifest["scientific_flags"]["rf_first_candidate_domain_applied"] is True
+    assert manifest["scientific_flags"]["candidate_domain_semantics"] == (
+        "rf_terminal_persistent_forest_loss"
+    )
+    assert [item["status"] for item in manifest["components"]] == ["completed"] * 7
     assert all(not Path(item["output_bundle"]).is_absolute() for item in manifest["components"])
     assert manifest["coverage"]["rf_annual_deltas"]["requested_years"] == [2020, 2024]
     assert calls[0][1]["created_at"] == calls[1][1]["created_at"] == calls[2][1]["created_at"]
@@ -177,7 +202,7 @@ def test_runs_components_in_order_and_publishes_relative_references(
     assert all(
         item["child_analysis_id"] != manifest["analysis_id"] for item in manifest["components"]
     )
-    assert len({item["child_analysis_id"] for item in manifest["components"]}) == 6
+    assert len({item["child_analysis_id"] for item in manifest["components"]}) == 7
     assert all(item["child_created_at"] == CREATED.isoformat() for item in manifest["components"])
     assert len(manifest["parameters_hash"]) == 64
     assert manifest["parameters_hash"] == _parameters_hash(manifest)
@@ -254,7 +279,60 @@ def test_expected_hampel_unavailability_continues_as_partial_run(tmp_path: Path)
         },
     }
     completed = [item for item in manifest["components"] if item["status"] == "completed"]
-    assert len({item["child_analysis_id"] for item in completed}) == 5
+    assert len({item["child_analysis_id"] for item in completed}) == 6
+
+
+def test_historical_bundle_without_raw_robust_state_uses_explicit_fusion_fallback(
+    tmp_path: Path,
+) -> None:
+    paths = _inputs(tmp_path)
+    captured: list[Path] = []
+
+    def unavailable(**_: Any) -> Path:
+        raise CandidateFusionUnavailableError("candidate_fusion_raw_robust_state_unavailable")
+
+    def attribution(**kwargs: Any) -> Path:
+        captured.append(Path(kwargs["source_event_bundle"]))
+        return _publish_child(Path(kwargs["output_root"]), "attribution-fallback")
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        establishment_id="field",
+    )
+    output = run_complete_analysis(
+        request,
+        created_at=CREATED,
+        pipeline_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "full"),
+        hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
+        delta_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "deltas"),
+        candidate_fusion_runner=unavailable,
+        attribution_runner=attribution,
+        **{
+            key: value
+            for key, value in _loaders().items()
+            if key not in {"attribution_runner", "candidate_fusion_runner"}
+        },
+    )
+
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    fusion = next(
+        item for item in manifest["components"] if item["name"] == "disturbance_candidate_fusion"
+    )
+    assert fusion["status"] == "diagnostic_unavailable"
+    assert manifest["scientific_flags"]["candidate_fusion_fallback_to_historical_events"] is True
+    assert (
+        manifest["scientific_flags"]["rf_first_candidate_domain_fallback_to_historical_events"]
+        is True
+    )
+    assert manifest["scientific_warnings"][-1] == {
+        "component": "disturbance_candidate_fusion",
+        "code": "candidate_fusion_raw_robust_state_unavailable",
+    }
+    assert captured[0].name == "full"
 
 
 def test_validated_agricultural_evidence_is_forwarded_to_attribution(
@@ -262,7 +340,7 @@ def test_validated_agricultural_evidence_is_forwarded_to_attribution(
 ) -> None:
     paths = _inputs(tmp_path)
     evidence_path = tmp_path / "agricultural-evidence.json"
-    evidence_path.write_text("{}", encoding="utf-8")
+    evidence_path.write_text('{"schema_version":"1.0.0"}', encoding="utf-8")
     loaded_document = object()
     loaded_policy = object()
     evaluated = {"PDE-1": (object(),)}
@@ -304,7 +382,102 @@ def test_validated_agricultural_evidence_is_forwarded_to_attribution(
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["scientific_flags"]["agricultural_evidence_policy_applied"] is True
     assert manifest["scientific_flags"]["agricultural_evidence_provided"] is True
-    assert manifest["agricultural_evidence_input"]["sha256"] == hashlib.sha256(b"{}").hexdigest()
+    assert (
+        manifest["agricultural_evidence_input"]["sha256"]
+        == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    )
+
+
+def test_v2_agricultural_evidence_loader_is_forwarded_without_legal_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inputs(tmp_path)
+    evidence_path = tmp_path / "agricultural-evidence-v2.json"
+    evidence_path.write_text('{"schema_version":"2.0.0"}', encoding="utf-8")
+    loaded_document = cast(AgriculturalEvidenceDocumentV2, object())
+    loaded_policy = cast(AgriculturalEvidencePolicy, object())
+    evaluated = {"PDE-1": (object(),)}
+    monkeypatch.setattr(
+        complete_module,
+        "evaluate_agricultural_evidence",
+        lambda document, policy: (
+            evaluated
+            if document is loaded_document and policy is loaded_policy
+            else pytest.fail("v2 no llegó al evaluador")
+        ),
+    )
+
+    def attribution(**kwargs: Any) -> Path:
+        assert kwargs["context"].agricultural_use_evidence == evaluated
+        return _publish_child(Path(kwargs["output_root"]), "attribution-v2")
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        agricultural_evidence_path=evidence_path,
+        establishment_id="field",
+    )
+    output = run_complete_analysis(
+        request,
+        created_at=CREATED,
+        pipeline_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "full"),
+        hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
+        delta_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "deltas"),
+        attribution_runner=attribution,
+        agricultural_evidence_loader=lambda _: loaded_document,
+        agricultural_policy_loader=lambda _: loaded_policy,
+        **{key: value for key, value in _loaders().items() if key != "attribution_runner"},
+    )
+
+    manifest = json.loads((output / "run_manifest.json").read_text("utf-8"))
+    assert manifest["scientific_flags"]["automatic_conversion_confirmed"] is False
+    assert manifest["scientific_flags"]["agricultural_evidence_contract_version"] == "2.0.0"
+
+
+def test_invalid_automatic_agricultural_component_is_failed_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    paths = _inputs(tmp_path)
+
+    def reject_bundle(_: Path) -> dict[str, str]:
+        raise ValueError("agricultural_persistence_document_missing")
+
+    request = CompleteAnalysisRequest(
+        input_path=paths["vector"],
+        output_root=tmp_path / "runs",
+        config_path=paths["config"],
+        forest_model_config_path=paths["model"],
+        hampel_config_path=paths["hampel"],
+        establishment_id="field",
+    )
+    with pytest.raises(CompleteAnalysisError) as error:
+        run_complete_analysis(
+            request,
+            created_at=CREATED,
+            pipeline_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "full"),
+            hampel_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "hampel"),
+            delta_runner=lambda **kwargs: _publish_child(Path(kwargs["output_root"]), "deltas"),
+            agricultural_persistence_bundle_validator=reject_bundle,
+            **{
+                key: value
+                for key, value in _loaders().items()
+                if key != "agricultural_persistence_bundle_validator"
+            },
+        )
+
+    manifest = json.loads((error.value.failure_path / "run_manifest.json").read_text("utf-8"))
+    persistence = next(
+        item for item in manifest["components"] if item["name"] == "agricultural_persistence"
+    )
+    attribution = next(
+        item for item in manifest["components"] if item["name"] == "post_change_attribution"
+    )
+    assert persistence["status"] == "failed"
+    assert persistence["error"]["message"] == "component_validation_failed"
+    assert attribution["status"] == "skipped"
 
 
 def test_persistent_agricultural_bundle_is_forwarded_reversibly_to_attribution(

@@ -17,10 +17,17 @@ from deforestation_pipeline.agricultural_evidence import (
     agricultural_evidence_policy_json_schema,
 )
 from deforestation_pipeline.agricultural_persistence import agricultural_persistence_json_schema
+from deforestation_pipeline.disturbance_candidate_fusion_materialization import (
+    disturbance_candidate_fusion_json_schema,
+)
 from deforestation_pipeline.disturbance_evidence import (
     DisturbanceEvidenceMetadata,
     disturbance_evidence_json_schema,
 )
+from deforestation_pipeline.post_change_attribution import (
+    post_change_attribution_json_schema,
+)
+from deforestation_pipeline.report_figures import report_dataset_json_schema
 from deforestation_pipeline.schemas import (
     AnalysisSummary,
     AssessmentStatus,
@@ -101,28 +108,59 @@ def test_committed_json_schema_matches_pydantic_model() -> None:
 
 def test_committed_disturbance_evidence_schema_matches_pydantic_model() -> None:
     """La evidencia publicada no debe confundirse con la configuración metodológica."""
-    path = PROJECT_ROOT / "data" / "schemas" / "disturbance-evidence-v1.2.0.json"
+    path = PROJECT_ROOT / "data" / "schemas" / "disturbance-evidence-v1.3.0.json"
     committed_schema = json.loads(path.read_text(encoding="utf-8"))
 
     assert committed_schema == disturbance_evidence_json_schema()
     assert committed_schema["title"] == DisturbanceEvidenceMetadata.__name__
-    assert committed_schema["$id"] == ("urn:deforestation-pipeline:disturbance-evidence:1.2.0")
+    assert committed_schema["$id"] == ("urn:deforestation-pipeline:disturbance-evidence:1.3.0")
+
+
+def test_committed_candidate_fusion_schema_matches_materialized_collection() -> None:
+    path = PROJECT_ROOT / "data/schemas/disturbance-candidate-fusion-v2.0.0.json"
+    committed = json.loads(path.read_text(encoding="utf-8"))
+
+    assert committed == disturbance_candidate_fusion_json_schema()
+    assert committed["$id"] == "urn:deforestation-pipeline:disturbance-candidate-fusion:2.0.0"
+    candidate = committed["$defs"]["candidate"]
+    assert candidate["properties"]["automatic_promotion_allowed"] == {"const": False}
+    assert candidate["properties"]["rf_calibrated_probability"] == {"const": False}
+
+
+def test_committed_report_dataset_v2_schema_matches_factory() -> None:
+    path = PROJECT_ROOT / "data/schemas/report-dataset-v2.1.0.json"
+    committed = json.loads(path.read_text(encoding="utf-8"))
+
+    assert committed == report_dataset_json_schema()
+    assert committed["x-readable-historical-versions"] == ["1.4.0", "2.0.0"]
+    selected = committed["$defs"]["selectedDisturbance"]
+    assert "agricultural_persistence_schema_version" in selected["required"]
+    occurrence = committed["$defs"]["agriculturalOccurrence"]
+    assert set(occurrence["required"]) == {
+        "signal_strength",
+        "effective_observation_date",
+        "qualifying_period_count",
+        "signal_strength_areas",
+    }
+    assert occurrence["properties"]["signal_strength_areas"]["items"] == {
+        "$ref": "#/$defs/agriculturalStrengthArea"
+    }
 
 
 @pytest.mark.parametrize(
     ("filename", "factory"),
     [
-        ("agricultural-evidence-v1.0.0.json", agricultural_evidence_json_schema),
+        ("agricultural-evidence-v2.1.0.json", agricultural_evidence_json_schema),
         (
             "agricultural-evidence-policy-v1.0.0.json",
             agricultural_evidence_policy_json_schema,
         ),
         (
-            "agricultural-collection-v1.0.0.json",
+            "agricultural-collection-v1.1.0.json",
             agricultural_collection_json_schema,
         ),
         (
-            "agricultural-persistence-v1.0.0.json",
+            "agricultural-persistence-v2.1.0.json",
             agricultural_persistence_json_schema,
         ),
     ],
@@ -132,10 +170,12 @@ def test_committed_agricultural_schemas_match_pydantic_models(filename: str, fac
     assert committed == factory()
 
 
-def test_post_change_attribution_v5_schema_formalizes_polygonal_event_geometry() -> None:
+def test_post_change_attribution_v7_schema_versions_candidate_coverage_gate() -> None:
     schema = json.loads(
-        (PROJECT_ROOT / "data/schemas/post-change-attribution-v5.0.0.json").read_text("utf-8")
+        (PROJECT_ROOT / "data/schemas/post-change-attribution-v7.0.0.json").read_text("utf-8")
     )
+    assert schema == post_change_attribution_json_schema()
+    assert schema["properties"]["schema_version"] == {"const": "7.0.0"}
     record = schema["$defs"]["record"]
     required = set(record["required"])
 
@@ -143,7 +183,15 @@ def test_post_change_attribution_v5_schema_formalizes_polygonal_event_geometry()
         "candidate_geometry",
         "conjunctive_conversion_evidence_geometry",
         "likely_conversion_geometry",
+        "candidate_agricultural_coverage_fraction",
+        "candidate_agricultural_coverage_threshold",
+        "candidate_agricultural_coverage_gate_met",
     } <= required
     event_then = record["allOf"][1]["then"]["properties"]
     assert event_then["likely_conversion_area_ha"]["exclusiveMinimum"] == 0.5
     assert event_then["likely_conversion_geometry"] == {"$ref": "#/$defs/polygonalGeometry"}
+
+    historical = json.loads(
+        (PROJECT_ROOT / "data/schemas/post-change-attribution-v5.0.0.json").read_text("utf-8")
+    )
+    assert historical["properties"]["schema_version"] == {"const": "5.0.0"}

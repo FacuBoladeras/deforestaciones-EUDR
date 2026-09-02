@@ -188,7 +188,7 @@ def _ccdc_with_compatible_breaks(
     )
 
 
-def test_materialization_emits_exactly_five_compact_artifacts() -> None:
+def test_materialization_emits_six_core_disturbance_artifacts() -> None:
     config = load_config(ROOT / "configs" / "default.yml")
     grid = _grid()
     index_names = ("NDVI", "NBR", "NDMI", "NIRv")
@@ -246,6 +246,7 @@ def test_materialization_emits_exactly_five_compact_artifacts() -> None:
         "json/evidence/disturbance_detection.json",
         "tiffs/evidence/disturbance_summary.tif",
         "tiffs/evidence/disturbance_diagnostics.tif",
+        "tiffs/evidence/disturbance_robust_state.tif",
         "figures/evidence/disturbance_detection.png",
         "tables/evidence/disturbance_period_summary.csv",
         "tables/evidence/disturbance_events.csv",
@@ -255,7 +256,7 @@ def test_materialization_emits_exactly_five_compact_artifacts() -> None:
     }
     metadata = json.loads(result.files["json/evidence/disturbance_detection.json"])
     validated_metadata = DisturbanceEvidenceMetadata.model_validate(metadata)
-    assert validated_metadata.schema_version == "1.2.0"
+    assert validated_metadata.schema_version == "1.3.0"
     assert metadata["reference_support"]["actual_start_date"] == "2017-03-01"
     assert metadata["requested_range"] == {"start_year": 2019, "end_year": 2022}
     assert metadata["evaluable_range"]["start_date"] == "2021-03-01"
@@ -295,6 +296,11 @@ def test_materialization_emits_exactly_five_compact_artifacts() -> None:
             recovery = dataset.read()[DISTURBANCE_DIAGNOSTIC_BAND_NAMES.index("recovery_indicator")]
             assert np.all(recovery == grid.nodata)
             assert dataset.tags()["recovery_indicator"] == "reserved_nodata"
+            assert dataset.tags()["grid_sha256"] == grid.grid_sha256
+    with MemoryFile(result.files["tiffs/evidence/disturbance_robust_state.tif"]) as memory:
+        with memory.open() as dataset:
+            assert dataset.descriptions == ("robust_state_code",)
+            assert dataset.tags()["ccdc_used_as_veto"] == "false"
             assert dataset.tags()["grid_sha256"] == grid.grid_sha256
 
     Image.open(BytesIO(result.files["figures/evidence/disturbance_detection.png"])).verify()

@@ -144,7 +144,6 @@ def test_monthly_sheet_preserves_nodata_and_records_semantics() -> None:
         "tiffs/2022-06.tif",
         "tiffs/2022-07.tif",
         "tiffs/2022-08.tif",
-        "tiffs/2022-09.tif",
         "tiffs/2022-10.tif",
         "event_footprint_fraction.tif",
     ]

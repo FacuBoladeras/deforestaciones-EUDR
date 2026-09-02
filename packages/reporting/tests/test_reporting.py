@@ -26,6 +26,7 @@ from deforestation_reporting.basemap import (
     OSMFeature,
     OverpassOSMProvider,
 )
+from deforestation_reporting.renderer import _secondary_event_annex, _styles
 from deforestation_reporting.source import (
     _attribution_interpretation_status,
     _attribution_record_type,
@@ -84,6 +85,81 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def _replace_verified_json(root: Path, relative: str, payload: object) -> None:
+    path = root / "report_assets" / relative
+    _write_json(path, payload)
+    index_path = root / "report_assets" / "index.json"
+    index = json.loads(index_path.read_text("utf-8"))
+    report_path = f"report_assets/{relative}"
+    item = next(entry for entry in index["files"] if entry["report_path"] == report_path)
+    item["report_sha256"] = _sha256(path)
+    item["size_bytes"] = path.stat().st_size
+    _write_json(index_path, index)
+
+
+def _set_v2_agricultural_occurrence(
+    root: Path,
+    *,
+    signal_strength: str,
+    qualifying_period_count: int,
+    strength_areas: list[dict[str, object]],
+) -> None:
+    relative = "data/main/070_agricultural_persistence.json"
+    path = root / "report_assets" / relative
+    payload = json.loads(path.read_text("utf-8"))
+    payload["schema_version"] = "2.0.0"
+    payload["persistence_rule"] = "1_qualifying_post_event_period"
+    event = payload["events"][0]
+    event.update(
+        {
+            "persistence_status": "agricultural_support_detected",
+            "signal_strength": signal_strength,
+            "effective_observation_date": "2022-06-30",
+            "qualifying_period_count": qualifying_period_count,
+            "signal_strength_areas": strength_areas,
+        }
+    )
+    for not_detected in payload["events"][1:]:
+        not_detected.update(
+            {
+                "persistence_status": "not_detected",
+                "signal_strength": None,
+                "effective_observation_date": None,
+                "signal_strength_areas": [],
+            }
+        )
+    _replace_verified_json(root, relative, payload)
+    dataset_path = root / "report_assets" / "report_dataset.json"
+    dataset = json.loads(dataset_path.read_text("utf-8"))
+    dataset["schema_version"] = "2.0.0"
+    _write_json(dataset_path, dataset)
+    index_path = root / "report_assets" / "index.json"
+    index = json.loads(index_path.read_text("utf-8"))
+    index["dataset_sha256"] = _sha256(dataset_path)
+    _write_json(index_path, index)
+
+
+def _set_v2_1_candidate_coverage(root: Path) -> None:
+    _set_v2_agricultural_occurrence(
+        root,
+        signal_strength="moderate",
+        qualifying_period_count=2,
+        strength_areas=[],
+    )
+    relative = "data/main/070_agricultural_persistence.json"
+    path = root / "report_assets" / relative
+    payload = json.loads(path.read_text("utf-8"))
+    payload["schema_version"] = "2.1.0"
+    payload["events"][0].update(
+        {
+            "candidate_agricultural_coverage_fraction": 0.071,
+            "candidate_agricultural_coverage_threshold": 0.05,
+            "candidate_agricultural_coverage_gate_met": True,
+        }
+    )
+    _replace_verified_json(root, relative, payload)
+
+
 def _write_figure(
     path: Path, label: str, color: str, *, size: tuple[int, int] = (1200, 700)
 ) -> None:
@@ -128,9 +204,11 @@ def _report_package(tmp_path: Path, *, with_events: bool = True) -> Path:
     overview = report / "figures" / "main" / "010_overview.png"
     rgb_timeline = report / "figures" / "main" / "030_rgb_timeline.png"
     rf_timeline = report / "figures" / "main" / "200_rf_forest_deltas_timeline.png"
+    dw_annual = report / "figures" / "main" / "300_dynamic_world_annual_land_cover.png"
     _write_figure(overview, "Resumen espacial", "#1d4ed8", size=(2400, 600))
     _write_figure(rgb_timeline, "Serie RGB", "#365314", size=(1400, 1000))
     _write_figure(rf_timeline, "Cobertura RF anual", "#166534", size=(1600, 950))
+    _write_figure(dw_annual, "Cobertura Dynamic World anual", "#e49635", size=(1600, 950))
     event_figure = report / "figures" / "events" / "PDE-1" / "disturbance.png"
     if with_events:
         _write_figure(event_figure, "Evento PDE-1", "#b45309")
@@ -225,6 +303,7 @@ def _report_package(tmp_path: Path, *, with_events: bool = True) -> Path:
         ("main_figure", None, "línea base y perturbaciones", overview),
         ("main_figure", None, "contexto RGB multitemporal acotado", rgb_timeline),
         ("main_figure", None, "trayectoria y deltas forestales RF", rf_timeline),
+        ("main_figure", None, "cobertura anual Dynamic World", dw_annual),
         *(
             (("event_figure", "PDE-1", "detalle de perturbación", event_figure),)
             if with_events
@@ -534,6 +613,18 @@ def _report_package(tmp_path: Path, *, with_events: bool = True) -> Path:
         )
 
     csv_payloads = {
+        "annex/tables/subthreshold_candidates.csv": [
+            {
+                "candidate_id": "PDE-2",
+                "area_ha": 0.18,
+                "threshold_ha": 0.5,
+                "estimated_onset_period_id": "2023-MAM",
+                "automatic_status": "review_required",
+                "agricultural_signal_strength": "",
+                "qualifying_period_count": 0,
+                "human_review_required": True,
+            }
+        ],
         "annex/tables/seasonal_summary.csv": [
             {
                 "period_id": "2020-DJF",
@@ -645,9 +736,10 @@ def test_builds_bounded_typed_view_model_without_raw_monthly_rows(tmp_path: Path
     assert [figure.kind for figure in view.client_figures] == [
         "annual_forest_change",
         "rgb_timeline",
+        "dynamic_world_annual_land_cover",
         "event_spectral_evidence",
     ]
-    assert view.client_figures[2].event_id == "PDE-1"
+    assert view.client_figures[3].event_id == "PDE-1"
     assert len(view.events) == 2
     assert view.events[0].selected_for_detail is True
     assert view.events[1].selected_for_detail is False
@@ -667,6 +759,345 @@ def test_builds_bounded_typed_view_model_without_raw_monthly_rows(tmp_path: Path
     assert "per_period_support" not in view.model_dump_json()
     assert "010_overview.png" not in view.model_dump_json()
     assert "040_spectral_index_timeline.png" not in view.model_dump_json()
+
+
+def test_v2_weak_agricultural_occurrence_is_reported_as_ordinal_not_persistent(
+    tmp_path: Path,
+) -> None:
+    root = _report_package(tmp_path)
+    _set_v2_agricultural_occurrence(
+        root,
+        signal_strength="weak",
+        qualifying_period_count=1,
+        strength_areas=[
+            {
+                "signal_strength": "weak",
+                "qualifying_period_minimum": 1,
+                "qualifying_period_maximum": 1,
+                "area_ha": 8.12,
+                "event_fraction": 0.7733,
+            }
+        ],
+    )
+
+    package = load_report_package(root)
+    view = build_report_view_model(package)
+    event = view.events[0]
+
+    assert event.agricultural_evidence_schema_version == "2.0.0"
+    assert view.schema_version == "3.0.0"
+    assert event.agricultural_signal_strength == "weak"
+    assert event.agricultural_effective_observation_date is not None
+    assert event.agricultural_effective_observation_date.isoformat() == "2022-06-30"
+    assert event.qualifying_period_count == 1
+    assert event.agricultural_strength_areas[0].area_ha == pytest.approx(8.12)
+
+    artifact = render_technical_report(
+        package,
+        tmp_path / "v2-weak.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    text = " ".join(
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
+    )
+    assert "Evidencia agrícola post-evento" in text
+    assert "Débil (ordinal, no calibrada)" in text
+    assert "30/06/2022" in text
+    assert "Agricultura persistente" not in text
+    assert "Soporte agrícola persistente" not in text
+    assert "Persistencia agrícola" not in text
+
+
+def test_v2_strong_agricultural_occurrence_reports_each_strength_area(tmp_path: Path) -> None:
+    root = _report_package(tmp_path)
+    _set_v2_agricultural_occurrence(
+        root,
+        signal_strength="strong",
+        qualifying_period_count=4,
+        strength_areas=[
+            {
+                "signal_strength": "weak",
+                "qualifying_period_minimum": 1,
+                "qualifying_period_maximum": 1,
+                "area_ha": 1.0,
+                "event_fraction": 0.0952,
+            },
+            {
+                "signal_strength": "moderate",
+                "qualifying_period_minimum": 2,
+                "qualifying_period_maximum": 2,
+                "area_ha": 2.0,
+                "event_fraction": 0.1905,
+            },
+            {
+                "signal_strength": "strong",
+                "qualifying_period_minimum": 3,
+                "qualifying_period_maximum": None,
+                "area_ha": 5.12,
+                "event_fraction": 0.4876,
+            },
+        ],
+    )
+
+    package = load_report_package(root)
+    event = build_report_view_model(package).events[0]
+
+    assert event.agricultural_signal_strength == "strong"
+    assert [item.signal_strength for item in event.agricultural_strength_areas] == [
+        "weak",
+        "moderate",
+        "strong",
+    ]
+
+    artifact = render_technical_report(
+        package,
+        tmp_path / "v2-strong.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    text = " ".join(
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
+    )
+    assert "Fuerte (ordinal, no calibrada)" in text
+    assert "Área débil" in text and "1,00 ha" in text
+    assert "Área moderada" in text and "2,00 ha" in text
+    assert "Área fuerte" in text and "5,12 ha" in text
+
+
+def test_v2_1_reports_candidate_coverage_gate(tmp_path: Path) -> None:
+    root = _report_package(tmp_path)
+    _set_v2_1_candidate_coverage(root)
+
+    package = load_report_package(root)
+    view = build_report_view_model(package)
+    event = view.events[0]
+
+    assert event.agricultural_evidence_schema_version == "2.1.0"
+    assert event.candidate_agricultural_coverage_fraction == pytest.approx(0.071)
+    assert event.candidate_agricultural_coverage_threshold == pytest.approx(0.05)
+    assert event.candidate_agricultural_coverage_gate_met is True
+
+    artifact = render_technical_report(
+        package,
+        tmp_path / "v2-1-coverage.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    text = " ".join(
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
+    )
+    assert "Cobertura agrícola máxima" in text
+    assert "7,10 %" in text
+    assert "Umbral de cobertura del candidato" in text
+    assert "5,00 %" in text
+
+
+def test_v2_agricultural_occurrence_rejects_legacy_report_dataset(tmp_path: Path) -> None:
+    root = _report_package(tmp_path)
+    _set_v2_agricultural_occurrence(
+        root,
+        signal_strength="weak",
+        qualifying_period_count=1,
+        strength_areas=[],
+    )
+    dataset_path = root / "report_assets" / "report_dataset.json"
+    dataset = json.loads(dataset_path.read_text("utf-8"))
+    dataset["schema_version"] = "1.4.0"
+    _write_json(dataset_path, dataset)
+    index_path = root / "report_assets" / "index.json"
+    index = json.loads(index_path.read_text("utf-8"))
+    index["dataset_sha256"] = _sha256(dataset_path)
+    _write_json(index_path, index)
+
+    with pytest.raises(
+        ReportContractError, match="agricultural_occurrence_requires_report_dataset_v2"
+    ):
+        build_report_view_model(load_report_package(root))
+
+
+def test_v2_agricultural_occurrence_accepts_report_dataset_v2_1(tmp_path: Path) -> None:
+    root = _report_package(tmp_path)
+    _set_v2_agricultural_occurrence(
+        root,
+        signal_strength="weak",
+        qualifying_period_count=1,
+        strength_areas=[],
+    )
+    dataset_path = root / "report_assets" / "report_dataset.json"
+    dataset = json.loads(dataset_path.read_text("utf-8"))
+    dataset["schema_version"] = "2.1.0"
+    _write_json(dataset_path, dataset)
+    index_path = root / "report_assets" / "index.json"
+    index = json.loads(index_path.read_text("utf-8"))
+    index["dataset_sha256"] = _sha256(dataset_path)
+    _write_json(index_path, index)
+
+    view = build_report_view_model(load_report_package(root))
+
+    assert view.schema_version == "3.0.0"
+    assert view.events[0].agricultural_evidence_schema_version == "2.0.0"
+
+
+def test_rf_only_fused_candidate_survives_partial_report_with_unavailable_measures(
+    tmp_path: Path,
+) -> None:
+    root = _report_package(tmp_path)
+    dataset_path = root / "report_assets" / "report_dataset.json"
+    dataset = json.loads(dataset_path.read_text("utf-8"))
+    dataset.update(
+        {
+            "schema_version": "2.0.0",
+            "headline_metrics": {
+                **dataset["headline_metrics"],
+                "spectral_candidate_area_ha": 2.4,
+                "spectral_candidate_count": 1,
+                "candidate_episode_area_ha": 2.4,
+                "candidate_episode_count": 1,
+                "likely_conversion_area_ha": None,
+                "conversion_likely_count": None,
+            },
+            "selected_disturbances": [
+                {
+                    "candidate_id": "RF-ONLY",
+                    "disturbance_source": "robust_rf_fusion",
+                    "disturbance": {
+                        "event_id": "RF-ONLY",
+                        "candidate_id": "RF-ONLY",
+                        "record_type": "persistent_disturbance_candidate",
+                        "interpretation_level": "candidate_episode",
+                        "automatic_status": "review_required",
+                        "area_ha": 2.4,
+                        "area_threshold_ha": 0.5,
+                        "area_threshold_met": True,
+                        "candidate_footprint_above_visec_area_reference": True,
+                        "pixel_count": 24,
+                        "estimated_onset_period_id": "RF-2021-2023-onset-undetermined",
+                        "estimated_onset_window_start": None,
+                        "estimated_onset_window_end": None,
+                        "onset_available": False,
+                        "sources": ["rf_persistent_loss"],
+                        "resolution": "10 m",
+                        "quality_flags": [
+                            "fused_candidate_report_adapter",
+                            "exact_onset_unavailable",
+                        ],
+                    },
+                    "fusion_candidate": {
+                        "candidate_id": "RF-ONLY",
+                        "area_ha": 2.4,
+                        "rf_only": True,
+                        "automatic_promotion_allowed": False,
+                    },
+                    "agricultural_collection": None,
+                    "agricultural_persistence_schema_version": None,
+                    "agricultural_persistence": None,
+                    "attribution": None,
+                }
+            ],
+            "disturbance_selection": {
+                "selected_candidate_ids": ["RF-ONLY"],
+                "complete_candidate_inventory_path": (
+                    "report_assets/data/main/030_disturbance_events.json"
+                ),
+                "complete_event_inventory_path": None,
+            },
+        }
+    )
+    dataset.pop("selected_events", None)
+    dataset.pop("event_selection", None)
+    for component_name in (
+        "agricultural_collection",
+        "agricultural_persistence",
+        "post_change_attribution",
+    ):
+        dataset["component_statuses"][component_name] = {
+            "status": "failed",
+            "available": False,
+            "reason": "dependency_unavailable",
+            "selected_figure_count": 0,
+        }
+    _write_json(dataset_path, dataset)
+
+    _replace_verified_json(
+        root,
+        "data/main/030_disturbance_events.json",
+        {
+            "schema_version": "fusion-report-adapter-v1.0.0",
+            "event_count": 1,
+            "total_event_area_ha": 2.4,
+            "events": [dataset["selected_disturbances"][0]["disturbance"]],
+        },
+    )
+    _replace_verified_json(
+        root,
+        "annex/spatial/disturbance_events.geojson",
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"candidate_id": "RF-ONLY", "event_id": "RF-ONLY"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [-60.04, -31.88],
+                                [-60.03, -31.88],
+                                [-60.03, -31.87],
+                                [-60.04, -31.88],
+                            ]
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    index_path = root / "report_assets" / "index.json"
+    index = json.loads(index_path.read_text("utf-8"))
+    index["dataset_sha256"] = _sha256(dataset_path)
+    _write_json(index_path, index)
+
+    package = load_report_package(root)
+    view = build_report_view_model(package)
+    candidate = view.events[0]
+
+    assert candidate.candidate_id == "RF-ONLY"
+    assert candidate.event_id is None
+    assert candidate.record_type == "disturbance_candidate"
+    assert candidate.automatic_status == "review_required"
+    assert candidate.human_review_required is True
+    assert candidate.likely_conversion_area_ha is None
+    assert candidate.conjunctive_conversion_evidence_area_ha is None
+    assert candidate.persistent_agricultural_area_ha is None
+    assert candidate.gates == ()
+    assert candidate.candidate_geometry
+    assert "post_change_attribution_unavailable" in candidate.quality_flags
+    assert "agricultural_persistence_unavailable" in candidate.quality_flags
+
+    artifact = render_technical_report(
+        package,
+        tmp_path / "rf-only-partial.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    assert artifact.path.is_file()
+
+
+def test_v1_historical_agriculture_remains_readable_and_is_labelled_legacy(
+    tmp_path: Path,
+) -> None:
+    package = load_report_package(_report_package(tmp_path))
+    event = build_report_view_model(package).events[0]
+
+    assert event.agricultural_evidence_schema_version is None
+    assert event.agricultural_signal_strength is None
+    assert event.persistent_agricultural_area_ha == pytest.approx(8.12)
+    assert build_report_view_model(package).schema_version == "2.8.0"
+
+    artifact = render_technical_report(
+        package,
+        tmp_path / "v1-legacy.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    text = " ".join(page.extract_text() or "" for page in PdfReader(artifact.path).pages)
+    assert "Soporte agrícola persistente (legado v1)" in text
 
 
 def test_rejects_missing_disturbance_selection_payload() -> None:
@@ -705,13 +1136,15 @@ def test_renders_pdf_for_clean_run_without_events(tmp_path: Path) -> None:
     assert "No se identificó evidencia suficiente de conversión" in text.replace("\n", " ")
     assert "No se detectaron eventos de cambio en el período evaluado" in text.replace("\n", " ")
     assert "no constituye certificación" in text
-    assert "Inventario completo" in text
+    assert "Inventario operativo y resumen subumbral" in text
+    assert "Resumen de candidatos subumbrales" in text
+    assert "No se detectaron candidatos en o bajo 0,5 ha" in text.replace("\n", " ")
     assert "Área compatible con conversión" in text
     assert "conversion_likely" not in text
     assert LEGAL_DISCLAIMER in text
 
 
-def test_renders_honest_partial_pdf_when_required_downstream_components_are_unavailable(
+def test_renders_honest_partial_pdf_when_agricultural_persistence_fails(
     tmp_path: Path,
 ) -> None:
     root = _report_package(tmp_path, with_events=True)
@@ -728,15 +1161,15 @@ def test_renders_honest_partial_pdf_when_required_downstream_components_are_unav
             "selected_figure_count": 1,
         },
         "agricultural_collection": {
-            "status": "failed",
-            "available": False,
-            "reason": "remote_server_error",
-            "selected_figure_count": 0,
+            "status": "completed",
+            "available": True,
+            "reason": None,
+            "selected_figure_count": 1,
         },
         "agricultural_persistence": {
-            "status": "skipped",
+            "status": "failed",
             "available": False,
-            "reason": "dependency_not_completed:agricultural_collection",
+            "reason": "component_validation_failed",
             "selected_figure_count": 0,
         },
         "post_change_attribution": {
@@ -756,8 +1189,8 @@ def test_renders_honest_partial_pdf_when_required_downstream_components_are_unav
     }
     dataset["limitations"].extend(
         [
-            "La recolección agrícola falló: remote_server_error.",
-            "La persistencia agrícola y la atribución post-cambio no se ejecutaron.",
+            "La persistencia agrícola falló: component_validation_failed.",
+            "La atribución post-cambio no se ejecutó.",
             "No es posible concluir ausencia ni presencia de conversión.",
         ]
     )
@@ -765,7 +1198,6 @@ def test_renders_honest_partial_pdf_when_required_downstream_components_are_unav
     unavailable = {
         "report_assets/data/main/070_agricultural_persistence.json",
         "report_assets/data/main/080_post_change_attribution.json",
-        "report_assets/annex/methodology/agricultural_evidence_metadata.json",
         "report_assets/annex/spatial/post_change_attribution.geojson",
     }
     index = json.loads(index_path.read_text("utf-8"))
@@ -788,15 +1220,26 @@ def test_renders_honest_partial_pdf_when_required_downstream_components_are_unav
     assert view.result_status == "partial_incomplete_evidence"
     assert len(view.events) == 2
     assert all(event.record_type == "disturbance_candidate" for event in view.events)
-    agriculture = next(
-        component for component in view.components if component.name == "agricultural_collection"
+    assert all(event.interpretation_status == "persistent_unattributed" for event in view.events)
+    assert all(event.persistent_agricultural_area_ha is None for event in view.events)
+    assert all(event.likely_conversion_area_ha is None for event in view.events)
+    assert all(event.conjunctive_conversion_evidence_area_ha is None for event in view.events)
+    assert all(event.gates == () for event in view.events)
+    persistence = next(
+        component for component in view.components if component.name == "agricultural_persistence"
     )
-    assert agriculture.reason == "remote_server_error"
+    assert persistence.reason == "component_validation_failed"
     text = "\n".join(page.extract_text() or "" for page in PdfReader(artifact.path).pages)
     normalized = text.replace("\n", " ")
     assert "La evidencia disponible es incompleta para evaluar conversión" in normalized
     assert "No es posible concluir ausencia ni presencia de conversión" in normalized
     assert "No se identificó evidencia suficiente de conversión" not in normalized
+    assert "Candidato persistente; atribución no disponible" in normalized
+    assert "La atribución post-cambio no está disponible" in normalized
+    assert "no disponible" in normalized
+    assert "Candidato sin persistencia suficiente" not in normalized
+    assert "La señal no presenta persistencia suficiente" not in normalized
+    assert "0 de 6 satisfechas" not in normalized
     assert "low_risk" not in text
     assert "Evento probable" not in text
 
@@ -1009,6 +1452,30 @@ def test_v12_disturbance_metrics_use_candidate_area_reference_names() -> None:
     }
 
     assert _headline_event_metrics({}, disturbance) == (None, None, 0.6, 1)
+
+
+def test_fusion_adapter_derives_operational_metrics_instead_of_reusing_inventory() -> None:
+    metrics = {
+        "spectral_candidate_area_ha": 1.0,
+        "spectral_candidate_count": 2,
+        "candidate_episode_area_ha": 1.0,
+        "candidate_episode_count": 2,
+    }
+    disturbance = {
+        "schema_version": "fusion-report-adapter-v1.0.0",
+        "events": [
+            {
+                "area_ha": 0.6,
+                "candidate_footprint_above_visec_area_reference": True,
+            },
+            {
+                "area_ha": 0.4,
+                "candidate_footprint_above_visec_area_reference": False,
+            },
+        ],
+    }
+
+    assert _headline_event_metrics(metrics, disturbance) == (1.0, 2, 0.6, 1)
 
 
 def test_loader_accepts_explicit_verified_input_path_for_worker_layout(tmp_path: Path) -> None:
@@ -1260,11 +1727,18 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
     assert "1.438,42 ha" in text
     assert "Se detectaron eventos de cambio que requieren revisión" in text.replace("\n", " ")
     assert "Evidencia compatible con conversión" in text
-    assert "Inventario completo" in text
+    assert "Inventario operativo y resumen subumbral" in text
+    assert "Resumen de candidatos subumbrales" in text
+    assert "1 candidato" in text
+    assert "0,18 ha" in text
+    assert "subthreshold_candidates.csv" in text
     assert "Candidato" in text
-    assert "inventario íntegro" in text.replace("\n", " ")
+    assert "detalle íntegro" in text.replace("\n", " ").casefold()
     assert "Cobertura forestal anual: referencia y trayectoria" in text
     assert "Cambios anuales respecto de la referencia 2020" in text
+    assert "Cobertura/uso del suelo anual Dynamic World" in text
+    assert "0 agua, 1 árboles" in text.replace("\n", " ")
+    assert "doi:10.1038/s41597-022-01307-4" in text
     assert "Fuentes y licencias" in text
     assert "Trazabilidad técnica" in text
     assert "99,00 %" in text
@@ -1288,6 +1762,39 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
             str(font.get_object().get("/BaseFont", "")) for font in fonts.values()
         )
     assert any("BitstreamVeraSans" in font for font in embedded_fonts)
+
+
+def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
+    tmp_path: Path,
+) -> None:
+    root = _report_package(tmp_path)
+    disturbance_path = root / "report_assets/data/main/030_disturbance_events.json"
+    disturbance = json.loads(disturbance_path.read_text("utf-8"))
+    disturbance["events"][1]["area_ha"] = 0.6
+    disturbance["events"][1]["area_threshold_met"] = True
+    _replace_verified_json(root, "data/main/030_disturbance_events.json", disturbance)
+    attribution_path = root / "report_assets/data/main/080_post_change_attribution.json"
+    attribution = json.loads(attribution_path.read_text("utf-8"))
+    attribution["events"][1]["area_ha"] = 0.6
+    attribution["events"][1]["area_threshold_met"] = True
+    _replace_verified_json(root, "data/main/080_post_change_attribution.json", attribution)
+
+    view = build_report_view_model(load_report_package(root))
+    secondary_flowables = _secondary_event_annex(view, (view.events[0],), _styles())
+    assert len(secondary_flowables) >= 3
+
+    artifact = render_technical_report(
+        load_report_package(root),
+        tmp_path / "secondary-operational.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    text = " ".join(
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
+    )
+
+    assert "Fichas detalladas de eventos secundarios" in text
+    assert "PDE-2" in text
+    assert "0,60 ha" in text
 
 
 def test_renderer_is_atomic_and_leaves_no_temporary_file(tmp_path: Path) -> None:
@@ -1335,7 +1842,7 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
     assert "Trazabilidad de animales o productos" in compact
     assert "Certificación EUDR" in text and "Fuera del alcance" in text
     assert "Eventos prioritarios" in text
-    assert "Inventario completo" in text
+    assert "Inventario operativo y resumen subumbral" in text
     assert "Anexos técnicos" in text
     assert "Resultado automático" in text
     assert "Interpretación técnica" in text

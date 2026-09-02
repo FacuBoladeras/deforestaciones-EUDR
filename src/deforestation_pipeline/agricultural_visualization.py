@@ -16,7 +16,7 @@ import matplotlib
 import numpy as np
 import rasterio
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
+from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 from numpy.typing import NDArray
@@ -33,6 +33,28 @@ _MONTHLY_BANDS: Final = (
     "crop_observation_fraction",
 )
 AGRICULTURAL_VISUALIZATION_SCHEMA_VERSION: Final = "1.0.0"
+DYNAMIC_WORLD_CLASS_NAMES_ES: Final = (
+    "Agua",
+    "Árboles",
+    "Pastizal",
+    "Vegetación inundada",
+    "Cultivos",
+    "Arbustos y matorral",
+    "Construido",
+    "Suelo desnudo",
+    "Nieve y hielo",
+)
+DYNAMIC_WORLD_CLASS_COLORS: Final = (
+    "#419BDF",
+    "#397D49",
+    "#88B053",
+    "#7A87C6",
+    "#E49635",
+    "#DFC35A",
+    "#C4281B",
+    "#A59B8F",
+    "#B39FE1",
+)
 _SELECTION_RULE: Final = (
     "first_scheduled+first_spatially_valid+peak_mean_crop_observation_fraction+last_scheduled"
 )
@@ -68,6 +90,100 @@ class _Raster:
     transform: rasterio.Affine
     resolution_x_m: float
     resolution_y_m: float
+
+
+def render_annual_dynamic_world_land_cover(
+    *,
+    raster_contents: Mapping[int, tuple[str, bytes]],
+    source_label: str,
+) -> EvidenceVisualization | None:
+    """Renderiza composiciones anuales por moda de la etiqueta top-1."""
+    if not raster_contents:
+        return None
+    years = sorted(raster_contents)
+    columns = min(3, len(years))
+    rows = math.ceil(len(years) / columns)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(4.7 * columns, 4.2 * rows + 1.8),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    cmap = ListedColormap(DYNAMIC_WORLD_CLASS_COLORS).with_extremes(bad="#ECEFF1")
+    norm = BoundaryNorm(np.arange(-0.5, 9.5, 1), cmap.N)
+    source_rasters: list[dict[str, object]] = []
+    for axis, year in zip(axes.flat, years, strict=False):
+        path, content = raster_contents[year]
+        with MemoryFile(content) as memory, memory.open() as dataset:
+            values = dataset.read(indexes=(1,))[0].astype(np.float64)
+            nodata = dataset.nodata
+            invalid = (values < 0) | (values > 8)
+            if nodata is not None:
+                invalid |= np.isclose(values, nodata)
+            masked = np.ma.masked_where(invalid, values)
+            axis.imshow(masked, cmap=cmap, norm=norm, interpolation="nearest")
+        axis.set_title(str(year), fontweight="bold")
+        axis.set_axis_off()
+        source_rasters.append(_source_record(path, content))
+    for axis in list(axes.flat)[len(years) :]:
+        axis.set_axis_off()
+    figure.suptitle(
+        "Cobertura/uso del suelo anual en el dominio candidato",
+        fontsize=15,
+        fontweight="bold",
+    )
+    handles = [
+        Patch(facecolor=color, edgecolor="#334155", label=f"{index} · {name}")
+        for index, (name, color) in enumerate(
+            zip(DYNAMIC_WORLD_CLASS_NAMES_ES, DYNAMIC_WORLD_CLASS_COLORS, strict=True)
+        )
+    ]
+    figure.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=5,
+        frameon=False,
+        fontsize=8,
+        bbox_to_anchor=(0.5, 0.035),
+    )
+    figure.text(
+        0.5,
+        0.005,
+        (
+            f"{source_label} · composición anual = moda de label top-1 · resolución 10 m · "
+            "paleta oficial Dynamic World · Brown et al. (2022), "
+            "doi:10.1038/s41597-022-01307-4 · clases modeladas; no confirman conversión."
+        ),
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+    )
+    first_year, last_year = years[0], years[-1]
+    path = f"figures/evidence/dynamic_world_annual_land_cover_{first_year}_{last_year}.png"
+    content = _save_png(
+        figure,
+        title="Cobertura/uso del suelo anual Dynamic World",
+        event_id="candidate-domain",
+        disclaimer=(
+            "Composición descriptiva por moda de la etiqueta top-1; no confirma conversión "
+            "ni cumplimiento EUDR."
+        ),
+        extra={"Composite": "mode_of_top1_label"},
+    )
+    return _visualization(
+        path=path,
+        content=content,
+        visualization_type="dynamic_world_annual_land_cover",
+        event_id="candidate-domain",
+        source_rasters=source_rasters,
+        details={
+            "years": years,
+            "class_names": list(DYNAMIC_WORLD_CLASS_NAMES_ES),
+            "class_colors": list(DYNAMIC_WORLD_CLASS_COLORS),
+            "composite": "mode_of_top1_label",
+        },
+    )
 
 
 def select_monthly_evidence_windows(rows: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
@@ -238,7 +354,7 @@ def render_monthly_agricultural_evidence(
     path = f"figures/evidence/agricultural_monthly_evidence_{_safe_id(event_id)}.png"
     source_rasters = [
         _source_record(raster_paths[window], raster_contents[raster_paths[window]])
-        for window in windows
+        for window in selected
     ]
     source_rasters.append(_source_record(footprint_path, footprint_content))
     return _visualization(

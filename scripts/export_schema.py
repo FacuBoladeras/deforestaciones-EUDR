@@ -16,12 +16,17 @@ from deforestation_pipeline.agricultural_persistence import agricultural_persist
 from deforestation_pipeline.change_detection import (
     disturbance_detection_json_schema,
 )
+from deforestation_pipeline.disturbance_candidate_fusion_materialization import (
+    disturbance_candidate_fusion_json_schema,
+)
 from deforestation_pipeline.disturbance_evidence import disturbance_evidence_json_schema
 from deforestation_pipeline.forest_baseline import forest_baseline_json_schema
 from deforestation_pipeline.hls_seasonal import (
     hls_seasonal_metadata_json_schema,
     temporal_cube_index_json_schema,
 )
+from deforestation_pipeline.post_change_attribution import post_change_attribution_json_schema
+from deforestation_pipeline.report_figures import report_dataset_json_schema
 from deforestation_pipeline.schemas import (
     analysis_summary_json_schema,
     raster_grid_json_schema,
@@ -34,15 +39,15 @@ from deforestation_pipeline.temporal_cube import (
 
 SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
     (
-        Path("data/schemas/agricultural-persistence-v1.0.0.json"),
+        Path("data/schemas/agricultural-persistence-v2.1.0.json"),
         agricultural_persistence_json_schema,
     ),
     (
-        Path("data/schemas/agricultural-collection-v1.0.0.json"),
+        Path("data/schemas/agricultural-collection-v1.1.0.json"),
         agricultural_collection_json_schema,
     ),
     (
-        Path("data/schemas/agricultural-evidence-v1.0.0.json"),
+        Path("data/schemas/agricultural-evidence-v2.1.0.json"),
         agricultural_evidence_json_schema,
     ),
     (
@@ -62,12 +67,24 @@ SCHEMA_EXPORTS: tuple[tuple[Path, Callable[[], dict[str, Any]]], ...] = (
         forest_baseline_json_schema,
     ),
     (
-        Path("data/schemas/disturbance-detection-v1.4.0.json"),
+        Path("data/schemas/disturbance-detection-v1.5.0.json"),
         disturbance_detection_json_schema,
     ),
     (
-        Path("data/schemas/disturbance-evidence-v1.2.0.json"),
+        Path("data/schemas/post-change-attribution-v7.0.0.json"),
+        post_change_attribution_json_schema,
+    ),
+    (
+        Path("data/schemas/disturbance-evidence-v1.3.0.json"),
         disturbance_evidence_json_schema,
+    ),
+    (
+        Path("data/schemas/disturbance-candidate-fusion-v2.0.0.json"),
+        disturbance_candidate_fusion_json_schema,
+    ),
+    (
+        Path("data/schemas/report-dataset-v2.1.0.json"),
+        report_dataset_json_schema,
     ),
     (
         Path("data/schemas/temporal-window-plan-v1.0.0.json"),

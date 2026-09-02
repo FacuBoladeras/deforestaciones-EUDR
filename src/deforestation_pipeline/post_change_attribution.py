@@ -30,11 +30,19 @@ from shapely.ops import unary_union
 
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
+    AgriculturalEvidenceDocumentV2,
+    AgriculturalEvidenceObservation,
+    AgriculturalEvidenceObservationV2,
     AgriculturalEvidencePolicy,
     EvaluatedAgriculturalEvidence,
     evaluate_agricultural_evidence,
+    load_agricultural_evidence_document,
 )
-from deforestation_pipeline.agricultural_persistence import AgriculturalPersistenceDocument
+from deforestation_pipeline.agricultural_persistence import (
+    AgriculturalPersistenceDocument,
+    LegacyAgriculturalPersistenceDocument,
+    load_agricultural_persistence_document,
+)
 from deforestation_pipeline.agricultural_visualization import (
     render_likely_conversion_conjunction,
 )
@@ -51,8 +59,9 @@ PostChangeUse = Literal[
 ]
 DeclaredLandUse = Literal["unknown", "managed_forest_plantation"]
 
-POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "5.0.0"
-POST_CHANGE_ATTRIBUTION_BUNDLE_SCHEMA_VERSION: Final = "5.0.0"
+LEGACY_POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "6.0.0"
+POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "7.0.0"
+POST_CHANGE_ATTRIBUTION_BUNDLE_SCHEMA_VERSION: Final = "7.0.0"
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
 _YEARS: Final = (2020, 2021, 2022, 2023, 2024)
 _CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA: Final = 1e-5
@@ -87,6 +96,9 @@ class AgriculturalAttributionSupport:
     persistent_support_raster_path: str
     conjunctive_support_raster_path: str
     source_bundle_manifest_sha256: str
+    candidate_agricultural_coverage_fraction: float = 1.0
+    candidate_agricultural_coverage_threshold: float = 0.0
+    candidate_agricultural_coverage_gate_met: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -97,6 +109,11 @@ class AgriculturalAttributionSupport:
             raise ValueError("áreas agrícolas de atribución inconsistentes")
         if not self.persistent_support_raster_path or not self.conjunctive_support_raster_path:
             raise ValueError("soporte agrícola requiere paths reversibles")
+        if not (
+            0 <= self.candidate_agricultural_coverage_fraction <= 1
+            and 0 <= self.candidate_agricultural_coverage_threshold <= 1
+        ):
+            raise ValueError("cobertura agrícola candidata fuera de [0,1]")
         if len(self.source_bundle_manifest_sha256) != 64:
             raise ValueError("source_bundle_manifest_sha256 inválido")
 
@@ -151,6 +168,28 @@ class AttributionRules:
 _DEFAULT_RULES: Final = AttributionRules()
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateProvenanceAssessment:
+    policy: str
+    segmentation_source: str | None
+    support_sources: tuple[str, ...]
+    robust_support_present: bool
+    ccdc_support_present: bool
+    eligible_for_automatic_promotion: bool
+    shared_hls_support_is_independent: Literal[False] = False
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "policy": self.policy,
+            "segmentation_source": self.segmentation_source,
+            "support_sources": list(self.support_sources),
+            "robust_support_present": self.robust_support_present,
+            "ccdc_support_present": self.ccdc_support_present,
+            "eligible_for_automatic_promotion": self.eligible_for_automatic_promotion,
+            "shared_hls_support_is_independent": self.shared_hls_support_is_independent,
+        }
+
+
 def attribute_post_change_event(
     *,
     event: Mapping[str, Any],
@@ -163,13 +202,16 @@ def attribute_post_change_event(
     event_id = str(event.get("event_id", "")).strip()
     if not event_id:
         raise ValueError("event_id no puede estar vacío")
+    provenance = _candidate_provenance_assessment(event)
     if any(count == 0 for count in trajectory.evaluable_pixel_count):
+        early_reason_codes = ["insufficient_annual_rf_support"]
+        early_reason_codes.extend(_provenance_reason_codes(provenance))
         return _result(
             event_id=event_id,
             candidate_area_ha=float(event.get("area_ha", 0.0)),
             post_change_use="unknown",
-            reason_codes=("insufficient_annual_rf_support",),
-            gates=_gates(False, False, False, False, False, False, False),
+            reason_codes=tuple(early_reason_codes),
+            gates=_gates(False, False, False, False, False, False, False, False, False),
             trajectory=trajectory,
             context=context,
             evidence=None,
@@ -180,10 +222,18 @@ def attribute_post_change_event(
                 context=context,
                 recovery_trajectory_evaluated=False,
             ),
+            candidate_provenance_assessment=provenance,
         )
 
-    baseline_forest = (
+    automated_forest_subset_present = bool(
         event.get("primary_interpretation_domain") == "automated_forest"
+        or (
+            event.get("baseline_domain") == "mixed"
+            and int(event.get("automated_forest_pixel_count", 0)) > 0
+        )
+    )
+    baseline_forest = bool(
+        automated_forest_subset_present
         and trajectory.forest_fraction[0] >= rules.baseline_forest_fraction_minimum
     )
     post_loss = max(trajectory.candidate_loss_fraction[1:]) >= (
@@ -210,6 +260,7 @@ def attribute_post_change_event(
     agriculture_supported = bool(
         eligible_evidence
         and agricultural_support is not None
+        and agricultural_support.candidate_agricultural_coverage_gate_met
         and agricultural_support.persistent_agricultural_area_ha > 0
         and agricultural_support.conjunctive_likely_area_ha > 0
     )
@@ -231,6 +282,11 @@ def attribute_post_change_event(
         spatial_area_defensible,
         alternative_absent,
         visec_operational_area,
+        provenance.eligible_for_automatic_promotion,
+        bool(
+            agricultural_support is not None
+            and agricultural_support.candidate_agricultural_coverage_gate_met
+        ),
     )
     reason_codes: list[str] = []
     if declared_managed:
@@ -245,12 +301,15 @@ def attribute_post_change_event(
         reason_codes.append("persistent_agricultural_spatial_support_missing")
     elif agricultural_support.conjunctive_likely_area_ha <= 0:
         reason_codes.append("conjunctive_likely_area_empty")
+    elif not agricultural_support.candidate_agricultural_coverage_gate_met:
+        reason_codes.append("candidate_agricultural_coverage_below_threshold")
     else:
         reason_codes.extend(
             f"policy_eligible_{item.observation.land_use}_evidence" for item in eligible_evidence
         )
     if gates["all_scientific_conversion_evidence_gates"] and not visec_operational_area:
         reason_codes.append("visec_operational_event_area_not_exceeded")
+    reason_codes.extend(_provenance_reason_codes(provenance))
 
     post_change_use: PostChangeUse
     if declared_managed and post_loss and recovery:
@@ -280,6 +339,7 @@ def attribute_post_change_event(
             context=context,
             recovery_trajectory_evaluated=True,
         ),
+        candidate_provenance_assessment=provenance,
     )
 
 
@@ -333,19 +393,19 @@ def materialize_post_change_attribution(
         agricultural_bundle, agricultural_manifest = _load_source_bundle(source_agricultural_bundle)
         if agricultural_manifest.get("input_sha256") != event_manifest.get("input_sha256"):
             raise ValueError("agricultural bundle input_sha256 no coincide")
-        persistence = AgriculturalPersistenceDocument.model_validate_json(
+        persistence = load_agricultural_persistence_document(
             _manifested_path(
                 agricultural_bundle,
                 agricultural_manifest,
                 "json/evidence/agricultural_persistence.json",
             ).read_text(encoding="utf-8")
         )
-        evidence_document = AgriculturalEvidenceDocument.model_validate_json(
+        evidence_document = load_agricultural_evidence_document(
             _manifested_path(
                 agricultural_bundle,
                 agricultural_manifest,
                 "json/evidence/agricultural_evidence_persistent.json",
-            ).read_text(encoding="utf-8")
+            )
         )
         if persistence.analysis_id != evidence_document.evidence_set_id:
             raise ValueError("persistence and evidence analysis identity mismatch")
@@ -429,6 +489,8 @@ def materialize_post_change_attribution(
             and agricultural_bundle is not None
             and agricultural_manifest is not None
             and agriculture_manifest_sha is not None
+            and persistence_event.persistence_status
+            in {"persistent_crop_support", "agricultural_support_detected"}
             and persistence_event.support_raster_path is not None
         ):
             persistent_path = _manifested_path(
@@ -469,6 +531,27 @@ def materialize_post_change_attribution(
                 persistent_support_raster_path=persistence_event.support_raster_path,
                 conjunctive_support_raster_path=conjunction_relative,
                 source_bundle_manifest_sha256=agriculture_manifest_sha,
+                candidate_agricultural_coverage_fraction=float(
+                    getattr(
+                        persistence_event,
+                        "candidate_agricultural_coverage_fraction",
+                        persistence_event.persistent_event_fraction,
+                    )
+                ),
+                candidate_agricultural_coverage_threshold=float(
+                    getattr(
+                        persistence_event,
+                        "candidate_agricultural_coverage_threshold",
+                        0.0,
+                    )
+                ),
+                candidate_agricultural_coverage_gate_met=bool(
+                    getattr(
+                        persistence_event,
+                        "candidate_agricultural_coverage_gate_met",
+                        True,
+                    )
+                ),
             )
         result = attribute_post_change_event(
             event=dict(feature["properties"]),
@@ -554,9 +637,9 @@ def materialize_post_change_attribution(
         sort_keys=True,
         separators=(",", ":"),
     )
-    analysis_id = uuid5(NAMESPACE_URL, f"post-change-attribution-v3:{identity_payload}")
+    analysis_id = uuid5(NAMESPACE_URL, f"post-change-attribution-v7:{identity_payload}")
     run_name = (
-        f"{_slug(establishment_id)}-attribution-v3__"
+        f"{_slug(establishment_id)}-attribution-v7__"
         f"{created_at.strftime('%Y%m%dT%H%M%S%fZ')}__{str(analysis_id)[:8]}"
     )
     output_root = output_root.resolve()
@@ -700,6 +783,82 @@ def materialize_post_change_attribution(
         raise
 
 
+def _candidate_provenance_assessment(
+    event: Mapping[str, Any],
+) -> _CandidateProvenanceAssessment:
+    segmentation_source = event.get("segmentation_source")
+    if segmentation_source is not None:
+        if segmentation_source != "rf_terminal_persistent_forest_loss":
+            raise ValueError("candidate_provenance_segmentation_source_invalid")
+        support_sources = _provenance_sources(
+            event.get("support_sources", ()),
+            allowed={"robust_persistent_support", "ccdc_break_support"},
+            error_code="candidate_provenance_support_sources_invalid",
+        )
+        robust_present = "robust_persistent_support" in support_sources
+        ccdc_present = "ccdc_break_support" in support_sources
+        return _CandidateProvenanceAssessment(
+            policy="rf_seeded_source_aware_v1",
+            segmentation_source=segmentation_source,
+            support_sources=support_sources,
+            robust_support_present=robust_present,
+            ccdc_support_present=ccdc_present,
+            eligible_for_automatic_promotion=robust_present,
+        )
+
+    if "sources" in event:
+        sources = _provenance_sources(
+            event.get("sources"),
+            allowed={"robust_persistent_candidate", "rf_persistent_forest_loss"},
+            error_code="candidate_provenance_legacy_sources_invalid",
+        )
+        robust_present = "robust_persistent_candidate" in sources
+        return _CandidateProvenanceAssessment(
+            policy="legacy_fusion_source_aware_v1",
+            segmentation_source=(
+                "rf_persistent_forest_loss" if "rf_persistent_forest_loss" in sources else None
+            ),
+            support_sources=("robust_persistent_support",) if robust_present else (),
+            robust_support_present=robust_present,
+            ccdc_support_present=False,
+            eligible_for_automatic_promotion=robust_present,
+        )
+
+    return _CandidateProvenanceAssessment(
+        policy="legacy_event_contract_compatibility_v1",
+        segmentation_source=None,
+        support_sources=("legacy_robust_persistent_support_assumed",),
+        robust_support_present=True,
+        ccdc_support_present=False,
+        eligible_for_automatic_promotion=True,
+    )
+
+
+def _provenance_sources(
+    value: object,
+    *,
+    allowed: set[str],
+    error_code: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+        raise ValueError(error_code)
+    sources = tuple(dict.fromkeys(value))
+    if len(sources) != len(value) or any(source not in allowed for source in sources):
+        raise ValueError(error_code)
+    return sources
+
+
+def _provenance_reason_codes(
+    assessment: _CandidateProvenanceAssessment,
+) -> tuple[str, ...]:
+    if assessment.eligible_for_automatic_promotion:
+        return ()
+    reasons = ["rf_only_candidate_not_eligible_for_automatic_promotion"]
+    if assessment.ccdc_support_present:
+        reasons.append("ccdc_support_does_not_unlock_automatic_promotion")
+    return tuple(reasons)
+
+
 def _gates(
     baseline_forest: bool,
     post_cutoff_loss: bool,
@@ -708,6 +867,8 @@ def _gates(
     area_geometry: bool,
     alternative_absent: bool,
     visec_operational_area: bool,
+    candidate_provenance_eligible: bool,
+    candidate_agricultural_coverage_eligible: bool,
 ) -> dict[str, bool]:
     gates = {
         "forest_at_cutoff": baseline_forest,
@@ -716,11 +877,17 @@ def _gates(
         "agricultural_or_livestock_post_use": agricultural_use,
         "defensible_area_and_geometry": area_geometry,
         "strong_alternative_explanation_absent": alternative_absent,
+        "candidate_agricultural_coverage_at_least_threshold": (
+            candidate_agricultural_coverage_eligible
+        ),
     }
     gates["all_scientific_conversion_evidence_gates"] = all(gates.values())
+    gates["candidate_provenance_eligible_for_automatic_promotion"] = candidate_provenance_eligible
     gates["visec_operational_area_strictly_greater_than_threshold"] = visec_operational_area
     gates["all_conversion_likely_gates"] = bool(
-        gates["all_scientific_conversion_evidence_gates"] and visec_operational_area
+        gates["all_scientific_conversion_evidence_gates"]
+        and candidate_provenance_eligible
+        and visec_operational_area
     )
     return gates
 
@@ -737,6 +904,7 @@ def _result(
     evidence: tuple[EvaluatedAgriculturalEvidence, ...] | None,
     agricultural_support: AgriculturalAttributionSupport | None,
     alternative_explanation_assessment: Mapping[str, object],
+    candidate_provenance_assessment: _CandidateProvenanceAssessment,
 ) -> dict[str, Any]:
     conversion_likely = post_change_use == "agriculture_likely" and gates.get(
         "all_conversion_likely_gates", False
@@ -804,6 +972,21 @@ def _result(
             if agricultural_support is not None
             else 0.0
         ),
+        "candidate_agricultural_coverage_fraction": (
+            agricultural_support.candidate_agricultural_coverage_fraction
+            if agricultural_support is not None
+            else 0.0
+        ),
+        "candidate_agricultural_coverage_threshold": (
+            agricultural_support.candidate_agricultural_coverage_threshold
+            if agricultural_support is not None
+            else 0.0
+        ),
+        "candidate_agricultural_coverage_gate_met": (
+            agricultural_support.candidate_agricultural_coverage_gate_met
+            if agricultural_support is not None
+            else False
+        ),
         "candidate_area_ha": candidate_area_ha,
         "conjunctive_conversion_evidence_area_ha": (
             agricultural_support.conjunctive_likely_area_ha
@@ -812,6 +995,7 @@ def _result(
         ),
         "likely_conversion_area_ha": likely_area,
         "alternative_explanation_assessment": dict(alternative_explanation_assessment),
+        "candidate_provenance_assessment": candidate_provenance_assessment.payload(),
         "agricultural_spatial_support": (
             None
             if agricultural_support is None
@@ -823,6 +1007,15 @@ def _result(
                     agricultural_support.conjunctive_support_raster_path
                 ),
                 "source_bundle_manifest_sha256": agricultural_support.source_bundle_manifest_sha256,
+                "candidate_agricultural_coverage_fraction": (
+                    agricultural_support.candidate_agricultural_coverage_fraction
+                ),
+                "candidate_agricultural_coverage_threshold": (
+                    agricultural_support.candidate_agricultural_coverage_threshold
+                ),
+                "candidate_agricultural_coverage_gate_met": (
+                    agricultural_support.candidate_agricultural_coverage_gate_met
+                ),
             }
         ),
         "trajectory": {
@@ -837,7 +1030,9 @@ def _result(
             "declared_context_source": context.declared_context_source,
             "is_independent_evidence": False,
         },
-        "agricultural_use_evidence": [item.model_dump(mode="json") for item in (evidence or ())],
+        "agricultural_use_evidence": [
+            _evaluated_agricultural_evidence_payload(item) for item in (evidence or ())
+        ],
     }
 
 
@@ -865,6 +1060,8 @@ def _interpretation_status(
     if post_change_use == "agriculture_likely" and gates.get(
         "all_scientific_conversion_evidence_gates", False
     ):
+        if not gates.get("candidate_provenance_eligible_for_automatic_promotion", False):
+            return "persistent_unattributed"
         return "subthreshold_conversion_evidence"
     if gates.get("persistent_change", False):
         return "persistent_unattributed"
@@ -1215,8 +1412,8 @@ def _normalize_likely_event_geometries(
 
 
 def _validate_persistence_evidence_consistency(
-    persistence: AgriculturalPersistenceDocument,
-    evidence: AgriculturalEvidenceDocument,
+    persistence: LegacyAgriculturalPersistenceDocument | AgriculturalPersistenceDocument,
+    evidence: AgriculturalEvidenceDocument | AgriculturalEvidenceDocumentV2,
 ) -> None:
     """Impide combinar un raster persistente con una observación ajena."""
     observations_by_event: dict[str, list[Any]] = {}
@@ -1230,7 +1427,11 @@ def _validate_persistence_evidence_consistency(
         )
     for event_id, event in persistence_by_event.items():
         observations = observations_by_event.get(event_id, [])
-        if event.persistence_status != "persistent_crop_support":
+        support_status = event.persistence_status in {
+            "persistent_crop_support",
+            "agricultural_support_detected",
+        }
+        if not support_status:
             if observations:
                 raise ValueError("nonpersistent event cannot emit agricultural evidence")
             continue
@@ -1420,15 +1621,67 @@ def _source_identity(bundle: Path, manifest: Mapping[str, Any]) -> dict[str, Any
 
 def _code_identity() -> dict[str, str]:
     module = Path(__file__).resolve()
-    schema = PROJECT_ROOT / "data/schemas/post-change-attribution-v5.0.0.json"
+    schema = PROJECT_ROOT / "data/schemas/post-change-attribution-v7.0.0.json"
     if not schema.is_file():
         raise ValueError("post-change attribution schema file no existe")
     return {
         "module_path": "src/deforestation_pipeline/post_change_attribution.py",
         "module_sha256": hashlib.sha256(module.read_bytes()).hexdigest(),
-        "schema_path": "data/schemas/post-change-attribution-v5.0.0.json",
+        "schema_path": "data/schemas/post-change-attribution-v7.0.0.json",
         "schema_sha256": hashlib.sha256(schema.read_bytes()).hexdigest(),
     }
+
+
+def post_change_attribution_json_schema() -> dict[str, Any]:
+    """Deriva v7 del contrato v6 y agrega el gate porcentual agrícola."""
+    legacy_path = PROJECT_ROOT / "data/schemas/post-change-attribution-v6.0.0.json"
+    payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+
+    def upgrade(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: upgrade(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [upgrade(item) for item in value]
+        if value == LEGACY_POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION:
+            return POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION
+        if isinstance(value, str):
+            return value.replace(
+                f":{LEGACY_POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION}",
+                f":{POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION}",
+            ).replace(
+                f"v{LEGACY_POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION}",
+                f"v{POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION}",
+            )
+        return value
+
+    upgraded = upgrade(payload)
+    if not isinstance(upgraded, dict):
+        raise ValueError("post_change_attribution_schema_not_object")
+    record = upgraded["$defs"]["record"]
+    record["required"].extend(
+        [
+            "candidate_agricultural_coverage_fraction",
+            "candidate_agricultural_coverage_threshold",
+            "candidate_agricultural_coverage_gate_met",
+        ]
+    )
+    record["properties"].update(
+        {
+            "candidate_agricultural_coverage_fraction": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "candidate_agricultural_coverage_threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "candidate_agricultural_coverage_gate_met": {"type": "boolean"},
+        }
+    )
+    upgraded["title"] = "Post-change attribution v7.0.0"
+    return upgraded
 
 
 def _rules_payload(rules: AttributionRules) -> dict[str, object]:
@@ -1453,9 +1706,25 @@ def _context_payload(context: AttributionContext) -> dict[str, object]:
         "declared_context_source": context.declared_context_source,
         "declared_context_is_independent_evidence": False,
         "agricultural_use_evidence": {
-            event_id: [item.model_dump(mode="json") for item in evidence]
+            event_id: [_evaluated_agricultural_evidence_payload(item) for item in evidence]
             for event_id, evidence in sorted(context.agricultural_use_evidence.items())
         },
+    }
+
+
+def _evaluated_agricultural_evidence_payload(
+    evidence: EvaluatedAgriculturalEvidence,
+) -> dict[str, object]:
+    observation = evidence.observation
+    if isinstance(observation, AgriculturalEvidenceObservationV2):
+        serialized_observation = observation.model_dump(mode="json")
+    elif isinstance(observation, AgriculturalEvidenceObservation):
+        serialized_observation = observation.model_dump(mode="json")
+    else:
+        raise TypeError("agricultural_evidence_observation_type_unsupported")
+    return {
+        "observation": serialized_observation,
+        "assessment": evidence.assessment.model_dump(mode="json"),
     }
 
 

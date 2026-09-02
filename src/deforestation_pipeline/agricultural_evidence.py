@@ -19,8 +19,9 @@ from shapely.geometry import shape
 
 from deforestation_pipeline.schemas import NonEmptyString, Sha256Digest, StrictModel
 
-AGRICULTURAL_EVIDENCE_SCHEMA_VERSION: Final = "1.0.0"
-AGRICULTURAL_EVIDENCE_SCHEMA_ID: Final = "urn:deforestation-pipeline:agricultural-evidence:1.0.0"
+LEGACY_AGRICULTURAL_EVIDENCE_SCHEMA_VERSION: Final = "1.0.0"
+AGRICULTURAL_EVIDENCE_SCHEMA_VERSION: Final = "2.1.0"
+AGRICULTURAL_EVIDENCE_SCHEMA_ID: Final = "urn:deforestation-pipeline:agricultural-evidence:2.0.0"
 AGRICULTURAL_EVIDENCE_POLICY_SCHEMA_VERSION: Final = "1.0.0"
 AGRICULTURAL_EVIDENCE_POLICY_SCHEMA_ID: Final = (
     "urn:deforestation-pipeline:agricultural-evidence-policy:1.0.0"
@@ -207,7 +208,7 @@ class AgriculturalEvidenceObservation(StrictModel):
 class AgriculturalEvidenceDocument(StrictModel):
     """Documento de intercambio de evidencia; nunca acepta independencia declarada."""
 
-    schema_version: Literal["1.0.0"] = AGRICULTURAL_EVIDENCE_SCHEMA_VERSION
+    schema_version: Literal["1.0.0"] = LEGACY_AGRICULTURAL_EVIDENCE_SCHEMA_VERSION
     evidence_set_id: UUID
     created_at: datetime
     observations: list[AgriculturalEvidenceObservation]
@@ -224,6 +225,110 @@ class AgriculturalEvidenceDocument(StrictModel):
     def evidence_ids_are_unique(
         cls, value: list[AgriculturalEvidenceObservation]
     ) -> list[AgriculturalEvidenceObservation]:
+        identifiers = [item.evidence_id for item in value]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("observations contiene evidence_id duplicados")
+        return value
+
+
+AgriculturalSignalStrength = Literal["weak", "moderate", "strong"]
+
+
+class AgriculturalOccurrenceTemporalSupport(StrictModel):
+    """Soporte temporal de ocurrencia, separado de suficiencia de seguimiento."""
+
+    estimated_onset_window_end: date | None
+    post_change_window_start: date
+    post_change_window_end: date
+    effective_observation_date: date
+    valid_period_count: Annotated[int, Field(ge=1, strict=True)]
+    qualifying_period_count: Annotated[int, Field(ge=1, strict=True)]
+    evidence_basis: Literal[
+        "any_qualifying_post_event_period",
+        "candidate_coverage_at_least_five_percent_post_cutoff",
+    ]
+    evidence_satisfied: Literal[True]
+    signal_strength: AgriculturalSignalStrength
+    long_gap_interpolation_used: Literal[False]
+    evidence_rule: NonEmptyString
+
+    @model_validator(mode="after")
+    def occurrence_support_is_consistent(self) -> AgriculturalOccurrenceTemporalSupport:
+        if (
+            self.evidence_basis == "any_qualifying_post_event_period"
+            and self.estimated_onset_window_end is not None
+            and self.post_change_window_start <= self.estimated_onset_window_end
+        ):
+            raise ValueError("la ventana post-cambio debe comenzar después del onset estimado")
+        if (
+            self.evidence_basis == "candidate_coverage_at_least_five_percent_post_cutoff"
+            and self.post_change_window_start < date(2021, 1, 1)
+        ):
+            raise ValueError("la ventana agrícola poscorte no puede comenzar antes de 2021-01-01")
+        if self.post_change_window_end < self.post_change_window_start:
+            raise ValueError("la ventana post-cambio es inválida")
+        if not (
+            self.post_change_window_start
+            <= self.effective_observation_date
+            <= self.post_change_window_end
+        ):
+            raise ValueError("effective_observation_date debe pertenecer a la ventana")
+        if self.qualifying_period_count > self.valid_period_count:
+            raise ValueError("qualifying_period_count supera valid_period_count")
+        expected: AgriculturalSignalStrength = (
+            "weak"
+            if self.qualifying_period_count == 1
+            else "moderate"
+            if self.qualifying_period_count == 2
+            else "strong"
+        )
+        if self.signal_strength != expected:
+            raise ValueError("signal_strength no coincide con qualifying_period_count")
+        return self
+
+
+class AgriculturalEvidenceObservationV2(StrictModel):
+    """Evidencia de al menos una ocurrencia agrícola mensual post-evento."""
+
+    evidence_id: NonEmptyString
+    event_id: NonEmptyString
+    land_use: AgriculturalLandUse
+    source: AgriculturalEvidenceSource
+    source_descriptor_sha256: Sha256Digest
+    geometry: AgriculturalEvidenceGeometry
+    spatial_support: AgriculturalSpatialSupport
+    temporal_support: AgriculturalOccurrenceTemporalSupport
+    quality: AgriculturalEvidenceQuality
+    artifact_sha256: Sha256Digest
+
+    @model_validator(mode="after")
+    def source_hash_matches_descriptor(self) -> AgriculturalEvidenceObservationV2:
+        expected = canonical_payload_sha256(self.source.model_dump(mode="json"))
+        if self.source_descriptor_sha256 != expected:
+            raise ValueError("source_descriptor_sha256 no coincide con source")
+        return self
+
+
+class AgriculturalEvidenceDocumentV2(StrictModel):
+    """Contrato v2: una ocurrencia válida existe aunque el seguimiento sea corto."""
+
+    schema_version: Literal["2.0.0", "2.1.0"] = AGRICULTURAL_EVIDENCE_SCHEMA_VERSION
+    evidence_set_id: UUID
+    created_at: datetime
+    observations: list[AgriculturalEvidenceObservationV2]
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("created_at debe incluir zona horaria")
+        return value
+
+    @field_validator("observations")
+    @classmethod
+    def evidence_ids_are_unique(
+        cls, value: list[AgriculturalEvidenceObservationV2]
+    ) -> list[AgriculturalEvidenceObservationV2]:
         identifiers = [item.evidence_id for item in value]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("observations contiene evidence_id duplicados")
@@ -288,13 +393,23 @@ class IndependenceAssessment(StrictModel):
 class EvaluatedAgriculturalEvidence(StrictModel):
     """Observación original acompañada por la evaluación derivada."""
 
-    observation: AgriculturalEvidenceObservation
+    observation: AgriculturalEvidenceObservation | AgriculturalEvidenceObservationV2
     assessment: IndependenceAssessment
 
 
-def load_agricultural_evidence_document(path: Path) -> AgriculturalEvidenceDocument:
+def load_agricultural_evidence_document(
+    path: Path,
+) -> AgriculturalEvidenceDocument | AgriculturalEvidenceDocumentV2:
     """Carga un JSON estricto de evidencia agrícola."""
-    return AgriculturalEvidenceDocument.model_validate_json(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("agricultural_evidence_root_must_be_mapping")
+    if payload.get("schema_version") == "1.0.0":
+        return AgriculturalEvidenceDocument.model_validate_json(raw)
+    if payload.get("schema_version") in {"2.0.0", "2.1.0"}:
+        return AgriculturalEvidenceDocumentV2.model_validate_json(raw)
+    raise ValueError("agricultural_evidence_schema_version_unsupported")
 
 
 def load_agricultural_evidence_policy(path: Path) -> AgriculturalEvidencePolicy:
@@ -306,7 +421,7 @@ def load_agricultural_evidence_policy(path: Path) -> AgriculturalEvidencePolicy:
 
 
 def evaluate_agricultural_evidence(
-    document: AgriculturalEvidenceDocument,
+    document: AgriculturalEvidenceDocument | AgriculturalEvidenceDocumentV2,
     policy: AgriculturalEvidencePolicy,
 ) -> dict[str, tuple[EvaluatedAgriculturalEvidence, ...]]:
     """Agrupa evidencia por evento después de derivar independencia desde linaje."""
@@ -322,7 +437,7 @@ def evaluate_agricultural_evidence(
 
 
 def _assess_observation(
-    observation: AgriculturalEvidenceObservation,
+    observation: AgriculturalEvidenceObservation | AgriculturalEvidenceObservationV2,
     policy: AgriculturalEvidencePolicy,
     profiles: Mapping[tuple[str, str], AgriculturalEvidenceSourcePolicy],
     policy_hash: str,
@@ -370,12 +485,17 @@ def _assess_observation(
         else:
             level = "full"
             reasons.append("no_known_lineage_or_sensor_overlap")
+    temporal_criterion_satisfied = (
+        observation.temporal_support.persistence_satisfied
+        if isinstance(observation, AgriculturalEvidenceObservation)
+        else observation.temporal_support.evidence_satisfied
+    )
     eligible = bool(
         profile is not None
         and profile.evidence_role in {"candidate_independent", "human_reference"}
         and level in policy.decision_eligible_levels
         and observation.land_use in {"crop", "pasture", "livestock_infrastructure"}
-        and observation.temporal_support.persistence_satisfied
+        and temporal_criterion_satisfied
         and observation.spatial_support.attributed_area_ha > 0
     )
     if not eligible:
@@ -390,7 +510,7 @@ def _assess_observation(
 
 
 def agricultural_evidence_json_schema() -> dict[str, Any]:
-    schema = AgriculturalEvidenceDocument.model_json_schema(mode="serialization")
+    schema = AgriculturalEvidenceDocumentV2.model_json_schema(mode="serialization")
     schema["$id"] = AGRICULTURAL_EVIDENCE_SCHEMA_ID
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["x-schema-version"] = AGRICULTURAL_EVIDENCE_SCHEMA_VERSION

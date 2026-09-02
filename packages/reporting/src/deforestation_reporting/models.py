@@ -93,6 +93,7 @@ class DatasetSummary(StrictViewModel):
 class ClientFigure(StrictViewModel):
     kind: Literal[
         "annual_forest_change",
+        "dynamic_world_annual_land_cover",
         "rgb_timeline",
         "spectral_index_timeline",
         "observation_coverage",
@@ -119,6 +120,14 @@ class EvidenceGate(StrictViewModel):
     passed: bool
 
 
+class AgriculturalStrengthArea(StrictViewModel):
+    """Área por intensidad ordinal de ocurrencias; no expresa probabilidad."""
+
+    signal_strength: Literal["weak", "moderate", "strong"]
+    area_ha: NonNegativeFloat
+    event_fraction: Fraction
+
+
 class AnnualForestPoint(StrictViewModel):
     year: Annotated[int, Field(ge=2020, le=2100)]
     forest_fraction: Fraction
@@ -143,8 +152,8 @@ class EventSummary(StrictViewModel):
     area_ha: NonNegativeFloat
     area_threshold_ha: NonNegativeFloat
     area_threshold_met: bool
-    likely_conversion_area_ha: NonNegativeFloat
-    conjunctive_conversion_evidence_area_ha: NonNegativeFloat
+    likely_conversion_area_ha: NonNegativeFloat | None
+    conjunctive_conversion_evidence_area_ha: NonNegativeFloat | None
     estimated_onset_period_id: NonEmptyString
     estimated_onset_window_start: date | None
     estimated_onset_window_end: date | None
@@ -155,8 +164,15 @@ class EventSummary(StrictViewModel):
     observed_period_count: Annotated[int, Field(ge=0)] | None
     qualifying_period_count: Annotated[int, Field(ge=0)] | None
     gap_period_count: Annotated[int, Field(ge=0)] | None
-    persistent_agricultural_area_ha: NonNegativeFloat
+    agricultural_evidence_schema_version: NonEmptyString | None
+    agricultural_signal_strength: Literal["weak", "moderate", "strong"] | None
+    agricultural_effective_observation_date: date | None
+    agricultural_strength_areas: tuple[AgriculturalStrengthArea, ...]
+    persistent_agricultural_area_ha: NonNegativeFloat | None
     persistent_event_fraction: Fraction | None
+    candidate_agricultural_coverage_fraction: Fraction | None = None
+    candidate_agricultural_coverage_threshold: Fraction | None = None
+    candidate_agricultural_coverage_gate_met: bool | None = None
     sensitivity_min_area_ha: NonNegativeFloat | None
     sensitivity_max_area_ha: NonNegativeFloat | None
     dual_detector_pixel_count: Annotated[int, Field(ge=0)] | None
@@ -170,7 +186,7 @@ class EventSummary(StrictViewModel):
 
 
 class ReportViewModel(StrictViewModel):
-    schema_version: Literal["2.8.0"] = "2.8.0"
+    schema_version: Literal["2.8.0", "3.0.0"] = "2.8.0"
     title: Literal["Informe técnico de evidencia geoespacial"] = (
         "Informe técnico de evidencia geoespacial"
     )

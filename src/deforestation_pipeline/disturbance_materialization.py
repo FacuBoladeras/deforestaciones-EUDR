@@ -286,6 +286,22 @@ def materialize_disturbance_detection(
             "attribution_generated": "false",
         },
     )
+    robust_state_for_fusion = np.asarray(robust.state_code, dtype=np.float32).copy()
+    robust_state_for_fusion[~footprint] = np.nan
+    robust_state_bytes = _write_raster(
+        values=robust_state_for_fusion[np.newaxis, ...],
+        band_names=("robust_state_code",),
+        grid_spec=grid_spec,
+        tags={
+            "schema_version": "1.0.0",
+            "product": "disturbance_robust_state_for_candidate_fusion",
+            "grid_sha256": grid_spec.grid_sha256,
+            "integer_semantics_preserved": "true",
+            "aoi_footprint_applied": "true",
+            "ccdc_used_as_veto": "false",
+            "final_assessment_generated": "false",
+        },
+    )
     period_rows = _period_rows(
         items=post_items,
         post_values=cube[post_selector],
@@ -351,6 +367,7 @@ def materialize_disturbance_detection(
         paths["metadata"]: _json_bytes(metadata),
         paths["summary_raster"]: summary_bytes,
         paths["diagnostics_raster"]: diagnostics_bytes,
+        paths["robust_state_raster"]: robust_state_bytes,
         paths["qa_figure"]: _render_qa(
             state=convergence.state_code,
             reason=convergence.reason_code,

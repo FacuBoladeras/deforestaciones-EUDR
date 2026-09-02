@@ -1,9 +1,12 @@
-schema_version: "1.2.0"
+schema_version: "1.5.0"
 source_id: dynamic_world_v1
 target_crs: EPSG:6933
 resolution_m: 10
 raster_nodata: -9999.0
 temporal_cadence: calendar_month
+agricultural_observation_start_date: 2021-01-01
+annual_land_cover_start_year: 2020
+annual_land_cover_composite: mode_of_top1_label
 minimum_top1_probability: 0.60
 minimum_valid_observations_per_pixel: 2
 minimum_crop_observation_fraction: 0.50
@@ -11,5 +14,6 @@ maximum_events_per_batch: 100
 maximum_windows_per_event: 72
 maximum_remote_acquisitions: 500
 maximum_shared_grid_pixels: 1000000
+maximum_remote_chunk_uncompressed_bytes: 24000000
 resampling: nearest
 event_footprint_method: exact_polygon_pixel_intersection_fraction

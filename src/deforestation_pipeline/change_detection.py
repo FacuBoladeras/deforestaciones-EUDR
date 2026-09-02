@@ -1417,11 +1417,12 @@ def _validate_ccdc_segment_inputs(
 
 
 def disturbance_detection_output_paths() -> dict[str, str]:
-    """Reserva cinco artefactos compactos sin materializarlos."""
+    """Reserva artefactos compactos; los contratos históricos permanecen intactos."""
     return {
         "metadata": evidence_json("disturbance_detection.json"),
         "summary_raster": evidence_tiff("disturbance_summary.tif"),
         "diagnostics_raster": evidence_tiff("disturbance_diagnostics.tif"),
+        "robust_state_raster": evidence_tiff("disturbance_robust_state.tif"),
         "qa_figure": evidence_figure("disturbance_detection.png"),
         "period_summary_table": evidence_table("disturbance_period_summary.csv"),
     }

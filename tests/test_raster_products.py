@@ -112,6 +112,14 @@ class _DownloadImage:
         self.operations.append("toInt16")
         return self
 
+    def toUint16(self) -> _DownloadImage:
+        self.operations.append("toUint16")
+        return self
+
+    def toUint8(self) -> _DownloadImage:
+        self.operations.append("toUint8")
+        return self
+
     def addBands(self, other: _DownloadImage) -> _DownloadImage:
         self.operations.append(f"addBands:{other.identifier}")
         return self
@@ -215,6 +223,63 @@ def test_materializes_generic_ee_image_on_exact_grid() -> None:
         "dimensions": [TEST_GRID.width, TEST_GRID.height],
         "format": "GEO_TIFF",
     }
+
+
+def test_materializes_uint16_transport_with_explicit_unsigned_nodata() -> None:
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    image = _DownloadImage("dynamic-world-counts")
+    content = _geotiff_bytes(
+        band_count=2,
+        dtype="uint16",
+        values=np.full((2, TEST_GRID.height, TEST_GRID.width), 3, dtype=np.uint16),
+        crs=TEST_GRID.target_crs,
+        transform_value=Affine(*TEST_GRID.transform),
+    )
+
+    result = materialize_ee_image_to_grid(
+        image=image,
+        band_names=("valid", "qualifying"),
+        artifact_path="tiffs/evidence/agricultural/_shared/counts.tif",
+        download_name="dynamic_world_counts",
+        output_config=config.output,
+        grid_spec=TEST_GRID,
+        output_type="uint16",
+        nodata_override=65535,
+        fetch_bytes=lambda _url, _maximum_bytes: content,
+    )
+
+    assert image.operations[:2] == ["toUint16", "unmask:65535:False"]
+    assert result.validation.data_types == ("uint16", "uint16")
+    assert result.validation.nodata == 65535
+
+
+def test_materializes_uint8_categorical_transport_with_explicit_nodata() -> None:
+    config = load_config(PROJECT_ROOT / "configs" / "default.yml")
+    image = _DownloadImage("dynamic-world-annual-label")
+    content = _geotiff_bytes(
+        band_count=1,
+        dtype="uint8",
+        values=np.full((1, TEST_GRID.height, TEST_GRID.width), 4, dtype=np.uint8),
+        crs=TEST_GRID.target_crs,
+        transform_value=Affine(*TEST_GRID.transform),
+    )
+
+    result = materialize_ee_image_to_grid(
+        image=image,
+        band_names=("dynamic_world_label_mode",),
+        artifact_path="tiffs/evidence/agricultural/annual_land_cover/2025.tif",
+        download_name="dynamic_world_annual_land_cover_2025",
+        output_config=config.output,
+        grid_spec=TEST_GRID,
+        output_type="uint8",
+        nodata_override=255,
+        fetch_bytes=lambda _url, _maximum_bytes: content,
+    )
+
+    assert image.operations[:2] == ["toUint8", "unmask:255:False"]
+    assert result.estimate.bytes_per_sample == 1
+    assert result.validation.data_types == ("uint8",)
+    assert result.validation.nodata == 255
 
 
 def test_equal_area_epsg_6933_is_sent_as_gee_parseable_wkt() -> None:

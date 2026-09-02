@@ -1,0 +1,382 @@
+{
+  "$defs": {
+    "candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "area_ha": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "automated_forest_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "automatic_promotion_allowed": {
+          "const": false
+        },
+        "baseline_domain": {
+          "enum": [
+            "automated_forest",
+            "baseline_review",
+            "mixed"
+          ]
+        },
+        "baseline_review_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_id": {
+          "pattern": "^RFC-[0-9A-F]{12}$",
+          "type": "string"
+        },
+        "candidate_pixel_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ccdc_break_day_offset_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ccdc_role": {
+          "const": "shared_hls_support_or_date_never_veto"
+        },
+        "ccdc_support_area_ha": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "ccdc_support_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "ccdc_support_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ccdc_unknown_date_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evaluable_year_count_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_loss_year_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gap_year_count_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "geometry_expansion_pixel_count": {
+          "const": 0
+        },
+        "last_evaluable_year_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pixel_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "resolution": {
+          "enum": [
+            "candidate_only",
+            "review_required"
+          ]
+        },
+        "rf_calibrated_probability": {
+          "const": false
+        },
+        "rf_evidence_role": {
+          "const": "learned_candidate_segmentation"
+        },
+        "rf_independent_evidence": {
+          "const": false
+        },
+        "rf_seed_pixel_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "robust_onset_period_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "robust_role": {
+          "const": "support_inside_rf_footprint_never_expands_geometry"
+        },
+        "robust_support_area_ha": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "robust_support_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "robust_support_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "robust_unknown_onset_pixel_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seed_source": {
+          "const": "rf_terminal_persistent_forest_loss"
+        },
+        "segmentation_semantics": {
+          "const": "spatial_8_connected_no_gap_filling"
+        },
+        "segmentation_source": {
+          "const": "rf_terminal_persistent_forest_loss"
+        },
+        "shared_hls_support_is_independent": {
+          "const": false
+        },
+        "support_sources": {
+          "items": {
+            "enum": [
+              "robust_persistent_support",
+              "ccdc_break_support"
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "terminal_consecutive_loss_year_range": {
+          "oneOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "candidate_id",
+        "pixel_count",
+        "area_ha",
+        "seed_source",
+        "baseline_domain",
+        "automated_forest_pixel_count",
+        "baseline_review_pixel_count",
+        "first_loss_year_range",
+        "last_evaluable_year_range",
+        "terminal_consecutive_loss_year_range",
+        "evaluable_year_count_range",
+        "gap_year_count_range",
+        "segmentation_semantics",
+        "rf_evidence_role",
+        "rf_calibrated_probability",
+        "rf_independent_evidence",
+        "automatic_promotion_allowed",
+        "candidate_pixel_count",
+        "rf_seed_pixel_count",
+        "robust_support_pixel_count",
+        "robust_support_fraction",
+        "robust_support_area_ha",
+        "robust_unknown_onset_pixel_count",
+        "robust_onset_period_range",
+        "ccdc_support_pixel_count",
+        "ccdc_support_fraction",
+        "ccdc_support_area_ha",
+        "ccdc_unknown_date_pixel_count",
+        "ccdc_break_day_offset_range",
+        "support_sources",
+        "segmentation_source",
+        "robust_role",
+        "ccdc_role",
+        "shared_hls_support_is_independent",
+        "geometry_expansion_pixel_count",
+        "resolution"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:disturbance-candidate-fusion:2.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "analysis_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "candidate_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "candidate_domain": {
+      "const": "rf_terminal_persistent_forest_loss"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/candidate"
+      },
+      "type": "array"
+    },
+    "ccdc_outside_candidate_pixel_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ccdc_semantics": {
+      "const": "shared_hls_support_or_date_never_veto"
+    },
+    "ccdc_support_inside_candidate_pixel_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "rf_semantics": {
+      "const": "uncalibrated_learned_candidate_segmentation_no_automatic_promotion"
+    },
+    "robust_semantics": {
+      "const": "support_inside_rf_footprint_never_expands_geometry"
+    },
+    "robust_shadow_alert_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "robust_support_inside_candidate_pixel_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "segmentation_semantics": {
+      "const": "spatial_8_connected_no_gap_filling"
+    }
+  },
+  "required": [
+    "schema_version",
+    "generated_at",
+    "analysis_id",
+    "candidate_domain",
+    "segmentation_semantics",
+    "ccdc_semantics",
+    "robust_semantics",
+    "rf_semantics",
+    "candidate_count",
+    "candidates",
+    "robust_support_inside_candidate_pixel_count",
+    "ccdc_support_inside_candidate_pixel_count",
+    "ccdc_outside_candidate_pixel_count",
+    "robust_shadow_alert_count"
+  ],
+  "title": "RF-first disturbance candidate collection",
+  "type": "object",
+  "x-schema-version": "2.0.0"
+}

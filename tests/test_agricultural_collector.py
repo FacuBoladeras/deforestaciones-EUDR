@@ -4,6 +4,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import StringIO
 from pathlib import Path
@@ -17,14 +18,21 @@ from shapely.geometry import shape
 from shapely.ops import unary_union
 
 from deforestation_pipeline.agricultural_collector import (
+    DYNAMIC_WORLD_ANNUAL_LABEL_BAND,
     DYNAMIC_WORLD_RASTER_BANDS,
-    CollectedSharedWindowRaster,
+    CollectedAnnualLandCoverRaster,
+    CollectedSharedChunkRasters,
+    DynamicWorldAnnualLandCoverQuery,
+    DynamicWorldSharedChunkQuery,
     DynamicWorldSharedEvent,
+    DynamicWorldSharedTemporalWindow,
     DynamicWorldSharedWindowQuery,
     DynamicWorldWindowQuery,
     _monthly_windows,
+    _monthly_windows_from_observation_start,
     _parse_events,
     _shared_acquisition_plan,
+    collect_dynamic_world_shared_chunk,
     collect_dynamic_world_shared_window,
     collect_dynamic_world_window,
     load_agricultural_collector_config,
@@ -73,6 +81,53 @@ def _event_feature(
             "area_threshold_met": area_threshold_met,
         },
     }
+
+
+def test_agricultural_windows_start_after_cutoff_even_when_rf_onset_is_later() -> None:
+    windows = _monthly_windows_from_observation_start(
+        observation_start=date(2021, 1, 1),
+        analysis_end=date(2021, 3, 31),
+    )
+    assert windows == (
+        ("2021-01", date(2021, 1, 1), date(2021, 2, 1)),
+        ("2021-02", date(2021, 2, 1), date(2021, 3, 1)),
+        ("2021-03", date(2021, 3, 1), date(2021, 4, 1)),
+    )
+
+
+def test_production_collector_queries_from_cutoff_not_rf_onset(tmp_path: Path) -> None:
+    queries: list[DynamicWorldSharedChunkQuery] = []
+
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
+        queries.append(query)
+        return _chunk_result(query)
+
+    _run(
+        tmp_path,
+        provider,
+        analysis_end_date=date(2021, 3, 31),
+        post_cutoff_windows=True,
+    )
+
+    assert [window.window_id for query in queries for window in query.windows] == [
+        "2021-01",
+        "2021-02",
+        "2021-03",
+    ]
+
+
+def test_production_collector_does_not_require_rf_onset(tmp_path: Path) -> None:
+    output = _run(
+        tmp_path,
+        _chunk_result,
+        features=[_event_feature(onset=False)],
+        analysis_end_date=date(2021, 1, 31),
+        post_cutoff_windows=True,
+    )
+
+    document = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
+    assert document["events"][0]["collection_status"] == "collected"
+    assert document["events"][0]["estimated_onset_window_end"] is None
 
 
 def _event_bundle(tmp_path: Path, features: list[dict[str, Any]]) -> Path:
@@ -134,23 +189,100 @@ def _raster_bytes(
         return bytes(memory.read())
 
 
+def _chunk_result(
+    query: DynamicWorldSharedChunkQuery,
+    *,
+    modes: dict[str, str] | None = None,
+) -> CollectedSharedChunkRasters:
+    effective_modes = modes or {window.window_id: "crop" for window in query.windows}
+    transported = tuple(
+        window.window_id
+        for window in query.windows
+        if effective_modes.get(window.window_id, "crop") != "nodata"
+    )
+    matched = {
+        window.window_id: {
+            event.event_id: (0 if effective_modes.get(window.window_id, "crop") == "nodata" else 4)
+            for event in window.events
+        }
+        for window in query.windows
+    }
+    if not transported:
+        return CollectedSharedChunkRasters(None, None, matched, (), CREATED)
+    height, width = query.grid.height, query.grid.width
+    count_values = np.full((len(transported) * 2, height, width), 65535, dtype=np.uint16)
+    probabilities = np.full((len(transported), height, width), query.grid.nodata, dtype=np.float32)
+    count_names: list[str] = []
+    probability_names: list[str] = []
+    for index, window_id in enumerate(transported):
+        mode = effective_modes.get(window_id, "crop")
+        count_values[index * 2] = 4
+        count_values[index * 2 + 1] = 4 if mode == "crop" else 0
+        probabilities[index] = 0.85 if mode == "crop" else 0.25
+        count_names.extend(
+            (
+                f"{window_id}_valid_observation_count",
+                f"{window_id}_qualifying_crop_count",
+            )
+        )
+        probability_names.append(f"{window_id}_mean_crop_probability")
+
+    def encode(values: np.ndarray, *, nodata: float, descriptions: list[str]) -> bytes:
+        profile = {
+            "driver": "GTiff",
+            "width": width,
+            "height": height,
+            "count": len(descriptions),
+            "dtype": str(values.dtype),
+            "crs": query.grid.target_crs,
+            "transform": rasterio.Affine(*query.grid.transform),
+            "nodata": nodata,
+        }
+        with MemoryFile() as memory:
+            with memory.open(**profile) as dataset:
+                dataset.write(values)
+                dataset.descriptions = tuple(descriptions)
+            return bytes(memory.read())
+
+    return CollectedSharedChunkRasters(
+        counts_content=encode(count_values, nodata=65535, descriptions=count_names),
+        probability_content=encode(
+            probabilities, nodata=query.grid.nodata, descriptions=probability_names
+        ),
+        matched_scene_counts=matched,
+        transported_window_ids=transported,
+        retrieved_at=CREATED,
+    )
+
+
 def _run(
     tmp_path: Path,
     provider: Any,
     *,
     features: list[dict[str, Any]] | None = None,
     artifact_profile: ArtifactProfile = ArtifactProfile.LEAN,
+    analysis_end_date: date = date(2022, 7, 31),
+    annual_land_cover_provider: Any | None = None,
+    post_cutoff_windows: bool = False,
 ) -> Path:
+    config_path = PROJECT_ROOT / "configs/agricultural-collector.yml"
+    if not post_cutoff_windows:
+        legacy_config = config_path.read_text(encoding="utf-8").replace(
+            'schema_version: "1.5.0"', 'schema_version: "1.4.0"'
+        )
+        config_path = tmp_path / "agricultural-collector-v1.4.yml"
+        config_path.write_text(legacy_config, encoding="utf-8")
     return materialize_agricultural_evidence_collection(
         source_event_bundle=_event_bundle(tmp_path, features or [_event_feature()]),
         output_root=tmp_path / "out",
         establishment_id="synthetic-field",
-        analysis_end_date=date(2022, 7, 31),
-        config_path=PROJECT_ROOT / "configs/agricultural-collector.yml",
+        analysis_end_date=analysis_end_date,
+        config_path=config_path,
         catalog_path=PROJECT_ROOT / "data/catalog.yml",
         licenses_path=PROJECT_ROOT / "data/licenses.yml",
         created_at=CREATED,
         raster_provider=provider,
+        annual_land_cover_provider=annual_land_cover_provider,
         artifact_profile=artifact_profile,
     )
 
@@ -158,38 +290,99 @@ def _run(
 def test_production_collector_config_is_versioned_and_bounded() -> None:
     config = load_agricultural_collector_config(PROJECT_ROOT / "configs/agricultural-collector.yml")
 
-    assert config.schema_version == "1.2.0"
+    assert config.schema_version == "1.5.0"
     assert config.source_id == "dynamic_world_v1"
     assert config.target_crs == "EPSG:6933"
     assert config.resolution_m == 10
     assert config.temporal_cadence == "calendar_month"
+    assert config.agricultural_observation_start_date == date(2021, 1, 1)
     assert config.maximum_events_per_batch == 100
     assert "maximum_events" not in type(config).model_fields
     assert config.maximum_windows_per_event <= 72
     assert config.maximum_remote_acquisitions == 500
     assert config.maximum_shared_grid_pixels == 1_000_000
+    assert config.maximum_remote_chunk_uncompressed_bytes == 24_000_000
     assert config.minimum_top1_probability == pytest.approx(0.6)
+    assert config.annual_land_cover_start_year == 2020
+    assert config.annual_land_cover_composite == "mode_of_top1_label"
+
+
+def test_collector_materializes_annual_dynamic_world_mode_series(tmp_path: Path) -> None:
+    annual_queries: list[DynamicWorldAnnualLandCoverQuery] = []
+
+    def annual_provider(
+        query: DynamicWorldAnnualLandCoverQuery,
+    ) -> CollectedAnnualLandCoverRaster:
+        annual_queries.append(query)
+        values = np.full((1, query.grid.height, query.grid.width), query.year % 9, dtype=np.uint8)
+        profile = {
+            "driver": "GTiff",
+            "width": query.grid.width,
+            "height": query.grid.height,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": query.grid.target_crs,
+            "transform": rasterio.Affine(*query.grid.transform),
+            "nodata": 255,
+        }
+        with MemoryFile() as memory:
+            with memory.open(**profile) as dataset:
+                dataset.write(values)
+                dataset.descriptions = (DYNAMIC_WORLD_ANNUAL_LABEL_BAND,)
+            content = bytes(memory.read())
+        return CollectedAnnualLandCoverRaster(
+            content=content,
+            matched_scene_count=12,
+            retrieved_at=CREATED,
+        )
+
+    output = _run(
+        tmp_path,
+        lambda query: _chunk_result(query),
+        analysis_end_date=date(2022, 7, 31),
+        annual_land_cover_provider=annual_provider,
+    )
+
+    assert [query.year for query in annual_queries] == [2020, 2021, 2022]
+    annual_tiffs = sorted(output.glob("tiffs/evidence/agricultural/annual_land_cover/*.tif"))
+    assert [path.name for path in annual_tiffs] == [
+        "dynamic_world_land_cover_2020.tif",
+        "dynamic_world_land_cover_2021.tif",
+        "dynamic_world_land_cover_2022.tif",
+    ]
+    with rasterio.open(annual_tiffs[0]) as dataset:
+        assert dataset.count == 1
+        assert dataset.dtypes == ("uint8",)
+        assert dataset.nodata == 255
+        assert dataset.descriptions == (DYNAMIC_WORLD_ANNUAL_LABEL_BAND,)
+    assert (output / "figures/evidence/dynamic_world_annual_land_cover_2020_2022.png").is_file()
+    metadata = json.loads(
+        (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
+    )
+    assert metadata["annual_land_cover"]["composite"] == "mode_of_top1_label"
+    assert [item["year"] for item in metadata["annual_land_cover"]["rasters"]] == [
+        2020,
+        2021,
+        2022,
+    ]
 
 
 def test_collector_queries_only_post_onset_months_and_materializes_auditable_bundle(
     tmp_path: Path,
 ) -> None:
-    queries: list[DynamicWorldSharedWindowQuery] = []
+    queries: list[DynamicWorldSharedChunkQuery] = []
 
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
         queries.append(query)
-        mode = "crop" if query.window_id == "2022-06" else "nodata"
-        return CollectedSharedWindowRaster(
-            content=_raster_bytes(query, mode=mode),
-            matched_scene_counts={
-                event.event_id: 4 if mode == "crop" else 0 for event in query.events
-            },
-            retrieved_at=CREATED,
-        )
+        return _chunk_result(query, modes={"2022-06": "crop", "2022-07": "nodata"})
 
     output = _run(tmp_path, provider)
 
-    assert [(item.start_date, item.end_date_exclusive) for item in queries] == [
+    assert [
+        (window.start_date, window.end_date_exclusive)
+        for item in queries
+        for window in item.windows
+    ] == [
         (date(2022, 6, 1), date(2022, 7, 1)),
         (date(2022, 7, 1), date(2022, 8, 1)),
     ]
@@ -226,7 +419,12 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert metadata["spatial_method"]["resampling"] == "nearest"
     assert metadata["query_count"] == 2
     assert metadata["remote_acquisition_count"] == 2
-    assert metadata["event_window_reuse_ratio"] == pytest.approx(1.0)
+    assert metadata["remote_chunk_acquisition_count"] == 1
+    assert metadata["http_raster_transfer_count"] == 2
+    assert (
+        metadata["estimated_uncompressed_bytes_new"] * 2
+        == metadata["estimated_uncompressed_bytes_legacy"]
+    )
     assert metadata["signed_urls_persisted"] is False
 
     geojson = json.loads(
@@ -235,7 +433,7 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert len(geojson["features"]) == 1
     assert geojson["features"][0]["properties"]["collection_status"] == "collected"
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
-    assert manifest["schema_version"] == "1.3.0"
+    assert manifest["schema_version"] == "1.7.0"
     assert manifest["source_event_bundle"]["input_sha256"] == "c" * 64
     assert manifest["remote_data_accessed"] is True
     assert all((output / item["path"]).is_file() for item in manifest["artifacts"])
@@ -249,7 +447,7 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     )
     assert metadata["artifact_profile"] == "lean"
     assert all(
-        acquisition["raster_retained"] is False for acquisition in metadata["shared_acquisitions"]
+        acquisition["rasters_retained"] is False for acquisition in metadata["shared_acquisitions"]
     )
     pngs = [
         item
@@ -262,18 +460,65 @@ def test_collector_queries_only_post_onset_months_and_materializes_auditable_bun
     assert manifest["visualizations"][0]["source_rasters"]
 
 
+def test_lean_collector_compacts_monthly_counts_without_losing_temporal_rows(
+    tmp_path: Path,
+) -> None:
+    transported_sizes: list[int] = []
+
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
+        result = _chunk_result(query)
+        transported_sizes.extend(
+            len(content)
+            for content in (result.counts_content, result.probability_content)
+            if content is not None
+        )
+        return result
+
+    output = _run(
+        tmp_path,
+        provider,
+        analysis_end_date=date(2022, 12, 31),
+    )
+    payload = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
+    manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
+    metadata = json.loads(
+        (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
+    )
+    cube_paths = {row["raster_path"] for row in payload["rows"]}
+
+    assert payload["schema_version"] == "1.1.0"
+    assert cube_paths == {"tiffs/evidence/agricultural/PDE-1/temporal_counts_uint16.tif"}
+    assert {row["valid_count_band"] for row in payload["rows"]} == set(range(1, 15, 2))
+    assert {row["qualifying_count_band"] for row in payload["rows"]} == set(range(2, 16, 2))
+    assert sum(item["path"].endswith("_dynamic_world.tif") for item in manifest["artifacts"]) <= 4
+    cube = output / next(iter(cube_paths))
+    with rasterio.open(cube) as dataset:
+        assert dataset.count == 14
+        assert dataset.dtypes == ("uint16",) * 14
+        assert dataset.nodata == 65535
+    retained_temporal_bytes = sum(
+        item["size_bytes"]
+        for item in manifest["artifacts"]
+        if item["path"].endswith("_dynamic_world.tif")
+        or item["path"].endswith("temporal_counts_uint16.tif")
+    )
+    assert retained_temporal_bytes < sum(transported_sizes)
+    assert metadata["estimated_legacy_http_raster_transfer_count"] == 7
+    assert metadata["http_raster_transfer_count"] == 2
+    assert (
+        metadata["estimated_uncompressed_bytes_new"] * 2
+        == metadata["estimated_uncompressed_bytes_legacy"]
+    )
+
+
 def test_collector_shares_remote_monthly_acquisitions_across_events(
     tmp_path: Path,
 ) -> None:
-    acquisitions: list[DynamicWorldSharedWindowQuery] = []
+    acquisitions: list[DynamicWorldSharedChunkQuery] = []
 
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
         acquisitions.append(query)
-        return CollectedSharedWindowRaster(
-            content=_raster_bytes(query, mode="crop"),
-            matched_scene_counts={event.event_id: 4 for event in query.events},
-            retrieved_at=CREATED,
-        )
+        return _chunk_result(query)
 
     output = _run(
         tmp_path,
@@ -284,24 +529,30 @@ def test_collector_shares_remote_monthly_acquisitions_across_events(
         ],
     )
 
-    assert [query.window_id for query in acquisitions] == ["2022-06", "2022-07"]
+    assert [[window.window_id for window in query.windows] for query in acquisitions] == [
+        ["2022-06", "2022-07"]
+    ]
     assert all(
-        {event.event_id for event in query.events} == {"PDE-1", "PDE-2"} for query in acquisitions
+        {event.event_id for window in query.windows for event in window.events}
+        == {"PDE-1", "PDE-2"}
+        for query in acquisitions
     )
     metadata = json.loads(
         (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
     )
     assert metadata["query_count"] == 4
     assert metadata["remote_acquisition_count"] == 2
-    assert metadata["event_window_reuse_ratio"] == pytest.approx(2.0)
-    assert len(metadata["shared_acquisitions"]) == 2
+    assert metadata["remote_chunk_acquisition_count"] == 1
+    assert metadata["event_window_reuse_ratio"] == pytest.approx(4.0)
+    assert len(metadata["shared_acquisitions"]) == 1
     payload = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
-    assert metadata["spatial_method"]["shared_acquisition_grid"]["width"] > max(
+    assert metadata["spatial_method"]["shared_acquisition_grids"][0]["grid"]["width"] > max(
         event["grid"]["width"] for event in payload["events"]
     )
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
     assert manifest["query_count"] == 4
     assert manifest["remote_acquisition_count"] == 2
+    assert manifest["remote_chunk_acquisition_count"] == 1
     assert not any(
         item["path"].startswith("tiffs/evidence/agricultural/_shared/")
         for item in manifest["artifacts"]
@@ -310,12 +561,8 @@ def test_collector_shares_remote_monthly_acquisitions_across_events(
 
 
 def test_debug_profile_retains_shared_agricultural_transport_rasters(tmp_path: Path) -> None:
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
-        return CollectedSharedWindowRaster(
-            content=_raster_bytes(query, mode="crop"),
-            matched_scene_counts={event.event_id: 4 for event in query.events},
-            retrieved_at=CREATED,
-        )
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
+        return _chunk_result(query)
 
     output = _run(tmp_path, provider, artifact_profile=ArtifactProfile.DEBUG)
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
@@ -332,7 +579,7 @@ def test_debug_profile_retains_shared_agricultural_transport_rasters(tmp_path: P
     )
     assert metadata["artifact_profile"] == "debug"
     assert all(
-        acquisition["raster_retained"] is True for acquisition in metadata["shared_acquisitions"]
+        acquisition["rasters_retained"] is True for acquisition in metadata["shared_acquisitions"]
     )
 
 
@@ -356,15 +603,11 @@ def test_collector_batches_122_candidates_without_duplicate_monthly_downloads(
 ) -> None:
     import deforestation_pipeline.agricultural_collector as collector_module
 
-    acquisitions: list[DynamicWorldSharedWindowQuery] = []
+    acquisitions: list[DynamicWorldSharedChunkQuery] = []
 
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
         acquisitions.append(query)
-        return CollectedSharedWindowRaster(
-            content=_raster_bytes(query, mode="crop"),
-            matched_scene_counts={event.event_id: 4 for event in query.events},
-            retrieved_at=CREATED,
-        )
+        return _chunk_result(query)
 
     monkeypatch.setattr(
         collector_module,
@@ -382,12 +625,14 @@ def test_collector_batches_122_candidates_without_duplicate_monthly_downloads(
 
     output = _run(tmp_path, provider, features=features)
 
-    assert [query.window_id for query in acquisitions] == ["2022-06", "2022-07"]
-    assert all(len(query.events) == 122 for query in acquisitions)
-    assert [len(batch) for batch in acquisitions[0].event_batches] == [100, 22]
-    assert [event.event_id for batch in acquisitions[0].event_batches for event in batch] == [
-        f"PDE-{index:03d}" for index in range(122)
+    assert [[window.window_id for window in query.windows] for query in acquisitions] == [
+        ["2022-06", "2022-07"]
     ]
+    assert all(len(window.events) == 122 for window in acquisitions[0].windows)
+    assert [len(batch) for batch in acquisitions[0].windows[0].event_batches] == [100, 22]
+    assert [
+        event.event_id for batch in acquisitions[0].windows[0].event_batches for event in batch
+    ] == [f"PDE-{index:03d}" for index in range(122)]
     payload = json.loads((output / "json/evidence/agricultural_evidence.json").read_text("utf-8"))
     assert len(payload["events"]) == 122
     assert {event["event_id"] for event in payload["events"]} == {
@@ -404,33 +649,37 @@ def test_collector_batches_122_candidates_without_duplicate_monthly_downloads(
     metadata = json.loads(
         (output / "json/evidence/agricultural_evidence_metadata.json").read_text("utf-8")
     )
-    assert metadata["method"] == "dynamic_world_shared_monthly_collector_v2"
+    assert metadata["method"] == "dynamic_world_spatial_temporal_chunk_collector_v5"
     assert metadata["query_count"] == 244
     assert metadata["remote_acquisition_count"] == 2
+    assert metadata["remote_chunk_acquisition_count"] == 1
     assert metadata["event_batch_count"] == 4
     assert metadata["event_batch_budget_semantics"] == (
         "maximum_events_per_shared_month_scene_count_batch"
     )
+    assert all(acquisition["batch_count"] == 4 for acquisition in metadata["shared_acquisitions"])
     assert all(
-        [batch["event_count"] for batch in acquisition["event_batches"]] == [100, 22]
+        [batch["event_count"] for batch in window["event_batches"]] == [100, 22]
         for acquisition in metadata["shared_acquisitions"]
+        for window in acquisition["windows"]
     )
     assert len({row["raster_path"] for row in metadata["queries"]}) == 244
     assert all(len(row["grid_sha256"]) == 64 for row in metadata["queries"])
     assert all(len(row["raster_sha256"]) == 64 for row in metadata["queries"])
-    assert len({item["acquisition_id"] for item in metadata["shared_acquisitions"]}) == 2
+    assert len({item["acquisition_id"] for item in metadata["shared_acquisitions"]}) == 1
     manifest = json.loads((output / "json/run/manifest.json").read_text("utf-8"))
-    assert manifest["schema_version"] == "1.3.0"
+    assert manifest["schema_version"] == "1.7.0"
     assert manifest["event_batch_count"] == 4
     assert manifest["remote_acquisition_count"] == 2
+    assert manifest["remote_chunk_acquisition_count"] == 1
     assert manifest["source_event_bundle"]["manifest_sha256"]
     assert manifest["source_event_bundle"]["event_artifact_sha256"]
 
 
 def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> None:
-    calls: list[DynamicWorldSharedWindowQuery] = []
+    calls: list[DynamicWorldSharedChunkQuery] = []
 
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
         calls.append(query)
         raise AssertionError("no debe consultar un evento sin onset")
 
@@ -444,8 +693,10 @@ def test_collector_preserves_missing_onset_without_querying(tmp_path: Path) -> N
 
 
 def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None:
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
-        content = _raster_bytes(query, mode="crop")
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
+        result = _chunk_result(query)
+        assert result.counts_content is not None
+        content = result.counts_content
         with MemoryFile(content) as source_memory:
             with source_memory.open() as source:
                 values = source.read()
@@ -455,10 +706,12 @@ def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None
             with target_memory.open(**profile) as target:
                 target.write(values)
             broken = bytes(target_memory.read())
-        return CollectedSharedWindowRaster(
-            content=broken,
-            matched_scene_counts={event.event_id: 4 for event in query.events},
-            retrieved_at=CREATED,
+        return CollectedSharedChunkRasters(
+            counts_content=broken,
+            probability_content=result.probability_content,
+            matched_scene_counts=result.matched_scene_counts,
+            transported_window_ids=result.transported_window_ids,
+            retrieved_at=result.retrieved_at,
         )
 
     with pytest.raises(RasterDownloadError, match="grid_transform_mismatch"):
@@ -466,31 +719,44 @@ def test_collector_rejects_provider_raster_on_wrong_grid(tmp_path: Path) -> None
 
 
 def test_collector_rejects_impossible_dynamic_world_counts(tmp_path: Path) -> None:
-    def provider(query: DynamicWorldSharedWindowQuery) -> CollectedSharedWindowRaster:
+    def provider(query: DynamicWorldSharedChunkQuery) -> CollectedSharedChunkRasters:
+        result = _chunk_result(query)
+        assert result.counts_content is not None
         height, width = query.grid.height, query.grid.width
-        values = np.zeros((4, height, width), dtype=np.float32)
-        values[0] = 2.0
-        values[1] = 3.0
-        values[2] = 0.8
-        values[3] = 1.5
+        values = np.zeros((len(query.windows) * 2, height, width), dtype=np.uint16)
+        values[::2] = 2
+        values[1::2] = 3
         profile = {
             "driver": "GTiff",
             "width": width,
             "height": height,
-            "count": 4,
-            "dtype": "float32",
+            "count": len(query.windows) * 2,
+            "dtype": "uint16",
             "crs": query.grid.target_crs,
             "transform": rasterio.Affine(*query.grid.transform),
-            "nodata": query.grid.nodata,
+            "nodata": 65535,
         }
         with MemoryFile() as memory:
             with memory.open(**profile) as dataset:
                 dataset.write(values)
+                dataset.descriptions = tuple(
+                    name
+                    for window in query.windows
+                    for name in (
+                        f"{window.window_id}_valid_observation_count",
+                        f"{window.window_id}_qualifying_crop_count",
+                    )
+                )
             content = bytes(memory.read())
-        return CollectedSharedWindowRaster(
-            content=content,
-            matched_scene_counts={event.event_id: 2 for event in query.events},
-            retrieved_at=CREATED,
+        return CollectedSharedChunkRasters(
+            counts_content=content,
+            probability_content=result.probability_content,
+            matched_scene_counts={
+                window.window_id: {event.event_id: 2 for event in window.events}
+                for window in query.windows
+            },
+            transported_window_ids=result.transported_window_ids,
+            retrieved_at=result.retrieved_at,
         )
 
     with pytest.raises(ValueError, match="dynamic_world_raster_values_invalid"):
@@ -705,6 +971,32 @@ def _dynamic_world_shared_query() -> DynamicWorldSharedWindowQuery:
     )
 
 
+def _dynamic_world_chunk_query() -> DynamicWorldSharedChunkQuery:
+    base = _dynamic_world_shared_query()
+    first = DynamicWorldSharedTemporalWindow(
+        window_id="2022-06",
+        start_date=date(2022, 6, 1),
+        end_date_exclusive=date(2022, 7, 1),
+        events=base.events,
+        event_batches=base.event_batches,
+    )
+    second = DynamicWorldSharedTemporalWindow(
+        window_id="2022-07",
+        start_date=date(2022, 7, 1),
+        end_date_exclusive=date(2022, 8, 1),
+        events=base.events,
+        event_batches=base.event_batches,
+    )
+    return DynamicWorldSharedChunkQuery(
+        chunk_id="g001-c001",
+        geometry_wgs84=base.geometry_wgs84,
+        grid=base.grid,
+        windows=(first, second),
+        source=base.source,
+        minimum_top1_probability=base.minimum_top1_probability,
+    )
+
+
 def test_gee_provider_filters_event_and_builds_top1_crop_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -810,6 +1102,129 @@ def test_gee_shared_provider_batches_scene_counts_but_downloads_month_once(
     assert set(result.matched_scene_counts.values()) == {3}
     assert module.feature_collection_sizes == [100, 22]
     assert len(downloads) == 1
+
+
+def test_gee_chunk_provider_uses_two_typed_transfers_for_multiple_months(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    module = _FakeEe()
+    downloads: list[dict[str, Any]] = []
+
+    def materialize(**kwargs: Any) -> Any:
+        downloads.append(kwargs)
+        return type("Result", (), {"content": b"normalized"})()
+
+    monkeypatch.setattr(collector_module, "materialize_ee_image_to_grid", materialize)
+    result = collect_dynamic_world_shared_chunk(
+        query=_dynamic_world_chunk_query(),
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+
+    assert result.transported_window_ids == ("2022-06", "2022-07")
+    assert result.matched_scene_counts == {
+        "2022-06": {"PDE-1": 3, "PDE-2": 3},
+        "2022-07": {"PDE-1": 3, "PDE-2": 3},
+    }
+    assert [download["output_type"] for download in downloads] == ["uint16", "float32"]
+    assert downloads[0]["nodata_override"] == 65535.0
+    assert len(downloads[0]["band_names"]) == 4
+    assert len(downloads[1]["band_names"]) == 2
+    assert module.feature_collection_sizes == [2, 2]
+
+
+def test_gee_providers_resolve_the_automatic_gate_rule_from_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    base = _dynamic_world_shared_query()
+    eligible = base.source.class_rules[1].model_copy(
+        update={"output_land_use": "crop", "automatic_gate_eligible": True}
+    )
+    source = base.source.model_copy(update={"class_rules": (eligible,)})
+    shared_query = replace(base, source=source)
+    chunk_query = replace(_dynamic_world_chunk_query(), source=source)
+    window_query = replace(_dynamic_world_query(), source=source)
+    module = _FakeEe()
+    monkeypatch.setattr(
+        collector_module,
+        "materialize_ee_image_to_grid",
+        lambda **_: type("Result", (), {"content": b"normalized"})(),
+    )
+
+    collect_dynamic_world_shared_window(
+        query=shared_query,
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+    assert module.mapped_expression == (
+        "scene.select(label).eq(6).And(scene.select(built).gte(0.6)).rename(qualifying_crop)"
+    )
+
+    collect_dynamic_world_window(
+        query=window_query,
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+    assert module.mapped_expression == (
+        "scene.select(label).eq(6).And(scene.select(built).gte(0.6)).rename(qualifying_crop)"
+    )
+
+    collect_dynamic_world_shared_chunk(
+        query=chunk_query,
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+    assert module.mapped_expression == (
+        "scene.select(label).eq(6).And(scene.select(built).gte(0.6)).rename(qualifying_crop)"
+    )
+
+
+def test_preflight_budgets_two_raster_transfers_per_temporal_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    config = load_agricultural_collector_config(PROJECT_ROOT / "configs/agricultural-collector.yml")
+    monkeypatch.setattr(
+        collector_module,
+        "load_agricultural_collector_config",
+        lambda _: config.model_copy(update={"maximum_remote_acquisitions": 1}),
+    )
+
+    with pytest.raises(ValueError, match="agricultural_collector_total_query_budget_exceeded"):
+        _run(tmp_path, lambda _: pytest.fail("el preflight debe rechazar antes del provider"))
+
+
+def test_gee_chunk_provider_skips_both_transfers_when_all_months_have_zero_scenes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deforestation_pipeline.agricultural_collector as collector_module
+
+    module = _FakeEe(scene_count=0)
+    monkeypatch.setattr(
+        collector_module,
+        "materialize_ee_image_to_grid",
+        lambda **_: pytest.fail("no debe descargar chunks sin escenas"),
+    )
+
+    result = collect_dynamic_world_shared_chunk(
+        query=_dynamic_world_chunk_query(),
+        session=GeeSession(module=module),
+        output_config=load_config(PROJECT_ROOT / "configs/default.yml").output,
+        retrieved_at=CREATED,
+    )
+
+    assert result.counts_content is None
+    assert result.probability_content is None
+    assert result.transported_window_ids == ()
 
 
 def test_gee_provider_skips_download_when_month_has_no_scenes(

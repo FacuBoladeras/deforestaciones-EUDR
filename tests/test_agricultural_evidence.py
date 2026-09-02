@@ -10,6 +10,8 @@ from pydantic import ValidationError
 
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
+    AgriculturalEvidenceDocumentV2,
+    AgriculturalEvidenceObservationV2,
     AgriculturalEvidencePolicy,
     agricultural_evidence_json_schema,
     agricultural_evidence_policy_json_schema,
@@ -222,7 +224,7 @@ def test_contract_requires_timezone_and_unique_evidence_ids() -> None:
 
 
 def test_schema_factories_are_versioned() -> None:
-    assert agricultural_evidence_json_schema()["$id"].endswith(":1.0.0")
+    assert agricultural_evidence_json_schema()["$id"].endswith(":2.0.0")
     assert agricultural_evidence_policy_json_schema()["$id"].endswith(":1.0.0")
     assert _document().evidence_set_id == UUID("12345678-1234-5678-9234-567812345678")
     assert _document().observations[0].source.access_date == date(2026, 8, 11)
@@ -239,3 +241,52 @@ def test_production_policy_registers_dynamic_world_as_methodological_candidate()
     assert evaluated.assessment.level == "methodological"
     assert evaluated.assessment.decision_eligible is True
     assert "shared_sensor_family" in evaluated.assessment.reason_codes
+
+
+def test_single_post_event_period_is_policy_eligible_but_not_calibrated_confidence() -> None:
+    payload = _document().model_dump(mode="json")
+    payload["schema_version"] = "2.0.0"
+    temporal = payload["observations"][0]["temporal_support"]
+    payload["observations"][0]["temporal_support"] = {
+        "estimated_onset_window_end": temporal["estimated_onset_window_end"],
+        "post_change_window_start": temporal["post_change_window_start"],
+        "post_change_window_end": temporal["post_change_window_end"],
+        "effective_observation_date": "2022-06-30",
+        "valid_period_count": 1,
+        "qualifying_period_count": 1,
+        "evidence_basis": "any_qualifying_post_event_period",
+        "evidence_satisfied": True,
+        "signal_strength": "weak",
+        "long_gap_interpolation_used": False,
+        "evidence_rule": "1_qualifying_post_event_period",
+    }
+    document = AgriculturalEvidenceDocumentV2.model_validate(payload)
+
+    item = evaluate_agricultural_evidence(document, _policy())["PDE-1"][0]
+
+    assert item.assessment.decision_eligible is True
+    assert isinstance(item.observation, AgriculturalEvidenceObservationV2)
+    assert item.observation.temporal_support.signal_strength == "weak"
+    assert item.observation.quality.confidence_semantics != "probability_of_conversion"
+
+
+def test_v2_signal_strength_must_match_qualifying_period_count() -> None:
+    payload = _document().model_dump(mode="json")
+    payload["schema_version"] = "2.0.0"
+    temporal = payload["observations"][0]["temporal_support"]
+    payload["observations"][0]["temporal_support"] = {
+        "estimated_onset_window_end": temporal["estimated_onset_window_end"],
+        "post_change_window_start": temporal["post_change_window_start"],
+        "post_change_window_end": temporal["post_change_window_end"],
+        "effective_observation_date": "2022-06-30",
+        "valid_period_count": 2,
+        "qualifying_period_count": 2,
+        "evidence_basis": "any_qualifying_post_event_period",
+        "evidence_satisfied": True,
+        "signal_strength": "weak",
+        "long_gap_interpolation_used": False,
+        "evidence_rule": "1_qualifying_post_event_period",
+    }
+
+    with pytest.raises(ValidationError, match="signal_strength"):
+        AgriculturalEvidenceDocumentV2.model_validate(payload)

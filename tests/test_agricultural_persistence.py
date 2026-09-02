@@ -7,14 +7,20 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from pydantic import ValidationError
 from pyproj import Transformer
 from rasterio.transform import from_origin
 
+from deforestation_pipeline.agricultural_collector import _compact_temporal_count_cube
 from deforestation_pipeline.agricultural_persistence import (
     AgriculturalPersistenceDocument,
+    LegacyAgriculturalPersistenceDocument,
+    _bounded_subset_area,
+    _candidate_period_coverage_assessment,
     agricultural_persistence_json_schema,
     load_agricultural_persistence_config,
+    load_agricultural_persistence_document,
     materialize_agricultural_persistence,
 )
 from deforestation_pipeline.schemas import raster_grid_sha256
@@ -67,6 +73,8 @@ def _raw_bundle(
     gap_month: int | None = None,
     valid_months: set[int] | None = None,
     crop_months: set[int] | None = None,
+    event_area_exact_ha: float = 0.02,
+    footprint_values: tuple[float, float] = (1.0, 1.0),
 ) -> Path:
     bundle = root / "raw"
     artifacts: list[dict[str, object]] = []
@@ -84,7 +92,7 @@ def _raw_bundle(
         )
 
     footprint_path = "tiffs/evidence/agricultural/PDE-1/event_footprint_fraction.tif"
-    register(footprint_path, _tif((1.0, 1.0), footprint=True))
+    register(footprint_path, _tif(footprint_values, footprint=True))
     starts = [
         "2022-06-01",
         "2022-07-01",
@@ -132,7 +140,7 @@ def _raw_bundle(
                     "class_name": class_name,
                     "area_ha": area,
                     "event_area_ha": 0.02,
-                    "event_area_exact_ha": 0.02,
+                    "event_area_exact_ha": event_area_exact_ha,
                     "grid_error_area_ha": 0.0,
                     "matched_scene_count": scenes,
                     "mean_crop_probability": None,
@@ -181,7 +189,7 @@ def _raw_bundle(
                 "estimated_onset_window_end": "2022-05-31",
                 "window_count": months,
                 "quality_flags": [],
-                "event_area_exact_ha": 0.02,
+                "event_area_exact_ha": event_area_exact_ha,
                 "event_area_raster_ha": 0.02,
                 "grid_error_area_ha": 0.0,
                 "grid": {
@@ -246,18 +254,66 @@ def _raw_bundle(
     return bundle
 
 
-def test_config_versions_seasonal_nonconsecutive_rule_and_sensitivity() -> None:
+def _compact_bundle(bundle: Path) -> Path:
+    payload_path = bundle / "json/evidence/agricultural_evidence.json"
+    payload = json.loads(payload_path.read_text("utf-8"))
+    rows = payload["rows"]
+    raster_contents = {
+        row["raster_path"]: (bundle / row["raster_path"]).read_bytes() for row in rows
+    }
+    content, band_pairs = _compact_temporal_count_cube(
+        event_rows=rows,
+        raster_contents=raster_contents,
+    )
+    cube_path = "tiffs/evidence/agricultural/PDE-1/temporal_counts_uint16.tif"
+    target = bundle / cube_path
+    target.write_bytes(content)
+    for row in rows:
+        valid_band, qualifying_band = band_pairs[row["window_id"]]
+        row["raster_path"] = cube_path
+        row["valid_count_band"] = valid_band
+        row["qualifying_count_band"] = qualifying_band
+    payload["schema_version"] = "1.1.0"
+    payload_content = json.dumps(payload).encode()
+    payload_path.write_bytes(payload_content)
+    manifest_path = bundle / "json/run/manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    for artifact in manifest["artifacts"]:
+        if artifact["path"] == "json/evidence/agricultural_evidence.json":
+            artifact["size_bytes"] = len(payload_content)
+            artifact["sha256"] = hashlib.sha256(payload_content).hexdigest()
+    manifest["artifacts"].append(
+        {
+            "path": cube_path,
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return bundle
+
+
+def test_config_versions_single_period_evidence_and_signal_strength() -> None:
     config = load_agricultural_persistence_config(
         PROJECT_ROOT / "configs/agricultural-persistence.yml"
     )
+    assert config.schema_version == "2.1.0"
     assert config.minimum_valid_periods >= 3
-    assert config.minimum_qualifying_periods >= 2
+    assert config.minimum_qualifying_periods == 1
     assert config.minimum_post_onset_duration_days >= 180
-    assert config.seasonality_rule == "seasonal_nonconsecutive_periods"
+    assert config.evidence_rule == "candidate_coverage_at_least_five_percent_post_cutoff"
+    assert config.minimum_candidate_agricultural_coverage_fraction == pytest.approx(0.05)
+    assert config.signal_strength_periods.model_dump() == {
+        "weak": 1,
+        "moderate": 2,
+        "strong": 3,
+    }
     assert config.primary_crop_observation_fraction in config.sensitivity_crop_observation_fractions
 
 
-def test_nonconsecutive_crop_months_can_be_persistent_without_interpolation(tmp_path: Path) -> None:
+def test_nonconsecutive_crop_months_produce_moderate_support_without_interpolation(
+    tmp_path: Path,
+) -> None:
     output = materialize_agricultural_persistence(
         source_collection_bundle=_raw_bundle(tmp_path),
         output_root=tmp_path / "out",
@@ -269,7 +325,8 @@ def test_nonconsecutive_crop_months_can_be_persistent_without_interpolation(tmp_
         (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
     )
     event = payload.events[0]
-    assert event.persistence_status == "persistent_crop_support"
+    assert event.persistence_status == "agricultural_support_detected"
+    assert event.signal_strength == "moderate"
     assert event.observed_consecutive_qualifying_periods == 1
     assert event.qualifying_period_count == 2
     assert event.long_gap_interpolation_used is False
@@ -291,8 +348,200 @@ def test_nonconsecutive_crop_months_can_be_persistent_without_interpolation(tmp_
         (output / "json/evidence/agricultural_evidence_persistent.json").read_text("utf-8")
     )
     temporal = evidence["observations"][0]["temporal_support"]
-    assert temporal["persistence_basis"] == "seasonal_nonconsecutive_periods"
-    assert temporal["persistence_satisfied"] is True
+    assert temporal["evidence_basis"] == "candidate_coverage_at_least_five_percent_post_cutoff"
+    assert temporal["evidence_satisfied"] is True
+    assert temporal["signal_strength"] == "moderate"
+
+
+def test_occurrence_area_is_bounded_by_exact_event_area_under_float_roundoff(
+    tmp_path: Path,
+) -> None:
+    exact_area = 0.01 - 4e-10
+    output = materialize_agricultural_persistence(
+        source_collection_bundle=_raw_bundle(
+            tmp_path,
+            months=2,
+            crop_months={0},
+            event_area_exact_ha=exact_area,
+            footprint_values=(1.0, 0.0),
+        ),
+        output_root=tmp_path / "out",
+        config_path=PROJECT_ROOT / "configs/agricultural-persistence.yml",
+        created_at=CREATED,
+    )
+
+    evidence = json.loads(
+        (output / "json/evidence/agricultural_evidence_persistent.json").read_text("utf-8")
+    )
+    spatial = evidence["observations"][0]["spatial_support"]
+    assert spatial["event_area_ha"] == exact_area
+    assert spatial["attributed_area_ha"] == exact_area
+    assert spatial["attributed_event_fraction"] == 1.0
+
+
+def test_subset_area_guard_rejects_material_excess() -> None:
+    with pytest.raises(
+        ValueError,
+        match="agricultural_subset_area_exceeds_exact_event_area",
+    ):
+        _bounded_subset_area(1.0001, 1.0)
+
+
+def test_one_qualifying_month_in_short_series_emits_weak_evidence(tmp_path: Path) -> None:
+    output = materialize_agricultural_persistence(
+        source_collection_bundle=_raw_bundle(tmp_path, months=2, crop_months={0}),
+        output_root=tmp_path / "out",
+        config_path=PROJECT_ROOT / "configs/agricultural-persistence.yml",
+        created_at=CREATED,
+    )
+
+    document = load_agricultural_persistence_document(
+        (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
+    )
+    assert isinstance(document, AgriculturalPersistenceDocument)
+    event = document.events[0]
+    assert event.persistence_status == "agricultural_support_detected"
+    assert event.signal_strength == "weak"
+    assert event.qualifying_period_count == 1
+    assert event.persistent_crop_area_ha == 0.01
+    assert "minimum_post_onset_duration_not_met" in event.quality_flags
+    assert event.strength_raster_path is not None
+    assert (output / event.strength_raster_path).is_file()
+    assert sum(item.area_ha for item in event.signal_strength_areas) == pytest.approx(
+        event.persistent_crop_area_ha
+    )
+
+    evidence = json.loads(
+        (output / "json/evidence/agricultural_evidence_persistent.json").read_text("utf-8")
+    )
+    temporal = evidence["observations"][0]["temporal_support"]
+    assert evidence["schema_version"] == "2.1.0"
+    assert temporal["effective_observation_date"] == "2022-06-30"
+    assert temporal["signal_strength"] == "weak"
+
+
+@pytest.mark.parametrize(
+    ("crop_months", "expected_strength"),
+    [({0}, "weak"), ({0, 3}, "moderate"), ({0, 2, 4}, "strong")],
+)
+def test_signal_strength_follows_qualifying_period_count(
+    tmp_path: Path,
+    crop_months: set[int],
+    expected_strength: str,
+) -> None:
+    output = materialize_agricultural_persistence(
+        source_collection_bundle=_raw_bundle(tmp_path, crop_months=crop_months),
+        output_root=tmp_path / "out",
+        config_path=PROJECT_ROOT / "configs/agricultural-persistence.yml",
+        created_at=CREATED,
+    )
+    document = load_agricultural_persistence_document(
+        (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
+    )
+    assert isinstance(document, AgriculturalPersistenceDocument)
+    assert document.events[0].signal_strength == expected_strength
+
+
+@pytest.mark.parametrize(
+    ("qualifying_areas", "expected_detected", "expected_strength"),
+    [
+        ([4.99], False, None),
+        ([5.0], True, "weak"),
+        ([5.0, 7.0], True, "moderate"),
+        ([5.0, 7.0, 12.0], True, "strong"),
+    ],
+)
+def test_candidate_agricultural_gate_uses_inclusive_five_percent_coverage(
+    qualifying_areas: list[float],
+    expected_detected: bool,
+    expected_strength: str | None,
+) -> None:
+    assessment = _candidate_period_coverage_assessment(
+        qualifying_areas_ha=qualifying_areas,
+        candidate_area_ha=100.0,
+        minimum_coverage_fraction=0.05,
+    )
+
+    assert assessment.detected is expected_detected
+    assert assessment.signal_strength == expected_strength
+    assert assessment.qualifying_period_count == sum(area >= 5.0 for area in qualifying_areas)
+    assert assessment.maximum_coverage_fraction == pytest.approx(max(qualifying_areas) / 100)
+
+
+def test_candidate_coverage_denominator_is_full_candidate_not_observed_area() -> None:
+    assessment = _candidate_period_coverage_assessment(
+        qualifying_areas_ha=[0.4],
+        candidate_area_ha=10.0,
+        minimum_coverage_fraction=0.05,
+    )
+
+    assert assessment.detected is False
+    assert assessment.maximum_coverage_fraction == pytest.approx(0.04)
+
+
+def test_legacy_v1_config_still_materializes_and_loads_v1_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "agricultural-persistence-v1.yml"
+    config_path.write_text(
+        """schema_version: \"1.0.0\"
+source_id: dynamic_world_v1
+minimum_valid_periods: 3
+minimum_qualifying_periods: 2
+minimum_post_onset_duration_days: 180
+primary_crop_observation_fraction: 0.50
+sensitivity_crop_observation_fractions: [0.40, 0.50, 0.60]
+minimum_valid_observations_per_period: 2
+maximum_unobserved_gap_periods: 3
+seasonality_rule: seasonal_nonconsecutive_periods
+long_gap_interpolation_used: false
+support_raster_nodata: -9999.0
+""",
+        encoding="utf-8",
+    )
+    output = materialize_agricultural_persistence(
+        source_collection_bundle=_raw_bundle(tmp_path),
+        output_root=tmp_path / "out",
+        config_path=config_path,
+        created_at=CREATED,
+    )
+
+    document = load_agricultural_persistence_document(
+        (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
+    )
+    assert isinstance(document, LegacyAgriculturalPersistenceDocument)
+    assert document.schema_version == "1.0.0"
+    assert document.events[0].persistence_status == "persistent_crop_support"
+
+
+def test_compact_temporal_cube_preserves_persistence_result(tmp_path: Path) -> None:
+    legacy = materialize_agricultural_persistence(
+        source_collection_bundle=_raw_bundle(tmp_path / "legacy"),
+        output_root=tmp_path / "legacy-out",
+        config_path=PROJECT_ROOT / "configs/agricultural-persistence.yml",
+        created_at=CREATED,
+    )
+    compact = materialize_agricultural_persistence(
+        source_collection_bundle=_compact_bundle(_raw_bundle(tmp_path / "compact")),
+        output_root=tmp_path / "compact-out",
+        config_path=PROJECT_ROOT / "configs/agricultural-persistence.yml",
+        created_at=CREATED,
+    )
+    legacy_event = json.loads(
+        (legacy / "json/evidence/agricultural_persistence.json").read_text("utf-8")
+    )["events"][0]
+    compact_event = json.loads(
+        (compact / "json/evidence/agricultural_persistence.json").read_text("utf-8")
+    )["events"][0]
+
+    for field in (
+        "persistence_status",
+        "observed_duration_days",
+        "valid_period_count",
+        "qualifying_period_count",
+        "persistent_crop_area_ha",
+        "persistent_event_fraction",
+        "sensitivity",
+    ):
+        assert compact_event[field] == legacy_event[field]
 
 
 def test_persistence_accepts_collector_source_event_created_at_identity(tmp_path: Path) -> None:
@@ -317,7 +566,7 @@ def test_persistence_accepts_collector_source_event_created_at_identity(tmp_path
     )
 
 
-def test_short_series_is_insufficient_and_does_not_emit_observation(tmp_path: Path) -> None:
+def test_short_series_quality_does_not_erase_single_month_occurrence(tmp_path: Path) -> None:
     output = materialize_agricultural_persistence(
         source_collection_bundle=_raw_bundle(tmp_path, months=2),
         output_root=tmp_path / "out",
@@ -327,12 +576,15 @@ def test_short_series_is_insufficient_and_does_not_emit_observation(tmp_path: Pa
     payload = json.loads(
         (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
     )
-    assert payload["events"][0]["persistence_status"] == "insufficient_series"
-    assert "minimum_post_onset_duration_not_met" in payload["events"][0]["quality_flags"]
+    event = payload["events"][0]
+    assert event["persistence_status"] == "agricultural_support_detected"
+    assert event["signal_strength"] == "weak"
+    assert "minimum_post_onset_duration_not_met" in event["quality_flags"]
     evidence = json.loads(
         (output / "json/evidence/agricultural_evidence_persistent.json").read_text("utf-8")
     )
-    assert evidence["observations"] == []
+    assert len(evidence["observations"]) == 1
+    assert evidence["observations"][0]["temporal_support"]["signal_strength"] == "weak"
 
 
 def test_nodata_gap_is_preserved_and_not_interpolated(tmp_path: Path) -> None:
@@ -351,7 +603,7 @@ def test_nodata_gap_is_preserved_and_not_interpolated(tmp_path: Path) -> None:
     assert event["per_period_support"][2]["valid_area_ha"] == 0.0
 
 
-def test_scheduled_window_extent_cannot_substitute_pixel_observation_duration(
+def test_short_observed_duration_is_reported_as_quality_not_occurrence_gate(
     tmp_path: Path,
 ) -> None:
     output = materialize_agricultural_persistence(
@@ -369,15 +621,17 @@ def test_scheduled_window_extent_cannot_substitute_pixel_observation_duration(
         (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
     )
     event = payload.events[0]
-    assert event.persistence_status == "insufficient_series"
-    assert event.persistent_crop_area_ha == 0.0
+    assert event.persistence_status == "agricultural_support_detected"
+    assert event.signal_strength == "moderate"
+    assert event.persistent_crop_area_ha > 0
+    assert "minimum_post_onset_duration_not_met" in event.quality_flags
     evidence = json.loads(
         (output / "json/evidence/agricultural_evidence_persistent.json").read_text("utf-8")
     )
-    assert evidence["observations"] == []
+    assert len(evidence["observations"]) == 1
 
 
-def test_gap_longer_than_configured_maximum_cannot_unlock_persistence(tmp_path: Path) -> None:
+def test_long_gap_is_reported_without_erasing_observed_occurrence(tmp_path: Path) -> None:
     output = materialize_agricultural_persistence(
         source_collection_bundle=_raw_bundle(
             tmp_path,
@@ -393,9 +647,10 @@ def test_gap_longer_than_configured_maximum_cannot_unlock_persistence(tmp_path: 
         (output / "json/evidence/agricultural_persistence.json").read_text("utf-8")
     )
     event = payload.events[0]
-    assert event.persistence_status == "insufficient_series"
+    assert event.persistence_status == "agricultural_support_detected"
+    assert event.signal_strength == "moderate"
     assert event.maximum_consecutive_gap_periods == 4
-    assert event.persistent_crop_area_ha == 0.0
+    assert event.persistent_crop_area_ha > 0
     assert "long_unobserved_gap_present" in event.quality_flags
 
 
@@ -418,7 +673,7 @@ def test_tampered_raw_bundle_is_rejected(tmp_path: Path) -> None:
 
 def test_persistence_contract_rejects_caller_independence() -> None:
     schema = agricultural_persistence_json_schema()
-    assert schema["$id"].endswith(":1.0.0")
+    assert schema["$id"].endswith(":2.1.0")
     with np.testing.assert_raises(ValidationError):
         AgriculturalPersistenceDocument.model_validate(
             {

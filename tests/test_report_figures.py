@@ -2,11 +2,232 @@ from __future__ import annotations
 
 import hashlib
 import json
+from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pytest
+from matplotlib.image import imread
+from rasterio.io import MemoryFile
+from rasterio.transform import from_origin
 
-from deforestation_pipeline.report_figures import materialize_report_figure_collection
+import deforestation_pipeline.report_figures as report_figures
+from deforestation_pipeline.report_figures import (
+    _load_components,
+    _load_source_documents,
+    _select_event_ids,
+    load_report_dataset_document,
+    materialize_report_figure_collection,
+)
+
+
+def test_rf_first_candidates_are_report_fallback_before_historical_events(tmp_path: Path) -> None:
+    staging = tmp_path / "run"
+    full = _component(
+        staging,
+        "full_pipeline",
+        {},
+        documents={
+            "json/evidence/disturbance_events.json": {
+                "events": [{"candidate_id": "HISTORICAL", "area_ha": 9.0}]
+            }
+        },
+    )
+    fusion = _component(
+        staging,
+        "disturbance_candidate_fusion",
+        {},
+        documents={
+            "json/evidence/disturbance_candidate_fusion.json": {
+                "schema_version": "2.0.0",
+                "candidates": [
+                    {
+                        "candidate_id": "RFC-ONLY",
+                        "area_ha": 1.2,
+                        "first_loss_year_range": [2022, 2022],
+                        "segmentation_source": "rf_terminal_persistent_forest_loss",
+                        "support_sources": ["ccdc_break_support"],
+                        "resolution": "review_required",
+                    }
+                ],
+            },
+            "json/evidence/disturbance_events.geojson": {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"candidate_id": "RFC-ONLY", "event_id": "RFC-ONLY"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [
+                                    [-60.01, -31.01],
+                                    [-60.0, -31.01],
+                                    [-60.0, -31.0],
+                                    [-60.01, -31.01],
+                                ]
+                            ],
+                        },
+                    }
+                ],
+            },
+        },
+    )
+
+    bundles, _ = _load_components(staging.resolve(), [full, fusion])
+    assert _select_event_ids(_load_source_documents(bundles)) == ["RFC-ONLY"]
+
+    result = materialize_report_figure_collection(
+        staging=staging,
+        components=[full, fusion],
+        overall_status="partial",
+        recorded_at="2026-08-28T12:00:00+00:00",
+    )
+    dataset = json.loads((staging / str(result["dataset_path"])).read_text("utf-8"))
+    selected = dataset["selected_disturbances"][0]
+    assert selected["candidate_id"] == "RFC-ONLY"
+    assert selected["disturbance_source"] == "rf_first_candidate_domain"
+    assert selected["fusion_candidate"]["candidate_id"] == "RFC-ONLY"
+    assert selected["disturbance"]["automatic_status"] == "review_required"
+    assert dataset["headline_metrics"]["spectral_candidate_count"] == 1
+    assert dataset["headline_metrics"]["spectral_candidate_area_ha"] == pytest.approx(1.2)
+    assert dataset["headline_metrics"]["candidate_episode_count"] == 1
+    assert dataset["headline_metrics"]["candidate_episode_area_ha"] == pytest.approx(1.2)
+    assert dataset["headline_metrics"]["likely_conversion_area_ha"] is None
+    assert dataset["headline_metrics"]["conversion_likely_count"] is None
+    adapted = json.loads(
+        (staging / "report_assets/data/main/030_disturbance_events.json").read_text("utf-8")
+    )
+    assert [event["event_id"] for event in adapted["events"]] == ["RFC-ONLY"]
+    assert adapted["events"][0]["estimated_onset_period_id"] == "RF-2022-2022-onset-undetermined"
+    assert adapted["events"][0]["sources"] == [
+        "rf_terminal_persistent_forest_loss",
+        "ccdc_break_support",
+    ]
+    spatial = json.loads(
+        (staging / "report_assets/annex/spatial/disturbance_events.geojson").read_text("utf-8")
+    )
+    assert spatial["features"][0]["properties"]["candidate_id"] == "RFC-ONLY"
+
+
+def test_rf_first_selected_candidate_gets_its_own_spectral_time_series(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "run"
+    periods = ("2020-DJF", "2020-MAM", "2021-DJF", "2021-MAM")
+    figures = {
+        f"tiffs/seasonal/{period}/indices.tif": _index_tiff(
+            ndvi=0.8 - position * 0.15,
+            nbr=0.6 - position * 0.12,
+        )
+        for position, period in enumerate(periods)
+    }
+    full = _component(
+        staging,
+        "full_pipeline",
+        figures,
+        documents={
+            "json/run/summary.json": {
+                "analysis_id": "analysis-rf-series",
+                "establishment_id": "farm-rf-series",
+                "analysis_end_date": "2021-05-31",
+                "area": {"total_area_ha": 4.0},
+                "limitations": [],
+            },
+            "json/evidence/forest_baseline_2020.json": {
+                "screening": {"metrics": {"automated_forest_area_ha": 2.0}}
+            },
+            "json/evidence/disturbance_detection.json": {
+                "parameters": {"indices": ["NDVI", "NBR"]},
+                "screening": {"final_assessment_generated": False},
+            },
+            "json/evidence/disturbance_events.json": {"events": []},
+            "tables/seasonal/summary.csv": (
+                "period_id,season_year,season,variable_kind,variable\n"
+                + "".join(f"{period},{period[:4]},{period[5:]},index,NDVI\n" for period in periods)
+            ),
+        },
+    )
+    fusion = _component(
+        staging,
+        "disturbance_candidate_fusion",
+        {},
+        documents={
+            "json/evidence/disturbance_candidate_fusion.json": {
+                "schema_version": "2.0.0",
+                "candidates": [
+                    {
+                        "candidate_id": "RFC-SERIES",
+                        "area_ha": 1.0,
+                        "first_loss_year_range": [2021, 2021],
+                        "segmentation_source": "rf_terminal_persistent_forest_loss",
+                        "support_sources": [],
+                        "resolution": "review_required",
+                    }
+                ],
+            },
+            "json/evidence/disturbance_events.geojson": {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "candidate_id": "RFC-SERIES",
+                            "candidate_pixel_count": 1,
+                            "area_ha": 1.0,
+                            "first_loss_year_range": [2021, 2021],
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [[0.0, 2.0], [1.0, 2.0], [1.0, 1.0], [0.0, 1.0], [0.0, 2.0]]
+                            ],
+                        },
+                    }
+                ],
+            },
+        },
+    )
+
+    materialize_report_figure_collection(
+        staging=staging,
+        components=[full, fusion],
+        overall_status="partial",
+        recorded_at="2026-09-02T12:00:00+00:00",
+    )
+
+    target = staging / "report_assets/figures/events/RFC-SERIES/disturbance.png"
+    assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    rendered = imread(BytesIO(target.read_bytes()), format="png")
+    assert rendered.shape[1] / rendered.shape[0] < 2
+    index = json.loads((staging / "report_assets/index.json").read_text("utf-8"))
+    entry = next(
+        item
+        for item in index["files"]
+        if item["report_path"] == target.relative_to(staging).as_posix()
+    )
+    assert entry["event_id"] == "RFC-SERIES"
+    assert entry["selection_reason"] == (
+        "comparación NDVI pre/post y serie espectral dentro del candidato RF-first"
+    )
+    assert len(entry["derivation_sources"]) == len(periods) + 1
+
+
+def test_rf_ndvi_comparison_uses_same_season_pre_cutoff_and_strongest_decline() -> None:
+    periods = ("2020-DJF", "2020-MAM", "2021-DJF", "2021-MAM")
+    series = np.asarray(
+        [[0.80, 0.60], [0.70, 0.50], [0.35, 0.20], [0.55, 0.30]],
+        dtype=np.float64,
+    )
+
+    selected = report_figures._select_rf_ndvi_comparison_indices(
+        periods=periods,
+        index_names=("NDVI", "NBR"),
+        series=series,
+        first_loss_year_range=[2021, 2021],
+    )
+
+    assert selected == (0, 2)
 
 
 def _component(
@@ -93,6 +314,31 @@ def _component(
     return component
 
 
+def _index_tiff(*, ndvi: float, nbr: float) -> bytes:
+    values = np.asarray(
+        [
+            [[ndvi, ndvi - 0.1], [ndvi - 0.2, ndvi - 0.3]],
+            [[nbr, nbr - 0.1], [nbr - 0.2, nbr - 0.3]],
+        ],
+        dtype=np.float32,
+    )
+    with MemoryFile() as memory:
+        with memory.open(
+            driver="GTiff",
+            width=2,
+            height=2,
+            count=2,
+            dtype="float32",
+            crs="EPSG:4326",
+            transform=from_origin(0.0, 2.0, 1.0, 1.0),
+            nodata=-9999.0,
+        ) as dataset:
+            dataset.write(values)
+            dataset.set_band_description(1, "NDVI")
+            dataset.set_band_description(2, "NBR")
+        return bytes(memory.read())
+
+
 def test_partial_run_records_component_availability_without_inventing_outputs(
     tmp_path: Path,
 ) -> None:
@@ -161,7 +407,7 @@ def test_partial_run_records_component_availability_without_inventing_outputs(
     )
 
     dataset = json.loads((staging / str(result["dataset_path"])).read_text("utf-8"))
-    assert dataset["schema_version"] == "1.4.0"
+    assert dataset["schema_version"] == "2.1.0"
     assert dataset["component_statuses"]["agricultural_collection"] == {
         "status": "failed",
         "available": False,
@@ -216,6 +462,15 @@ def test_collects_bounded_report_figures_without_moving_sources(tmp_path: Path) 
             {
                 "figures/evidence/agricultural_monthly_evidence_pde-a.png": b"agri-a",
                 "figures/evidence/agricultural_monthly_evidence_pde-b.png": b"agri-b",
+                "figures/evidence/dynamic_world_annual_land_cover_2020_2025.png": b"dw",
+                (
+                    "tiffs/evidence/agricultural/annual_land_cover/"
+                    "dynamic_world_land_cover_2020.tif"
+                ): b"tif-2020",
+                (
+                    "tiffs/evidence/agricultural/annual_land_cover/"
+                    "dynamic_world_land_cover_2025.tif"
+                ): b"tif-2025",
             },
         ),
         _component(
@@ -242,9 +497,9 @@ def test_collects_bounded_report_figures_without_moving_sources(tmp_path: Path) 
 
     index_path = staging / str(result["index_path"])
     index = json.loads(index_path.read_text(encoding="utf-8"))
-    assert result["figure_count"] == 15
-    assert len(index["figures"]) == 15
-    assert index["selection_policy_version"] == "2.0.0"
+    assert result["figure_count"] == 16
+    assert len(index["figures"]) == 16
+    assert index["selection_policy_version"] == "2.4.0"
     assert index["component_statuses"]["hampel_benchmark"] == {
         "status": "diagnostic_unavailable",
         "available": False,
@@ -256,6 +511,10 @@ def test_collects_bounded_report_figures_without_moving_sources(tmp_path: Path) 
     report_paths = [item["report_path"] for item in index["figures"]]
     assert report_paths == sorted(report_paths)
     assert all(path.startswith("report_assets/figures/") for path in report_paths)
+    assert "report_assets/figures/main/300_dynamic_world_annual_land_cover.png" in report_paths
+    all_paths = {item["report_path"] for item in index["files"]}
+    assert "report_assets/annex/rasters/dynamic_world_land_cover_2020.tif" in all_paths
+    assert "report_assets/annex/rasters/dynamic_world_land_cover_2025.tif" in all_paths
     assert not any(path.endswith("2025-SON_rgb.png") for path in report_paths)
     assert len(report_paths) == len(set(report_paths))
     for item in index["figures"]:
@@ -422,7 +681,26 @@ def test_builds_structured_report_package_and_selects_priority_events(
             },
             documents={
                 "json/run/summary.json": {"persistent_event_count": 2},
-                "json/evidence/agricultural_persistence.json": {"events": []},
+                "json/evidence/agricultural_persistence.json": {
+                    "schema_version": "2.0.0",
+                    "events": [
+                        {
+                            "event_id": "PDE-A",
+                            "signal_strength": "weak",
+                            "effective_observation_date": "2022-06-30",
+                            "qualifying_period_count": 1,
+                            "signal_strength_areas": [
+                                {
+                                    "signal_strength": "weak",
+                                    "qualifying_period_minimum": 1,
+                                    "qualifying_period_maximum": 1,
+                                    "area_ha": 0.7,
+                                    "event_fraction": 0.1,
+                                }
+                            ],
+                        }
+                    ],
+                },
                 "json/evidence/agricultural_evidence_persistent.json": {"observations": []},
                 "tables/evidence/agricultural_persistence.csv": (
                     "event_id,persistence_status\nPDE-A,persistent\n"
@@ -463,7 +741,8 @@ def test_builds_structured_report_package_and_selects_priority_events(
         parent_analysis_id="parent-analysis",
     )
 
-    assert result["schema_version"] == "2.1.0"
+    assert result["schema_version"] == "2.5.0"
+    assert result["selection_policy_version"] == "2.4.0"
     assert result["dataset_path"] == "report_assets/report_dataset.json"
     assert result["selected_event_count"] == 2
     dataset = json.loads((staging / str(result["dataset_path"])).read_text("utf-8"))
@@ -492,6 +771,14 @@ def test_builds_structured_report_package_and_selects_priority_events(
         "PDE-A",
         "PDE-B",
     ]
+    assert all(
+        "agricultural_persistence_schema_version" in item
+        for item in dataset["selected_disturbances"]
+    )
+    selected_a = dataset["selected_disturbances"][0]
+    assert selected_a["agricultural_persistence_schema_version"] == "2.0.0"
+    assert selected_a["agricultural_persistence"]["signal_strength"] == "weak"
+    assert selected_a["agricultural_persistence"]["qualifying_period_count"] == 1
     assert dataset["disturbance_selection"]["complete_event_inventory_path"] == (
         "report_assets/data/main/080_post_change_attribution.json"
     )
@@ -503,6 +790,15 @@ def test_builds_structured_report_package_and_selects_priority_events(
     assert "report_assets/data/main/030_disturbance_events.json" in report_paths
     assert "report_assets/annex/spatial/disturbance_events.geojson" in report_paths
     assert "report_assets/annex/tables/agricultural_evidence.csv" in report_paths
+    assert "report_assets/annex/tables/subthreshold_candidates.csv" in report_paths
+    subthreshold_csv = (
+        staging / "report_assets/annex/tables/subthreshold_candidates.csv"
+    ).read_text("utf-8")
+    assert "PDE-C" in subthreshold_csv
+    assert "PDE-A" not in subthreshold_csv
+    assert "candidate_agricultural_coverage_fraction" in subthreshold_csv
+    assert "candidate_agricultural_coverage_threshold" in subthreshold_csv
+    assert "candidate_agricultural_coverage_gate_met" in subthreshold_csv
     assert "report_assets/annex/methodology/agricultural_evidence_metadata.json" in report_paths
     assert "report_assets/annex/provenance/hampel_benchmark_component_status.json" in report_paths
     for item in index["files"]:
@@ -510,6 +806,29 @@ def test_builds_structured_report_package_and_selects_priority_events(
         assert copied.is_file()
         assert item["report_sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest()
         assert item["source_sha256"] == item["report_sha256"]
+
+
+def test_report_dataset_loader_preserves_historical_v1_4_without_implicit_upgrade(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report_dataset.json"
+    path.write_text('{"schema_version":"1.4.0","selected_events":[]}', encoding="utf-8")
+
+    loaded = load_report_dataset_document(path)
+
+    assert loaded["schema_version"] == "1.4.0"
+    assert "selected_disturbances" not in loaded
+
+
+def test_report_dataset_loader_preserves_historical_v2_0_without_implicit_upgrade(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report_dataset.json"
+    path.write_text('{"schema_version":"2.0.0"}', encoding="utf-8")
+
+    loaded = load_report_dataset_document(path)
+
+    assert loaded == {"schema_version": "2.0.0"}
 
 
 def test_rejects_tampered_or_unsafe_manifested_figure(tmp_path: Path) -> None:

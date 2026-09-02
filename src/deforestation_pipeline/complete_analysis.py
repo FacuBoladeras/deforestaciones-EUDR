@@ -22,16 +22,24 @@ from deforestation_pipeline.agricultural_collector import (
 )
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
+    AgriculturalEvidenceDocumentV2,
     AgriculturalEvidencePolicy,
     evaluate_agricultural_evidence,
     load_agricultural_evidence_document,
     load_agricultural_evidence_policy,
 )
 from deforestation_pipeline.agricultural_persistence import (
+    AgriculturalPersistenceDocument,
+    LegacyAgriculturalPersistenceDocument,
     load_agricultural_persistence_config,
+    load_agricultural_persistence_document,
     materialize_agricultural_persistence,
 )
 from deforestation_pipeline.config import ArtifactProfile, load_config, load_forest_model_config
+from deforestation_pipeline.disturbance_candidate_fusion_materialization import (
+    CandidateFusionUnavailableError,
+    materialize_disturbance_candidate_fusion,
+)
 from deforestation_pipeline.gee import (
     GeeSession,
     authenticate_earth_engine,
@@ -59,7 +67,7 @@ from deforestation_pipeline.report_figures import (
 )
 from deforestation_pipeline.rf_model_release import verify_local_rf_model_release
 
-COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.3.0"
+COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.7.0"
 COMPONENT_STATUS_SCHEMA_VERSION = "1.0.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_END_DATE = date(2025, 12, 31)
@@ -129,6 +137,7 @@ def run_complete_analysis(
     config_loader: Callable[[Path], object] = load_config,
     model_loader: Callable[[Path], object] = load_forest_model_config,
     delta_runner: Runner = run_local_vector_pipeline,
+    candidate_fusion_runner: Runner = materialize_disturbance_candidate_fusion,
     agricultural_collector_runner: Runner = materialize_agricultural_evidence_collection,
     agricultural_persistence_runner: Runner = materialize_agricultural_persistence,
     attribution_runner: Runner = materialize_post_change_attribution,
@@ -140,7 +149,7 @@ def run_complete_analysis(
         make_dynamic_world_raster_provider
     ),
     agricultural_evidence_loader: Callable[
-        [Path], AgriculturalEvidenceDocument
+        [Path], AgriculturalEvidenceDocument | AgriculturalEvidenceDocumentV2
     ] = load_agricultural_evidence_document,
     agricultural_policy_loader: Callable[
         [Path], AgriculturalEvidencePolicy
@@ -149,6 +158,9 @@ def run_complete_analysis(
     agricultural_persistence_loader: Callable[[Path], object] = (
         load_agricultural_persistence_config
     ),
+    agricultural_persistence_bundle_validator: Callable[
+        [Path], LegacyAgriculturalPersistenceDocument | AgriculturalPersistenceDocument | object
+    ] = lambda bundle: _validate_agricultural_persistence_bundle(bundle),
 ) -> Path:
     """Ejecuta el DAG completo y publica todos sus bundles bajo un parent atómico."""
     started = created_at or datetime.now(UTC)
@@ -206,6 +218,7 @@ def run_complete_analysis(
         _component("full_pipeline"),
         _component("hampel_benchmark", required_for_publication=False),
         _component("rf_annual_deltas"),
+        _component("disturbance_candidate_fusion", required_for_publication=False),
     ]
     if agricultural_mode == "auto":
         components.extend(
@@ -224,6 +237,10 @@ def run_complete_analysis(
         (min(rf_years), max(rf_years)),
         gee_authentication_mode,
     )
+    if agricultural_evidence is not None:
+        manifest["scientific_flags"]["agricultural_evidence_contract_version"] = _contract_version(
+            agricultural_evidence
+        ) or _json_contract_version(resolved["agricultural_evidence"])
     output_root = request.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     final = output_root / run_name
@@ -317,15 +334,42 @@ def run_complete_analysis(
                 dissolve_all=request.dissolve_all,
             ),
         )
-        persistence_bundle = resolved["agricultural_persistence_bundle"]
-        attribution_component_index = 3
-        if agricultural_mode == "auto":
-            collection = _execute(
+        fused_events = full
+        try:
+            fused_events = _execute(
                 components[3],
                 staging,
                 started,
-                lambda root: agricultural_collector_runner(
+                lambda root: candidate_fusion_runner(
                     source_event_bundle=full,
+                    source_rf_bundle=deltas,
+                    output_root=root,
+                    created_at=started,
+                ),
+            )
+            manifest["scientific_flags"]["candidate_fusion_applied"] = True
+            manifest["scientific_flags"]["rf_first_candidate_domain_applied"] = True
+        except CandidateFusionUnavailableError as exc:
+            components[3].update(
+                status="diagnostic_unavailable",
+                error={"error_type": type(exc).__name__, "message": str(exc)},
+            )
+            manifest["scientific_warnings"].append(
+                {"component": "disturbance_candidate_fusion", "code": str(exc)}
+            )
+            manifest["scientific_flags"]["candidate_fusion_fallback_to_historical_events"] = True
+            manifest["scientific_flags"][
+                "rf_first_candidate_domain_fallback_to_historical_events"
+            ] = True
+        persistence_bundle = resolved["agricultural_persistence_bundle"]
+        attribution_component_index = 4
+        if agricultural_mode == "auto":
+            collection = _execute(
+                components[4],
+                staging,
+                started,
+                lambda root: agricultural_collector_runner(
+                    source_event_bundle=fused_events,
                     output_root=root,
                     establishment_id=request.establishment_id,
                     analysis_end_date=request.analysis_end_date,
@@ -334,29 +378,45 @@ def run_complete_analysis(
                     licenses_path=resolved["licenses"],
                     created_at=started,
                     raster_provider=active_raster_provider,
+                    annual_land_cover_provider=getattr(
+                        active_raster_provider, "collect_annual_land_cover", None
+                    ),
                     artifact_profile=artifact_profile,
                 ),
             )
-            persistence_bundle = _execute(
-                components[4],
-                staging,
-                started,
-                lambda root: agricultural_persistence_runner(
+            persistence_document: object | None = None
+
+            def materialize_and_validate_persistence(root: Path) -> Path:
+                nonlocal persistence_document
+                bundle = agricultural_persistence_runner(
                     source_collection_bundle=collection,
                     output_root=root,
                     config_path=resolved["agricultural_persistence"],
                     created_at=started,
-                ),
+                )
+                persistence_document = agricultural_persistence_bundle_validator(bundle)
+                return bundle
+
+            persistence_bundle = _execute(
+                components[5],
+                staging,
+                started,
+                materialize_and_validate_persistence,
             )
+            persistence_contract_version = _contract_version(persistence_document)
+            if persistence_contract_version is not None:
+                manifest["scientific_flags"]["agricultural_evidence_contract_version"] = (
+                    persistence_contract_version
+                )
             manifest["scientific_flags"]["persistent_agricultural_evidence_provided"] = True
             manifest["scientific_flags"]["agricultural_evidence_generated_in_same_run"] = True
-            attribution_component_index = 5
+            attribution_component_index = 6
         _execute(
             components[attribution_component_index],
             staging,
             started,
             lambda root: attribution_runner(
-                source_event_bundle=full,
+                source_event_bundle=fused_events,
                 source_rf_bundle=deltas,
                 output_root=root,
                 establishment_id=request.establishment_id,
@@ -611,6 +671,71 @@ def _execute(
         raise
 
 
+def _validate_agricultural_persistence_bundle(
+    bundle: Path,
+) -> LegacyAgriculturalPersistenceDocument | AgriculturalPersistenceDocument:
+    """Valida el contrato agrícola generado antes de habilitar atribución."""
+    manifest_path = bundle / _MANIFEST_RELATIVE_PATH
+    if not manifest_path.is_file():
+        raise ValueError("agricultural_persistence_manifest_missing")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    persistence_path = _validated_artifact_from_manifest(
+        bundle,
+        payload,
+        "json/evidence/agricultural_persistence.json",
+    )
+    document = load_agricultural_persistence_document(persistence_path.read_text(encoding="utf-8"))
+    evidence_path = _validated_artifact_from_manifest(
+        bundle,
+        payload,
+        "json/evidence/agricultural_evidence_persistent.json",
+    )
+    evidence = load_agricultural_evidence_document(evidence_path)
+    if document.schema_version != evidence.schema_version:
+        raise ValueError("agricultural_persistence_evidence_contract_version_mismatch")
+    if document.analysis_id != evidence.evidence_set_id:
+        raise ValueError("agricultural_persistence_evidence_identity_mismatch")
+    return document
+
+
+def _validated_artifact_from_manifest(bundle: Path, manifest: object, relative_path: str) -> Path:
+    if not isinstance(manifest, dict):
+        raise ValueError("agricultural_persistence_manifest_not_object")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("agricultural_persistence_manifest_artifacts_missing")
+    matches = [
+        item for item in artifacts if isinstance(item, dict) and item.get("path") == relative_path
+    ]
+    if len(matches) != 1:
+        raise ValueError("agricultural_persistence_artifact_missing_or_duplicated")
+    artifact = matches[0]
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts or _path_contains_symlink(bundle, relative):
+        raise ValueError("agricultural_persistence_artifact_path_unsafe")
+    resolved = (bundle / relative).resolve()
+    if not resolved.is_relative_to(bundle.resolve()) or not resolved.is_file():
+        raise ValueError("agricultural_persistence_artifact_missing")
+    if artifact.get("size_bytes") != resolved.stat().st_size:
+        raise ValueError("agricultural_persistence_artifact_size_mismatch")
+    if artifact.get("sha256") != _sha256(resolved):
+        raise ValueError("agricultural_persistence_artifact_sha256_mismatch")
+    return resolved
+
+
+def _contract_version(document: object) -> str | None:
+    version = getattr(document, "schema_version", None)
+    return version if isinstance(version, str) and version else None
+
+
+def _json_contract_version(path: Path) -> str:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if not isinstance(version, str) or not version:
+        raise ValueError("agricultural_evidence_schema_version_missing")
+    return version
+
+
 def _mark_diagnostic_unavailable(
     component: dict[str, Any], exc: HampelDiagnosticUnavailableError
 ) -> None:
@@ -808,21 +933,25 @@ def _base_manifest(
     dependencies: dict[str, list[str]] = {
         "hampel_benchmark": ["full_pipeline"],
         "rf_annual_deltas": ["full_pipeline"],
+        "disturbance_candidate_fusion": ["full_pipeline", "rf_annual_deltas"],
     }
     if automatic_agriculture:
         dependencies.update(
             {
-                "agricultural_collection": ["full_pipeline"],
+                "agricultural_collection": ["disturbance_candidate_fusion"],
                 "agricultural_persistence": ["agricultural_collection"],
                 "post_change_attribution": [
-                    "full_pipeline",
+                    "disturbance_candidate_fusion",
                     "rf_annual_deltas",
                     "agricultural_persistence",
                 ],
             }
         )
     else:
-        dependencies["post_change_attribution"] = ["full_pipeline", "rf_annual_deltas"]
+        dependencies["post_change_attribution"] = [
+            "disturbance_candidate_fusion",
+            "rf_annual_deltas",
+        ]
     coverage: dict[str, Any] = {
         "full_pipeline": {
             "requested_years": [request.hls_start_year, request.hls_end_year],
@@ -833,6 +962,13 @@ def _base_manifest(
         "rf_annual_deltas": {
             "requested_years": list(rf_year_range),
             "effective_analysis_end_date": date(rf_year_range[1], 11, 30).isoformat(),
+        },
+        "disturbance_candidate_fusion": {
+            "derived_from": ["full_pipeline", "rf_annual_deltas"],
+            "candidate_domain": "rf_terminal_persistent_forest_loss",
+            "robust_role": "support_and_review_only_shadow_outside_domain",
+            "ccdc_role": "support_or_date_never_seed_or_veto",
+            "fallback_policy": "historical_event_bundle_only_when_raw_robust_state_unavailable",
         },
     }
     if automatic_agriculture:
@@ -846,7 +982,7 @@ def _base_manifest(
                 "agricultural_persistence": {"derived_from": "agricultural_collection"},
                 "post_change_attribution": {
                     "derived_from": [
-                        "full_pipeline",
+                        "disturbance_candidate_fusion",
                         "rf_annual_deltas",
                         "agricultural_persistence",
                     ]
@@ -855,7 +991,7 @@ def _base_manifest(
         )
     else:
         coverage["post_change_attribution"] = {
-            "derived_from": ["full_pipeline", "rf_annual_deltas"]
+            "derived_from": ["disturbance_candidate_fusion", "rf_annual_deltas"]
         }
     return {
         "schema_version": COMPLETE_ANALYSIS_SCHEMA_VERSION,
@@ -930,6 +1066,11 @@ def _base_manifest(
             ),
             "agricultural_evidence_generation_requested": automatic_agriculture,
             "agricultural_evidence_generated_in_same_run": False,
+            "candidate_fusion_applied": False,
+            "candidate_fusion_fallback_to_historical_events": False,
+            "rf_first_candidate_domain_applied": False,
+            "rf_first_candidate_domain_fallback_to_historical_events": False,
+            "candidate_domain_semantics": "rf_terminal_persistent_forest_loss",
         },
         "scientific_warnings": [],
         "report_assets": None,

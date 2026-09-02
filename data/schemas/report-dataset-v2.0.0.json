@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "agriculturalOccurrence": {
+      "properties": {
+        "effective_observation_date": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qualifying_period_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signal_strength": {
+          "enum": [
+            "weak",
+            "moderate",
+            "strong",
+            null
+          ]
+        },
+        "signal_strength_areas": {
+          "items": {
+            "$ref": "#/$defs/agriculturalStrengthArea"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "signal_strength",
+        "effective_observation_date",
+        "qualifying_period_count",
+        "signal_strength_areas"
+      ],
+      "type": "object"
+    },
+    "agriculturalStrengthArea": {
+      "properties": {
+        "area_ha": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "event_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "signal_strength": {
+          "enum": [
+            "weak",
+            "moderate",
+            "strong"
+          ]
+        }
+      },
+      "required": [
+        "signal_strength",
+        "area_ha",
+        "event_fraction"
+      ],
+      "type": "object"
+    },
+    "selectedDisturbance": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "agricultural_persistence_schema_version": {
+                "const": "2.0.0"
+              }
+            },
+            "required": [
+              "agricultural_persistence_schema_version"
+            ]
+          },
+          "then": {
+            "properties": {
+              "agricultural_persistence": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/agriculturalOccurrence"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "agricultural_collection": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "agricultural_persistence": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "agricultural_persistence_schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attribution": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "candidate_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "disturbance": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "disturbance_source": {
+          "enum": [
+            "historical_robust",
+            "robust_rf_fusion"
+          ]
+        },
+        "fusion_candidate": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "candidate_id",
+        "disturbance_source",
+        "disturbance",
+        "fusion_candidate",
+        "agricultural_collection",
+        "agricultural_persistence_schema_version",
+        "agricultural_persistence",
+        "attribution"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:report-dataset:2.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "analysis": {
+      "type": "object"
+    },
+    "component_statuses": {
+      "type": "object"
+    },
+    "disturbance_selection": {
+      "type": "object"
+    },
+    "headline_metrics": {
+      "type": "object"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "selected_disturbances": {
+      "items": {
+        "$ref": "#/$defs/selectedDisturbance"
+      },
+      "type": "array"
+    },
+    "source_paths_by_category": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "recorded_at",
+    "analysis",
+    "headline_metrics",
+    "selected_disturbances",
+    "disturbance_selection",
+    "component_statuses",
+    "source_paths_by_category",
+    "limitations"
+  ],
+  "title": "Report dataset",
+  "type": "object",
+  "x-readable-historical-versions": [
+    "1.4.0"
+  ],
+  "x-schema-version": "2.0.0"
+}

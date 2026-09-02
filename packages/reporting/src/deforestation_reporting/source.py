@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from pydantic import ValidationError
 
 from deforestation_reporting.models import (
+    AgriculturalStrengthArea,
     AnalysisOverview,
     AnnualForestPoint,
     BaselineSummary,
@@ -40,6 +41,7 @@ GateKey = Literal[
 ]
 MainClientFigureKind = Literal[
     "annual_forest_change",
+    "dynamic_world_annual_land_cover",
     "rgb_timeline",
     "spectral_index_timeline",
     "observation_coverage",
@@ -283,6 +285,14 @@ def build_report_view_model(package: ReportPackage) -> ReportViewModel:
         if not limitations:
             raise ReportContractError("limitations_missing")
         return ReportViewModel(
+            schema_version=(
+                "3.0.0"
+                if any(
+                    event.agricultural_evidence_schema_version in {"2.0.0", "2.1.0"}
+                    for event in events
+                )
+                else "2.8.0"
+            ),
             analysis=analysis,
             verified_asset_count=len(package.assets),
             result_status=(
@@ -315,6 +325,25 @@ def _headline_event_metrics(
     disturbance_summary: dict[str, Any],
 ) -> tuple[Any, Any, Any, Any]:
     """Separa métricas candidatas y operativas, incluso para datasets editoriales 1.0."""
+    if disturbance_summary.get("schema_version") == "fusion-report-adapter-v1.0.0":
+        events = disturbance_summary.get("events")
+        preserved_events = events if isinstance(events, list) else []
+        operational_events = [
+            event
+            for event in preserved_events
+            if isinstance(event, dict)
+            and event.get("candidate_footprint_above_visec_area_reference") is True
+        ]
+        return (
+            metrics.get("spectral_candidate_area_ha"),
+            metrics.get("spectral_candidate_count"),
+            sum(
+                float(event["area_ha"])
+                for event in operational_events
+                if isinstance(event.get("area_ha"), int | float)
+            ),
+            len(operational_events),
+        )
     if "spectral_candidate_area_ha" in metrics and "spectral_candidate_count" in metrics:
         return (
             metrics.get("spectral_candidate_area_ha"),
@@ -376,6 +405,10 @@ def _client_figures(
             "report_assets/figures/main/200_rf_forest_deltas_timeline.png",
         ),
         ("rgb_timeline", "report_assets/figures/main/030_rgb_timeline.png"),
+        (
+            "dynamic_world_annual_land_cover",
+            "report_assets/figures/main/300_dynamic_world_annual_land_cover.png",
+        ),
         (
             "spectral_index_timeline",
             "report_assets/figures/main/040_spectral_index_timeline.png",
@@ -632,10 +665,26 @@ def _events(
         if persistence_summary
         else {}
     )
+    persistence_schema_version = _optional_contract_string(
+        persistence_summary.get("schema_version"), "persistence_schema_version_invalid"
+    )
+    occurrence_contract = persistence_schema_version in {"2.0.0", "2.1.0"}
+    if occurrence_contract and report_dataset.get("schema_version") not in {"2.0.0", "2.1.0"}:
+        raise ReportContractError("agricultural_occurrence_requires_report_dataset_v2")
     attributions = (
         _attribution_records(attribution_summary, "attribution_records_invalid")
         if attribution_summary
-        else [_unattributed_candidate(item) for item in disturbances.values()]
+        else [
+            _unattributed_candidate(
+                item,
+                persistence_available=_component_payload_available(
+                    report_dataset,
+                    "agricultural_persistence",
+                    persistence_summary,
+                ),
+            )
+            for item in disturbances.values()
+        ]
     )
     event_geometries = _feature_geometries(disturbance_spatial)
     attribution_geometries = _feature_geometries(attribution_spatial or {"features": []})
@@ -652,6 +701,25 @@ def _events(
         event_id = candidate_id if record_type == "conversion_likely_event" else None
         disturbance = disturbances.get(candidate_id, {})
         persistent = persistence.get(candidate_id, {})
+        raw_strength_areas = persistent.get("signal_strength_areas")
+        if occurrence_contract and not isinstance(raw_strength_areas, list):
+            raise ReportContractError("agricultural_strength_areas_invalid")
+        strength_areas = tuple(
+            AgriculturalStrengthArea(
+                signal_strength=cast(
+                    Literal["weak", "moderate", "strong"],
+                    _contract_required_string(
+                        item.get("signal_strength"), "agricultural_signal_strength_invalid"
+                    ),
+                ),
+                area_ha=_required_float(item.get("area_ha"), "agricultural_strength_area_invalid"),
+                event_fraction=_required_float(
+                    item.get("event_fraction"), "agricultural_strength_fraction_invalid"
+                ),
+            )
+            for raw_item in (raw_strength_areas or [])
+            for item in [_mapping(raw_item, "agricultural_strength_area_invalid")]
+        )
         sensitivity = persistent.get("sensitivity")
         sensitivity_areas = (
             [
@@ -680,6 +748,8 @@ def _events(
                 ]
             )
         )
+        attribution_unavailable = "post_change_attribution_unavailable" in quality_flags
+        persistence_unavailable = "agricultural_persistence_unavailable" in quality_flags
         candidate_geometry = _geometry_rings(attribution.get("candidate_geometry")) or (
             event_geometries.get(candidate_id, ())
         )
@@ -691,11 +761,15 @@ def _events(
             if record_type == "conversion_likely_event" and likely_geometry
             else candidate_geometry
         )
-        evidence_gates = [
-            EvidenceGate(key=key, passed=_required_bool(gates.get(key), "gate_invalid"))
-            for key in _GATE_KEYS
-        ]
-        if _OPERATIONAL_AREA_GATE in gates:
+        evidence_gates = (
+            []
+            if attribution_unavailable
+            else [
+                EvidenceGate(key=key, passed=_required_bool(gates.get(key), "gate_invalid"))
+                for key in _GATE_KEYS
+            ]
+        )
+        if not attribution_unavailable and _OPERATIONAL_AREA_GATE in gates:
             evidence_gates.append(
                 EvidenceGate(
                     key=_OPERATIONAL_AREA_GATE,
@@ -728,16 +802,24 @@ def _events(
                     "area_threshold_met", disturbance.get("area_threshold_met")
                 )
                 is True,
-                likely_conversion_area_ha=_required_float(
-                    attribution.get("likely_conversion_area_ha", 0.0),
-                    "likely_conversion_area_invalid",
-                ),
-                conjunctive_conversion_evidence_area_ha=_required_float(
-                    attribution.get(
-                        "conjunctive_conversion_evidence_area_ha",
+                likely_conversion_area_ha=(
+                    None
+                    if attribution_unavailable
+                    else _required_float(
                         attribution.get("likely_conversion_area_ha", 0.0),
-                    ),
-                    "conjunctive_conversion_evidence_area_invalid",
+                        "likely_conversion_area_invalid",
+                    )
+                ),
+                conjunctive_conversion_evidence_area_ha=(
+                    None
+                    if attribution_unavailable
+                    else _required_float(
+                        attribution.get(
+                            "conjunctive_conversion_evidence_area_ha",
+                            attribution.get("likely_conversion_area_ha", 0.0),
+                        ),
+                        "conjunctive_conversion_evidence_area_invalid",
+                    )
                 ),
                 estimated_onset_period_id=_contract_required_string(
                     attribution.get(
@@ -771,16 +853,53 @@ def _events(
                 gap_period_count=_optional_int(
                     persistent.get("gap_period_count"), "gap_period_count_invalid"
                 ),
-                persistent_agricultural_area_ha=_required_float(
-                    attribution.get(
-                        "persistent_agricultural_area_ha",
-                        persistent.get("persistent_crop_area_ha", 0.0),
-                    ),
-                    "persistent_agricultural_area_invalid",
+                agricultural_evidence_schema_version=persistence_schema_version,
+                agricultural_signal_strength=(
+                    cast(
+                        Literal["weak", "moderate", "strong"] | None,
+                        _optional_contract_string(
+                            persistent.get("signal_strength"),
+                            "agricultural_signal_strength_invalid",
+                        ),
+                    )
+                    if occurrence_contract
+                    else None
+                ),
+                agricultural_effective_observation_date=(
+                    _optional_date(
+                        persistent.get("effective_observation_date"),
+                        "agricultural_effective_observation_date_invalid",
+                    )
+                    if occurrence_contract
+                    else None
+                ),
+                agricultural_strength_areas=strength_areas,
+                persistent_agricultural_area_ha=(
+                    None
+                    if persistence_unavailable
+                    else _required_float(
+                        attribution.get(
+                            "persistent_agricultural_area_ha",
+                            persistent.get("persistent_crop_area_ha", 0.0),
+                        ),
+                        "persistent_agricultural_area_invalid",
+                    )
                 ),
                 persistent_event_fraction=_optional_float(
                     persistent.get("persistent_event_fraction"),
                     "persistent_event_fraction_invalid",
+                ),
+                candidate_agricultural_coverage_fraction=_optional_float(
+                    persistent.get("candidate_agricultural_coverage_fraction"),
+                    "candidate_agricultural_coverage_fraction_invalid",
+                ),
+                candidate_agricultural_coverage_threshold=_optional_float(
+                    persistent.get("candidate_agricultural_coverage_threshold"),
+                    "candidate_agricultural_coverage_threshold_invalid",
+                ),
+                candidate_agricultural_coverage_gate_met=_optional_bool(
+                    persistent.get("candidate_agricultural_coverage_gate_met"),
+                    "candidate_agricultural_coverage_gate_invalid",
                 ),
                 sensitivity_min_area_ha=min(sensitivity_areas) if sensitivity_areas else None,
                 sensitivity_max_area_ha=max(sensitivity_areas) if sensitivity_areas else None,
@@ -810,20 +929,41 @@ def _events(
     return tuple(result)
 
 
-def _unattributed_candidate(disturbance: Mapping[str, Any]) -> dict[str, Any]:
+def _component_payload_available(
+    report_dataset: Mapping[str, Any],
+    component_name: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    statuses = report_dataset.get("component_statuses")
+    if isinstance(statuses, Mapping):
+        component = statuses.get(component_name)
+        if isinstance(component, Mapping):
+            available = component.get("available")
+            if isinstance(available, bool):
+                return available
+            return component.get("status") == "completed"
+    return bool(payload)
+
+
+def _unattributed_candidate(
+    disturbance: Mapping[str, Any], *, persistence_available: bool
+) -> dict[str, Any]:
     candidate_id = disturbance.get("candidate_id", disturbance.get("event_id"))
+    quality_flags = ["post_change_attribution_unavailable"]
+    if not persistence_available:
+        quality_flags.append("agricultural_persistence_unavailable")
     return {
         "candidate_id": candidate_id,
         "record_type": "disturbance_candidate",
-        "interpretation_status": "candidate_only",
+        "interpretation_status": "persistent_unattributed",
         "automatic_status": "review_required",
         "area_ha": disturbance.get("area_ha"),
         "estimated_onset_period_id": disturbance.get("estimated_onset_period_id"),
         "post_change_use": "unknown",
         "human_review_required": True,
-        "gates": {key: False for key in _GATE_KEYS},
+        "gates": {},
         "trajectory": {"years": [], "forest_fraction": []},
-        "quality_flags": ["post_change_attribution_unavailable"],
+        "quality_flags": quality_flags,
     }
 
 
@@ -1048,6 +1188,12 @@ def _required_bool(value: object, code: str) -> bool:
     if not isinstance(value, bool):
         raise ReportContractError(code)
     return value
+
+
+def _optional_bool(value: object, code: str) -> bool | None:
+    if value is None:
+        return None
+    return _required_bool(value, code)
 
 
 def _required_float(value: object, code: str, *, signed: bool = False) -> float:

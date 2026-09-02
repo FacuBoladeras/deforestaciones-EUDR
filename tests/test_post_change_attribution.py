@@ -127,6 +127,135 @@ def test_policy_eligible_crop_evidence_can_reach_conversion_likely_when_all_gate
     assert "all_conjunctive_conversion_gates_passed" in result["reasons_for"]
 
 
+def test_candidate_agricultural_coverage_below_five_percent_blocks_attribution() -> None:
+    result = attribute_post_change_event(
+        event=_event(),
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="crop", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=0.098,
+            conjunctive_likely_area_ha=0.098,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="c" * 64,
+            candidate_agricultural_coverage_fraction=0.049,
+            candidate_agricultural_coverage_threshold=0.05,
+            candidate_agricultural_coverage_gate_met=False,
+        ),
+    )
+
+    assert result["post_change_use"] == "unknown"
+    assert result["gates"]["candidate_agricultural_coverage_at_least_threshold"] is False
+    assert result["candidate_agricultural_coverage_fraction"] == 0.049
+    assert "candidate_agricultural_coverage_below_threshold" in result["reason_codes"]
+
+
+def test_rf_seeded_candidate_with_only_ccdc_support_stays_review_required() -> None:
+    event = {
+        **_event(),
+        "segmentation_source": "rf_terminal_persistent_forest_loss",
+        "support_sources": ["ccdc_break_support"],
+    }
+    result = attribute_post_change_event(
+        event=event,
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="crop", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=1.4,
+            conjunctive_likely_area_ha=1.2,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="c" * 64,
+        ),
+    )
+
+    assert result["record_type"] == "disturbance_candidate"
+    assert result["automatic_status"] == "review_required"
+    assert result["gates"]["candidate_provenance_eligible_for_automatic_promotion"] is False
+    assert result["candidate_provenance_assessment"]["ccdc_support_present"] is True
+    assert result["candidate_provenance_assessment"]["robust_support_present"] is False
+    assert "ccdc_support_does_not_unlock_automatic_promotion" in result["reason_codes"]
+
+
+def test_rf_seeded_candidate_with_robust_support_can_reach_conversion_likely() -> None:
+    event = {
+        **_event(),
+        "segmentation_source": "rf_terminal_persistent_forest_loss",
+        "support_sources": ["robust_persistent_support", "ccdc_break_support"],
+    }
+    result = attribute_post_change_event(
+        event=event,
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="crop", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=1.4,
+            conjunctive_likely_area_ha=1.2,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="c" * 64,
+        ),
+    )
+
+    assert result["record_type"] == "conversion_likely_event"
+    assert result["automatic_status"] == "conversion_likely"
+    assert result["gates"]["candidate_provenance_eligible_for_automatic_promotion"] is True
+    assert result["candidate_provenance_assessment"] == {
+        "policy": "rf_seeded_source_aware_v1",
+        "segmentation_source": "rf_terminal_persistent_forest_loss",
+        "support_sources": ["robust_persistent_support", "ccdc_break_support"],
+        "robust_support_present": True,
+        "ccdc_support_present": True,
+        "eligible_for_automatic_promotion": True,
+        "shared_hls_support_is_independent": False,
+    }
+
+
+def test_mixed_baseline_candidate_keeps_automatic_forest_subset_eligible() -> None:
+    event = {
+        **_event(),
+        "primary_interpretation_domain": "baseline_review",
+        "baseline_domain": "mixed",
+        "automated_forest_pixel_count": 8,
+        "baseline_review_pixel_count": 12,
+        "segmentation_source": "rf_terminal_persistent_forest_loss",
+        "support_sources": ["robust_persistent_support"],
+    }
+    result = attribute_post_change_event(
+        event=event,
+        trajectory=_trajectory((1.0, 1.0, 0.1, 0.1, 0.1)),
+        context=AttributionContext(
+            agricultural_use_evidence={
+                "PDE-1": (_evaluated_evidence(land_use="crop", decision_eligible=True),)
+            }
+        ),
+        agricultural_support=AgriculturalAttributionSupport(
+            persistent_agricultural_area_ha=1.4,
+            conjunctive_likely_area_ha=1.2,
+            persistent_support_raster_path="persistent.tif",
+            conjunctive_support_raster_path="likely.tif",
+            source_bundle_manifest_sha256="c" * 64,
+            candidate_agricultural_coverage_fraction=0.7,
+            candidate_agricultural_coverage_threshold=0.05,
+            candidate_agricultural_coverage_gate_met=True,
+        ),
+    )
+
+    assert result["gates"]["forest_at_cutoff"] is True
+    assert result["record_type"] == "conversion_likely_event"
+
+
 def test_visec_publication_gate_uses_strict_conjunctive_area_not_candidate_footprint() -> None:
     result = attribute_post_change_event(
         event=_event(),
@@ -673,6 +802,7 @@ def _write_persistence_bundle(
     evidence_set_id: str = "33333333-3333-5333-8333-333333333333",
     declared_support_fraction: float = 1.0,
     support_values: np.ndarray | None = None,
+    contract_version: str = "1.0.0",
 ) -> Path:
     bundle = root / "agriculture"
     artifacts: list[dict[str, object]] = []
@@ -730,7 +860,7 @@ def _write_persistence_bundle(
     pixel_area_ha = ((right - left) / 2) * ((top - bottom) / 2) / 10000
     event_area = pixel_area_ha * 4
     declared_persistent_area = float(np.sum(values, dtype=np.float64) * pixel_area_ha)
-    evidence = {
+    evidence: dict[str, Any] = {
         "schema_version": "1.0.0",
         "evidence_set_id": evidence_set_id,
         "created_at": "2026-08-11T15:00:00+00:00",
@@ -829,7 +959,7 @@ def _write_persistence_bundle(
             "event_artifact_path": "json/evidence/disturbance_events.geojson",
             "event_artifact_sha256": source_event_artifact_sha,
         }
-    persistence = {
+    persistence: dict[str, Any] = {
         "schema_version": "1.0.0",
         "analysis_id": "33333333-3333-5333-8333-333333333333",
         "establishment_id": "field",
@@ -839,6 +969,44 @@ def _write_persistence_bundle(
         "primary_crop_observation_fraction": 0.5,
         "events": [persistence_event],
     }
+    if contract_version == "2.0.0":
+        evidence["schema_version"] = "2.0.0"
+        evidence["observations"][0]["evidence_id"] = "AGR-OCCURRENCE-PDE-1"
+        evidence["observations"][0]["temporal_support"] = {
+            "estimated_onset_window_end": "2022-05-31",
+            "post_change_window_start": "2022-06-01",
+            "post_change_window_end": "2022-12-31",
+            "effective_observation_date": "2022-06-30",
+            "valid_period_count": 7,
+            "qualifying_period_count": 1,
+            "evidence_basis": "any_qualifying_post_event_period",
+            "evidence_satisfied": True,
+            "signal_strength": "weak",
+            "long_gap_interpolation_used": False,
+            "evidence_rule": "1_qualifying_post_event_period",
+        }
+        persistence["schema_version"] = "2.0.0"
+        persistence["persistence_rule"] = "1_qualifying_post_event_period"
+        persistence_event.update(
+            {
+                "persistence_status": "agricultural_support_detected",
+                "signal_strength": "weak",
+                "effective_observation_date": "2022-06-30",
+                "strength_raster_path": raster_path,
+                "strength_raster_sha256": raster_sha,
+                "signal_strength_areas": [
+                    {
+                        "signal_strength": "weak",
+                        "qualifying_period_minimum": 1,
+                        "qualifying_period_maximum": 1,
+                        "area_ha": declared_persistent_area * declared_support_fraction,
+                        "event_fraction": (
+                            declared_persistent_area / event_area * declared_support_fraction
+                        ),
+                    }
+                ],
+            }
+        )
     register("json/evidence/agricultural_evidence_persistent.json", json.dumps(evidence).encode())
     register("json/evidence/agricultural_persistence.json", json.dumps(persistence).encode())
     manifest = {
@@ -961,6 +1129,49 @@ def test_persistent_bundle_materializes_conjunctive_area_and_reversible_sources(
     assert (
         manifest["visualizations"][0]["sha256"] == hashlib.sha256(figure.read_bytes()).hexdigest()
     )
+
+
+def test_v2_single_occurrence_bundle_is_consumed_without_confirming_conversion(
+    tmp_path: Path,
+) -> None:
+    events = _write_source_bundle(tmp_path, input_sha="a" * 64, rf=False)
+    rf = _write_source_bundle(
+        tmp_path,
+        input_sha="a" * 64,
+        rf=True,
+        rf_forests=(1, 1, 0, 0, 0),
+    )
+    agriculture = _write_persistence_bundle(
+        tmp_path,
+        input_sha="a" * 64,
+        source_event_manifest_sha="b" * 64,
+        source_event_artifact_sha=hashlib.sha256(
+            (events / "json/evidence/disturbance_events.geojson").read_bytes()
+        ).hexdigest(),
+        contract_version="2.0.0",
+    )
+
+    output = materialize_post_change_attribution(
+        source_event_bundle=events,
+        source_rf_bundle=rf,
+        source_agricultural_bundle=agriculture,
+        agricultural_policy=load_agricultural_evidence_policy(
+            Path(__file__).resolve().parents[1] / "configs/agricultural-evidence.yml"
+        ),
+        output_root=tmp_path / "out",
+        establishment_id="field",
+        context=AttributionContext(),
+        created_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    payload = json.loads((output / "json/evidence/post_change_attribution.json").read_text("utf-8"))
+    assert payload["events"][0]["automatic_status"] == "conversion_likely"
+    assert payload["events"][0]["conversion_confirmed"] is False
+    temporal = payload["events"][0]["agricultural_use_evidence"][0]["observation"][
+        "temporal_support"
+    ]
+    assert temporal["qualifying_period_count"] == 1
+    assert temporal["signal_strength"] == "weak"
 
 
 def test_probable_event_geometry_is_materialized_conjunction_and_candidate_is_preserved(

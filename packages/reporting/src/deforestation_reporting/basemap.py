@@ -18,7 +18,7 @@ type OverpassFetcher = Callable[[str, str, str], dict[str, object]]
 
 _ATTRIBUTION = "© OpenStreetMap contributors · ODbL"
 _DEFAULT_ENDPOINT = "https://overpass-api.de/api/interpreter"
-_DEFAULT_USER_AGENT = "DeforestationEvidenceReport/0.11.0"
+_DEFAULT_USER_AGENT = "DeforestationEvidenceReport/0.14.0"
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import math
 import re
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 
-REPORT_FIGURE_COLLECTION_SCHEMA_VERSION = "2.1.0"
-REPORT_FIGURE_SELECTION_POLICY_VERSION = "2.0.0"
-REPORT_DATASET_SCHEMA_VERSION = "1.4.0"
+import numpy as np
+import rasterio
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from rasterio.features import geometry_mask
+from rasterio.warp import transform_geom
+
+REPORT_FIGURE_COLLECTION_SCHEMA_VERSION = "2.5.0"
+REPORT_FIGURE_SELECTION_POLICY_VERSION = "2.4.0"
+LEGACY_REPORT_DATASET_SCHEMA_VERSION = "1.4.0"
+PRIOR_REPORT_DATASET_SCHEMA_VERSION = "2.0.0"
+REPORT_DATASET_SCHEMA_VERSION = "2.1.0"
+REPORT_DATASET_SCHEMA_ID = "urn:deforestation-pipeline:report-dataset:2.1.0"
 _MAX_REVIEW_EVENT_SHEETS = 10
+_SEASON_ORDER = {"DJF": 0, "MAM": 1, "JJA": 2, "SON": 3}
+_SEASONAL_INDICES = re.compile(
+    r"^tiffs/seasonal/(?P<period>[0-9]{4}-(?:DJF|MAM|JJA|SON))/indices\.tif$"
+)
 _SUPERSEDED_FULL_PIPELINE_LIMITATIONS_AFTER_ATTRIBUTION = {
     "Se detectaron señales de perturbación sin atribuir su causa o uso posterior.",
     "No se ejecutó atribución de conversión ni se generó una conclusión final.",
@@ -132,6 +149,23 @@ _SELECTIONS = (
         "agricultural_monthly",
     ),
     _Selection(
+        "agricultural_collection",
+        re.compile(r"^figures/evidence/dynamic_world_annual_land_cover_[0-9]{4}_[0-9]{4}\.png$"),
+        "figures/main/300_dynamic_world_annual_land_cover.png",
+        "main_figure",
+        "serie anual descriptiva de cobertura/uso del suelo Dynamic World",
+    ),
+    _Selection(
+        "agricultural_collection",
+        re.compile(
+            r"^tiffs/evidence/agricultural/annual_land_cover/"
+            r"dynamic_world_land_cover_(?P<year>[0-9]{4})\.tif$"
+        ),
+        "annex/rasters/dynamic_world_land_cover_{year}.tif",
+        "annex_raster",
+        "GeoTIFF anual categórico Dynamic World por moda de label top-1",
+    ),
+    _Selection(
         "agricultural_persistence",
         re.compile(r"^figures/evidence/agricultural_persistence_([a-zA-Z0-9_-]+)\.png$"),
         "figures/events/{event_id}/agricultural_persistence.png",
@@ -181,6 +215,13 @@ _SELECTIONS = (
         "data/main/030_disturbance_events.json",
         "main_data",
         "inventario canónico de eventos",
+    ),
+    _static(
+        "disturbance_candidate_fusion",
+        "json/evidence/disturbance_candidate_fusion.json",
+        "data/main/030_disturbance_events.json",
+        "main_data",
+        "dominio candidato RF-first con soporte robusto y CCDC adaptado para reporte",
     ),
     _static(
         "hampel_benchmark",
@@ -251,6 +292,13 @@ _SELECTIONS = (
         "annex/spatial/disturbance_events.geojson",
         "annex_spatial",
         "geometrías completas de eventos",
+    ),
+    _static(
+        "disturbance_candidate_fusion",
+        "json/evidence/disturbance_events.geojson",
+        "annex/spatial/disturbance_events.geojson",
+        "annex_spatial",
+        "geometrías completas de candidatos RF-first",
     ),
     _static(
         "agricultural_collection",
@@ -369,6 +417,16 @@ def materialize_report_figure_collection(
             selection = _selection(bundle.name, relative_text)
             if selection is None:
                 continue
+            if (
+                "fused_disturbance" in source_documents
+                and bundle.name == "full_pipeline"
+                and relative_text
+                in {
+                    "json/evidence/disturbance_events.json",
+                    "json/evidence/disturbance_events.geojson",
+                }
+            ):
+                continue
             match = selection.pattern.fullmatch(relative_text)
             assert match is not None
             event_id: str | None = None
@@ -378,7 +436,10 @@ def materialize_report_figure_collection(
                 if event_id is None and not allow_all_event_figures:
                     continue
                 event_id = event_id or raw_event_id
-            target_relative = selection.target.format(event_id=event_id)
+            target_relative = selection.target.format(
+                event_id=event_id,
+                **{key: value for key, value in match.groupdict().items() if value is not None},
+            )
             report_path = f"report_assets/{target_relative}"
             if report_path in targets:
                 raise ValueError("report_asset_target_collision")
@@ -404,13 +465,6 @@ def materialize_report_figure_collection(
             )
 
     selected.sort(key=lambda item: str(item["report_path"]))
-    for item in selected:
-        if item["category"] not in {"main_figure", "event_figure"}:
-            continue
-        status = component_statuses[str(item["component"])]
-        count = status["selected_figure_count"]
-        assert isinstance(count, int)
-        status["selected_figure_count"] = count + 1
     report_root = staging_root / "report_assets"
     temporary_root = staging_root / ".report_assets.staging"
     if report_root.exists() or temporary_root.exists():
@@ -418,13 +472,40 @@ def materialize_report_figure_collection(
     try:
         public_files = _copy_selected(selected, temporary_root)
         public_files.extend(
+            _materialize_rf_candidate_spectral_figures(
+                staging=staging_root,
+                temporary_root=temporary_root,
+                bundles=bundles,
+                source_documents=source_documents,
+                selected_event_ids=selected_event_ids,
+                existing_report_paths={str(item["report_path"]) for item in public_files},
+            )
+        )
+        public_files.extend(
             _copy_status_receipts(
                 staging=staging_root,
                 components=components,
                 temporary_root=temporary_root,
             )
         )
+        _adapt_fused_disturbance_report_asset(
+            public_files=public_files,
+            temporary_root=temporary_root,
+            source_documents=source_documents,
+        )
+        _materialize_subthreshold_candidate_csv(
+            public_files=public_files,
+            temporary_root=temporary_root,
+            source_documents=source_documents,
+        )
         public_files.sort(key=lambda item: str(item["report_path"]))
+        for item in public_files:
+            if item["category"] not in {"main_figure", "event_figure"}:
+                continue
+            status = component_statuses[str(item["component"])]
+            count = status["selected_figure_count"]
+            assert isinstance(count, int)
+            status["selected_figure_count"] = count + 1
         figures = [
             item for item in public_files if item["category"] in {"main_figure", "event_figure"}
         ]
@@ -437,6 +518,7 @@ def materialize_report_figure_collection(
             parent_analysis_id=parent_analysis_id,
             files=public_files,
         )
+        _validate_report_dataset_payload(dataset)
         dataset_path = temporary_root / "report_dataset.json"
         _write_json(dataset_path, dataset)
         index = {
@@ -484,6 +566,418 @@ def materialize_report_figure_collection(
         "file_count": len(public_files),
         "selected_event_count": len(selected_event_ids),
     }
+
+
+def _materialize_rf_candidate_spectral_figures(
+    *,
+    staging: Path,
+    temporary_root: Path,
+    bundles: Mapping[str, _ComponentBundle],
+    source_documents: Mapping[str, Mapping[str, object]],
+    selected_event_ids: Sequence[str],
+    existing_report_paths: set[str],
+) -> list[dict[str, object]]:
+    """Deriva series espectrales por candidato RF usando sólo rasters verificados."""
+    fusion = bundles.get("disturbance_candidate_fusion")
+    full = bundles.get("full_pipeline")
+    if fusion is None or full is None or "fused_disturbance" not in source_documents:
+        return []
+    geojson_relative = "json/evidence/disturbance_events.geojson"
+    geojson_artifact = fusion.artifacts.get(geojson_relative)
+    if geojson_artifact is None:
+        return []
+    geojson_path = _verified_source(fusion.bundle, Path(geojson_relative), geojson_artifact)
+    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
+    features = {
+        str(_mapping(feature.get("properties")).get("candidate_id")): feature
+        for feature in _object_list(geojson.get("features"))
+    }
+    seasonal = sorted(
+        (
+            (match.group("period"), relative, artifact)
+            for relative, artifact in full.artifacts.items()
+            if (match := _SEASONAL_INDICES.fullmatch(relative)) is not None
+        ),
+        key=lambda item: _period_sort_key(item[0]),
+    )
+    if not seasonal:
+        return []
+    detection = _mapping(source_documents.get("detection"))
+    configured_indices = tuple(
+        item for item in _string_list(_mapping(detection.get("parameters")).get("indices")) if item
+    )
+    result: list[dict[str, object]] = []
+    for candidate_id in selected_event_ids:
+        report_path = f"report_assets/figures/events/{candidate_id}/disturbance.png"
+        if report_path in existing_report_paths:
+            continue
+        feature = features.get(candidate_id)
+        if feature is None:
+            raise ValueError("rf_candidate_spectral_feature_missing")
+        properties = _mapping(feature.get("properties"))
+        geometry = _mapping(feature.get("geometry"))
+        periods, series, index_names, ndvi_cube, mask, dependencies = _candidate_spectral_series(
+            full=full,
+            seasonal=seasonal,
+            geometry=geometry,
+            configured_indices=configured_indices,
+            expected_pixel_count=properties.get(
+                "candidate_pixel_count", properties.get("pixel_count")
+            ),
+            staging=staging,
+        )
+        content = _render_candidate_spectral_series(
+            candidate_id=candidate_id,
+            area_ha=properties.get("area_ha"),
+            first_loss_year_range=properties.get("first_loss_year_range"),
+            periods=periods,
+            index_names=index_names,
+            series=series,
+            ndvi_cube=ndvi_cube,
+            candidate_mask=mask,
+        )
+        relative = Path("figures/events") / candidate_id / "disturbance.png"
+        target = temporary_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        result.append(
+            {
+                "category": "event_figure",
+                "selection_reason": (
+                    "comparación NDVI pre/post y serie espectral dentro del candidato RF-first"
+                ),
+                "component": "disturbance_candidate_fusion",
+                "event_id": candidate_id,
+                "source_bundle": fusion.bundle.relative_to(staging).as_posix(),
+                "source_manifest": fusion.manifest_path.relative_to(staging).as_posix(),
+                "source_manifest_sha256": fusion.manifest_sha256,
+                "source_path": geojson_path.relative_to(staging).as_posix(),
+                "source_sha256": digest,
+                "size_bytes": len(content),
+                "report_path": f"report_assets/{relative.as_posix()}",
+                "report_sha256": digest,
+                "derivation_sources": [
+                    {
+                        "path": geojson_path.relative_to(staging).as_posix(),
+                        "sha256": str(geojson_artifact["sha256"]),
+                    },
+                    *dependencies,
+                ],
+            }
+        )
+    return result
+
+
+def _candidate_spectral_series(
+    *,
+    full: _ComponentBundle,
+    seasonal: Sequence[tuple[str, str, Mapping[str, object]]],
+    geometry: Mapping[str, object],
+    configured_indices: tuple[str, ...],
+    expected_pixel_count: object,
+    staging: Path,
+) -> tuple[
+    tuple[str, ...],
+    np.ndarray[Any, np.dtype[np.float64]],
+    tuple[str, ...],
+    np.ndarray[Any, np.dtype[np.float64]],
+    np.ndarray[Any, np.dtype[np.bool_]],
+    list[dict[str, str]],
+]:
+    rows: list[list[float]] = []
+    periods: list[str] = []
+    dependencies: list[dict[str, str]] = []
+    mask: np.ndarray[Any, np.dtype[np.bool_]] | None = None
+    index_names: tuple[str, ...] | None = None
+    reference_grid: tuple[object, ...] | None = None
+    ndvi_layers: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+    for period, relative, artifact in seasonal:
+        path = _verified_source(full.bundle, Path(relative), artifact)
+        with rasterio.open(path) as dataset:
+            grid = (dataset.crs, dataset.transform, dataset.width, dataset.height)
+            if reference_grid is None:
+                reference_grid = grid
+                projected = transform_geom("EPSG:4326", dataset.crs, dict(geometry), precision=8)
+                mask = geometry_mask(
+                    [projected],
+                    out_shape=(dataset.height, dataset.width),
+                    transform=dataset.transform,
+                    invert=True,
+                    all_touched=False,
+                )
+                if not mask.any():
+                    raise ValueError("rf_candidate_spectral_mask_empty")
+                if (
+                    isinstance(expected_pixel_count, int)
+                    and int(mask.sum()) != expected_pixel_count
+                ):
+                    raise ValueError("rf_candidate_spectral_pixel_count_mismatch")
+                available = tuple(name or "" for name in dataset.descriptions)
+                index_names = tuple(name for name in configured_indices if name in available)
+                if not index_names:
+                    index_names = tuple(name for name in available if name)
+                if not index_names:
+                    raise ValueError("rf_candidate_spectral_indices_missing")
+            elif grid != reference_grid:
+                raise ValueError("rf_candidate_spectral_grid_mismatch")
+            assert mask is not None and index_names is not None
+            available_positions = {
+                name or "": position + 1 for position, name in enumerate(dataset.descriptions)
+            }
+            values = dataset.read([available_positions[name] for name in index_names]).astype(
+                np.float64
+            )
+            if dataset.nodata is not None:
+                values[values == float(dataset.nodata)] = np.nan
+            rows.append(
+                [
+                    float(np.nanmean(band[mask])) if np.isfinite(band[mask]).any() else math.nan
+                    for band in values
+                ]
+            )
+            if "NDVI" in index_names:
+                ndvi_layers.append(values[index_names.index("NDVI")].copy())
+        periods.append(period)
+        dependencies.append(
+            {"path": path.relative_to(staging).as_posix(), "sha256": str(artifact["sha256"])}
+        )
+    assert index_names is not None and mask is not None
+    if "NDVI" not in index_names:
+        raise ValueError("rf_candidate_spectral_ndvi_missing")
+    return (
+        tuple(periods),
+        np.asarray(rows, dtype=np.float64),
+        index_names,
+        np.stack(ndvi_layers),
+        mask,
+        dependencies,
+    )
+
+
+def _render_candidate_spectral_series(
+    *,
+    candidate_id: str,
+    area_ha: object,
+    first_loss_year_range: object,
+    periods: tuple[str, ...],
+    index_names: tuple[str, ...],
+    series: np.ndarray[Any, np.dtype[np.float64]],
+    ndvi_cube: np.ndarray[Any, np.dtype[np.float64]],
+    candidate_mask: np.ndarray[Any, np.dtype[np.bool_]],
+) -> bytes:
+    figure = Figure(figsize=(12, 8), constrained_layout=True)
+    FigureCanvasAgg(figure)
+    pre_axis, post_axis, delta_axis, series_axis = figure.subplots(2, 2).flat
+    x = np.arange(len(periods))
+    years = np.asarray([int(period[:4]) for period in periods])
+    loss_range = (
+        tuple(int(value) for value in first_loss_year_range)
+        if isinstance(first_loss_year_range, list | tuple) and len(first_loss_year_range) == 2
+        else ()
+    )
+    comparison = _select_rf_ndvi_comparison_indices(
+        periods=periods,
+        index_names=index_names,
+        series=series,
+        first_loss_year_range=first_loss_year_range,
+    )
+    row_indexes, column_indexes = np.nonzero(candidate_mask)
+    row_min = max(0, int(np.min(row_indexes)) - 2)
+    row_max = min(candidate_mask.shape[0], int(np.max(row_indexes)) + 3)
+    column_min = max(0, int(np.min(column_indexes)) - 2)
+    column_max = min(candidate_mask.shape[1], int(np.max(column_indexes)) + 3)
+    crop = np.s_[row_min:row_max, column_min:column_max]
+    if comparison is None:
+        for axis, title in (
+            (pre_axis, "NDVI pre-corte"),
+            (post_axis, "NDVI post-corte"),
+            (delta_axis, "Delta NDVI (post - pre)"),
+        ):
+            axis.text(0.5, 0.5, "Comparación no disponible", ha="center", va="center")
+            axis.set_title(title)
+    else:
+        pre_index, post_index = comparison
+        pre_values = ndvi_cube[pre_index]
+        post_values = ndvi_cube[post_index]
+        pre_axis.imshow(pre_values[crop], vmin=-1, vmax=1, cmap="RdYlGn")
+        post_axis.imshow(post_values[crop], vmin=-1, vmax=1, cmap="RdYlGn")
+        delta_axis.imshow((post_values - pre_values)[crop], vmin=-0.6, vmax=0.6, cmap="RdBu")
+        for axis in (pre_axis, post_axis, delta_axis):
+            axis.contour(candidate_mask[crop], levels=(0.5,), colors=("black",), linewidths=1)
+        pre_axis.set_title(f"NDVI pre-corte: {periods[pre_index]}")
+        post_axis.set_title(f"NDVI post-corte: {periods[post_index]}")
+        delta_axis.set_title("Delta NDVI (post - pre)")
+    for axis in (pre_axis, post_axis, delta_axis):
+        axis.set_xticks([])
+        axis.set_yticks([])
+    for position, index_name in enumerate(index_names):
+        series_axis.plot(
+            x,
+            series[:, position],
+            marker="o",
+            markersize=2.5,
+            linewidth=1,
+            label=index_name,
+        )
+    cutoff = np.flatnonzero(years == 2020)
+    if cutoff.size:
+        series_axis.axvline(float(cutoff[-1]) + 0.5, color="black", linestyle="--", linewidth=1)
+    if loss_range:
+        loss_positions = np.flatnonzero((years >= loss_range[0]) & (years <= loss_range[1]))
+        if loss_positions.size:
+            series_axis.axvspan(
+                float(loss_positions[0]) - 0.4,
+                float(loss_positions[-1]) + 0.4,
+                color="#cc0000",
+                alpha=0.12,
+            )
+    tick_step = max(1, len(periods) // 8)
+    tick_positions = x[::tick_step]
+    series_axis.set_xticks(tick_positions, [periods[item] for item in tick_positions])
+    series_axis.tick_params(axis="x", rotation=45, labelsize=7)
+    series_axis.set_ylim(-1.0, 1.0)
+    series_axis.set_title("Serie media del candidato")
+    series_axis.set_ylabel("Índice espectral")
+    series_axis.grid(alpha=0.25)
+    series_axis.legend(ncol=2, fontsize=7)
+    area = f"{float(area_ha):.2f} ha" if isinstance(area_ha, int | float) else "área no disponible"
+    figure.suptitle(
+        f"{candidate_id} · {area} · serie media dentro del candidato RF-first\n"
+        "Línea discontinua: corte EUDR · franja roja: rango anual de primera pérdida RF",
+        fontsize=12,
+    )
+    buffer = BytesIO()
+    figure.savefig(buffer, format="png", dpi=140, metadata={"Software": "matplotlib"})
+    return buffer.getvalue()
+
+
+def _select_rf_ndvi_comparison_indices(
+    *,
+    periods: tuple[str, ...],
+    index_names: tuple[str, ...],
+    series: np.ndarray[Any, np.dtype[np.float64]],
+    first_loss_year_range: object,
+) -> tuple[int, int] | None:
+    """Elige el par estacional pre/post con mayor caída media de NDVI."""
+    if "NDVI" not in index_names:
+        return None
+    loss_range = (
+        tuple(int(value) for value in first_loss_year_range)
+        if isinstance(first_loss_year_range, list | tuple) and len(first_loss_year_range) == 2
+        else ()
+    )
+    ndvi_position = index_names.index("NDVI")
+    candidates: list[tuple[float, int, int]] = []
+    for post_index, post_period in enumerate(periods):
+        post_year, post_season = post_period.split("-", maxsplit=1)
+        year = int(post_year)
+        if year <= 2020 or (loss_range and not loss_range[0] <= year <= loss_range[1]):
+            continue
+        pre_options = [
+            index
+            for index, period in enumerate(periods)
+            if int(period[:4]) <= 2020 and period.split("-", maxsplit=1)[1] == post_season
+        ]
+        if not pre_options:
+            continue
+        pre_index = pre_options[-1]
+        pre_value = series[pre_index, ndvi_position]
+        post_value = series[post_index, ndvi_position]
+        if np.isfinite(pre_value) and np.isfinite(post_value):
+            candidates.append((float(post_value - pre_value), pre_index, post_index))
+    if not candidates:
+        return None
+    _, pre_index, post_index = min(candidates, key=lambda item: (item[0], item[2]))
+    return pre_index, post_index
+
+
+def _period_sort_key(period: str) -> tuple[int, int]:
+    year, season = period.split("-", maxsplit=1)
+    return int(year), _SEASON_ORDER[season]
+
+
+def _materialize_subthreshold_candidate_csv(
+    *,
+    public_files: list[dict[str, object]],
+    temporary_root: Path,
+    source_documents: Mapping[str, Mapping[str, object]],
+) -> None:
+    attribution = _attribution_records(source_documents.get("attribution", {}))
+    fused = {
+        str(item.get("candidate_id")): item
+        for item in _object_list(source_documents.get("fused_disturbance", {}).get("candidates"))
+    }
+    persistence = {
+        str(item.get("candidate_id", item.get("event_id"))): item
+        for item in _object_list(source_documents.get("persistence", {}).get("events"))
+    }
+    rows: list[dict[str, object]] = []
+    for record in attribution:
+        candidate_id = str(record.get("candidate_id", record.get("event_id", "")))
+        area_value = record.get("candidate_area_ha", record.get("area_ha"))
+        if not candidate_id or not isinstance(area_value, int | float) or float(area_value) > 0.5:
+            continue
+        fused_record = fused.get(candidate_id, {})
+        persistent = persistence.get(candidate_id, {})
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "area_ha": f"{float(area_value):.8f}",
+                "threshold_ha": "0.50000000",
+                "estimated_onset_period_id": record.get(
+                    "estimated_onset_period_id",
+                    fused_record.get("estimated_onset_period_id", ""),
+                ),
+                "automatic_status": record.get("automatic_status", ""),
+                "interpretation_status": record.get("interpretation_status", ""),
+                "support_sources": "|".join(_string_list(fused_record.get("support_sources"))),
+                "robust_support_fraction": fused_record.get("robust_support_fraction", ""),
+                "ccdc_support_fraction": fused_record.get("ccdc_support_fraction", ""),
+                "post_change_use": record.get("post_change_use", ""),
+                "agricultural_signal_strength": persistent.get("signal_strength", ""),
+                "qualifying_period_count": persistent.get("qualifying_period_count", ""),
+                "candidate_agricultural_coverage_fraction": persistent.get(
+                    "candidate_agricultural_coverage_fraction", ""
+                ),
+                "candidate_agricultural_coverage_threshold": persistent.get(
+                    "candidate_agricultural_coverage_threshold", ""
+                ),
+                "candidate_agricultural_coverage_gate_met": persistent.get(
+                    "candidate_agricultural_coverage_gate_met", ""
+                ),
+                "human_review_required": record.get("human_review_required", True),
+            }
+        )
+    if not rows:
+        return
+    rows.sort(key=lambda row: (-float(str(row["area_ha"])), str(row["candidate_id"])))
+    stream = StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+    writer.writeheader()
+    writer.writerows(rows)
+    content = stream.getvalue().encode("utf-8")
+    relative = Path("annex/tables/subthreshold_candidates.csv")
+    target = temporary_root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    public_files.append(
+        {
+            "category": "annex_table",
+            "selection_reason": "detalle íntegro de candidatos en o bajo el umbral operativo",
+            "component": "post_change_attribution",
+            "event_id": None,
+            "source_bundle": None,
+            "source_manifest": None,
+            "source_manifest_sha256": None,
+            "source_path": None,
+            "source_sha256": digest,
+            "size_bytes": len(content),
+            "report_path": f"report_assets/{relative.as_posix()}",
+            "report_sha256": digest,
+        }
+    )
 
 
 def _load_components(
@@ -548,6 +1042,10 @@ def _load_source_documents(
         "baseline": ("full_pipeline", "json/evidence/forest_baseline_2020.json"),
         "detection": ("full_pipeline", "json/evidence/disturbance_detection.json"),
         "disturbance": ("full_pipeline", "json/evidence/disturbance_events.json"),
+        "fused_disturbance": (
+            "disturbance_candidate_fusion",
+            "json/evidence/disturbance_candidate_fusion.json",
+        ),
         "rf": ("rf_annual_deltas", "json/evidence/rf_forest_deltas_2020_2024.json"),
         "agriculture_summary": ("agricultural_collection", "json/run/summary.json"),
         "agriculture": ("agricultural_collection", "json/evidence/agricultural_evidence.json"),
@@ -568,7 +1066,7 @@ def _load_source_documents(
 
 
 def _has_event_selection_sources(documents: Mapping[str, Mapping[str, object]]) -> bool:
-    return "attribution" in documents or "disturbance" in documents
+    return any(key in documents for key in ("attribution", "fused_disturbance", "disturbance"))
 
 
 def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str]:
@@ -586,7 +1084,7 @@ def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str
         and (
             event.get("candidate_footprint_above_visec_area_reference") is True
             or (
-                attribution_document.get("schema_version") != "5.0.0"
+                attribution_document.get("schema_version") not in {"5.0.0", "6.0.0", "7.0.0"}
                 and event.get("area_threshold_met") is True
             )
         )
@@ -595,7 +1093,8 @@ def _select_event_ids(documents: Mapping[str, Mapping[str, object]]) -> list[str
     review.sort(key=_event_sort_key)
     selected = likely + review[: max(0, _MAX_REVIEW_EVENT_SHEETS - len(likely))]
     if not selected and not attribution_document:
-        disturbance_events = _object_list(documents.get("disturbance", {}).get("events"))
+        fused = _object_list(documents.get("fused_disturbance", {}).get("candidates"))
+        disturbance_events = fused or _object_list(documents.get("disturbance", {}).get("events"))
         disturbance_events.sort(key=_event_sort_key)
         selected = disturbance_events[:5]
     result: list[str] = []
@@ -683,6 +1182,40 @@ def _copy_status_receipts(
     return copied
 
 
+def _adapt_fused_disturbance_report_asset(
+    *,
+    public_files: list[dict[str, object]],
+    temporary_root: Path,
+    source_documents: Mapping[str, Mapping[str, object]],
+) -> None:
+    fused = source_documents.get("fused_disturbance")
+    if fused is None:
+        return
+    candidates = [_adapt_fused_candidate(item) for item in _object_list(fused.get("candidates"))]
+    payload = {
+        "schema_version": "fusion-report-adapter-v1.0.0",
+        "source_schema_version": fused.get("schema_version"),
+        "event_count": len(candidates),
+        "total_event_area_ha": round(
+            sum(_candidate_area(item.get("area_ha")) for item in candidates),
+            8,
+        ),
+        "events": candidates,
+        "adapter_semantics": (
+            "fused_candidates_for_review;missing_exact_onset_remains_explicitly_unavailable"
+        ),
+    }
+    report_path = "report_assets/data/main/030_disturbance_events.json"
+    matching = [item for item in public_files if item.get("report_path") == report_path]
+    if len(matching) != 1 or matching[0].get("component") != "disturbance_candidate_fusion":
+        raise ValueError("report_fused_disturbance_asset_missing_or_duplicated")
+    target = temporary_root / "data/main/030_disturbance_events.json"
+    _write_json(target, payload)
+    matching[0]["size_bytes"] = target.stat().st_size
+    matching[0]["report_sha256"] = _sha256(target)
+    matching[0]["selection_reason"] = "adaptador explícito del dominio candidato RF-first"
+
+
 def _build_report_dataset(
     *,
     source_documents: Mapping[str, Mapping[str, object]],
@@ -696,12 +1229,26 @@ def _build_report_dataset(
     full = source_documents.get("full_summary", {})
     baseline = source_documents.get("baseline", {})
     disturbance = source_documents.get("disturbance", {})
+    fused_disturbance = source_documents.get("fused_disturbance", {})
     detection = source_documents.get("detection", {})
     attribution = source_documents.get("attribution", {})
     baseline_metrics = _nested_mapping(baseline, "screening", "metrics")
     detection_screening = _mapping(detection.get("screening"))
     area = _mapping(full.get("area"))
     selected_events = [_event_record(event_id, source_documents) for event_id in selected_event_ids]
+    fused_candidates = _object_list(fused_disturbance.get("candidates"))
+    fused_candidate_area_ha = (
+        round(
+            sum(_candidate_area(candidate.get("area_ha")) for candidate in fused_candidates),
+            8,
+        )
+        if fused_disturbance
+        else None
+    )
+    candidate_count = len(fused_candidates) if fused_disturbance else disturbance.get("event_count")
+    candidate_area_ha = (
+        fused_candidate_area_ha if fused_disturbance else disturbance.get("total_event_area_ha")
+    )
     source_paths = {
         str(item["category"]): sorted(
             str(candidate["report_path"])
@@ -746,17 +1293,25 @@ def _build_report_dataset(
         "headline_metrics": {
             "establishment_area_ha": area.get("total_area_ha"),
             "forest_area_2020_ha": baseline_metrics.get("automated_forest_area_ha"),
-            "spectral_candidate_area_ha": disturbance.get("total_event_area_ha"),
-            "spectral_candidate_count": disturbance.get("event_count"),
-            "candidate_episode_area_ha": disturbance.get(
-                "above_visec_area_reference_candidate_area_ha",
-                disturbance.get(
-                    "operational_event_area_ha", disturbance.get("total_event_area_ha")
-                ),
+            "spectral_candidate_area_ha": candidate_area_ha,
+            "spectral_candidate_count": candidate_count,
+            "candidate_episode_area_ha": (
+                fused_candidate_area_ha
+                if fused_disturbance
+                else disturbance.get(
+                    "above_visec_area_reference_candidate_area_ha",
+                    disturbance.get(
+                        "operational_event_area_ha", disturbance.get("total_event_area_ha")
+                    ),
+                )
             ),
-            "candidate_episode_count": disturbance.get(
-                "above_visec_area_reference_candidate_count",
-                disturbance.get("operational_event_count", disturbance.get("event_count")),
+            "candidate_episode_count": (
+                len(fused_candidates)
+                if fused_disturbance
+                else disturbance.get(
+                    "above_visec_area_reference_candidate_count",
+                    disturbance.get("operational_event_count", disturbance.get("event_count")),
+                )
             ),
             "likely_conversion_area_ha": attribution.get("likely_conversion_area_ha"),
             "conversion_likely_count": attribution.get("conversion_likely_count"),
@@ -820,13 +1375,97 @@ def _component_unavailability_limitations(
 def _event_record(
     event_id: str, documents: Mapping[str, Mapping[str, object]]
 ) -> dict[str, object]:
+    fused = _find_fused_candidate(documents.get("fused_disturbance"), event_id)
+    disturbance = (
+        _adapt_fused_candidate(fused)
+        if fused is not None
+        else _find_event(documents.get("disturbance"), event_id)
+    )
     return {
         "candidate_id": event_id,
-        "disturbance": _find_event(documents.get("disturbance"), event_id),
+        "disturbance_source": (
+            "rf_first_candidate_domain" if fused is not None else "historical_robust"
+        ),
+        "disturbance": disturbance,
+        "fusion_candidate": fused,
         "agricultural_collection": _find_event(documents.get("agriculture"), event_id),
+        "agricultural_persistence_schema_version": documents.get("persistence", {}).get(
+            "schema_version"
+        ),
         "agricultural_persistence": _find_event(documents.get("persistence"), event_id),
         "attribution": _find_event(documents.get("attribution"), event_id),
     }
+
+
+def _find_fused_candidate(
+    document: Mapping[str, object] | None, event_id: str
+) -> Mapping[str, object] | None:
+    if document is None:
+        return None
+    for candidate in _object_list(document.get("candidates")):
+        candidate_id = candidate.get("candidate_id")
+        if isinstance(candidate_id, str) and candidate_id.casefold() == event_id.casefold():
+            return candidate
+    return None
+
+
+def _adapt_fused_candidate(candidate: Mapping[str, object]) -> dict[str, object]:
+    candidate_id = candidate.get("candidate_id")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("report_fused_candidate_id_invalid")
+    onset_range = candidate.get("robust_onset_period_range")
+    rf_year_range = candidate.get(
+        "first_loss_year_range", candidate.get("rf_persistent_loss_year_range")
+    )
+    onset_period_id = (
+        f"robust-period-index-{onset_range[-1]}"
+        if isinstance(onset_range, list) and len(onset_range) == 2
+        else (
+            f"RF-{rf_year_range[0]}-{rf_year_range[-1]}-onset-undetermined"
+            if isinstance(rf_year_range, list) and len(rf_year_range) == 2
+            else "onset-undetermined"
+        )
+    )
+    area = _candidate_area(candidate.get("area_ha"))
+    return {
+        "event_id": candidate_id,
+        "candidate_id": candidate_id,
+        "record_type": "persistent_disturbance_candidate",
+        "interpretation_level": "candidate_episode",
+        "automatic_status": "review_required",
+        "area_ha": area,
+        "area_threshold_ha": 0.5,
+        "area_threshold_met": area > 0.5,
+        "candidate_footprint_above_visec_area_reference": area > 0.5,
+        "pixel_count": candidate.get("pixel_count"),
+        "estimated_onset_period_id": onset_period_id,
+        "estimated_onset_window_start": None,
+        "estimated_onset_window_end": None,
+        "onset_available": False,
+        "sources": _candidate_sources(candidate),
+        "segmentation_source": candidate.get("segmentation_source"),
+        "support_sources": candidate.get("support_sources"),
+        "resolution": candidate.get("resolution"),
+        "quality_flags": ["fused_candidate_report_adapter", "exact_onset_unavailable"],
+    }
+
+
+def _candidate_sources(candidate: Mapping[str, object]) -> object:
+    legacy = candidate.get("sources")
+    if legacy is not None:
+        return legacy
+    segmentation = candidate.get("segmentation_source")
+    support = candidate.get("support_sources")
+    values = [segmentation] if isinstance(segmentation, str) else []
+    if isinstance(support, list):
+        values.extend(item for item in support if isinstance(item, str))
+    return values
+
+
+def _candidate_area(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("report_fused_candidate_area_invalid")
+    return float(value)
 
 
 def _find_event(
@@ -863,6 +1502,161 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def load_report_dataset_document(path: Path) -> dict[str, object]:
+    """Lee versiones históricas o la actual sin actualizarlas implícitamente."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("report_dataset_root_must_be_mapping")
+    version = payload.get("schema_version")
+    if version not in {
+        LEGACY_REPORT_DATASET_SCHEMA_VERSION,
+        PRIOR_REPORT_DATASET_SCHEMA_VERSION,
+        REPORT_DATASET_SCHEMA_VERSION,
+    }:
+        raise ValueError("report_dataset_schema_version_unsupported")
+    if version == REPORT_DATASET_SCHEMA_VERSION:
+        _validate_report_dataset_payload(payload)
+    return payload
+
+
+def _validate_report_dataset_payload(payload: Mapping[str, object]) -> None:
+    if payload.get("schema_version") != REPORT_DATASET_SCHEMA_VERSION:
+        raise ValueError("report_dataset_current_schema_version_required")
+    required = report_dataset_json_schema()["required"]
+    if not all(key in payload for key in required):
+        raise ValueError("report_dataset_required_field_missing")
+    selected = payload.get("selected_disturbances")
+    if not isinstance(selected, list):
+        raise ValueError("report_dataset_selected_disturbances_invalid")
+    for raw in selected:
+        if not isinstance(raw, dict):
+            raise ValueError("report_dataset_selected_disturbance_invalid")
+        required_record = report_dataset_json_schema()["$defs"]["selectedDisturbance"]["required"]
+        if not all(key in raw for key in required_record):
+            raise ValueError("report_dataset_selected_disturbance_field_missing")
+        if raw.get("agricultural_persistence_schema_version") in {"2.0.0", "2.1.0"}:
+            persistence = raw.get("agricultural_persistence")
+            if persistence is not None:
+                if not isinstance(persistence, dict) or not all(
+                    key in persistence
+                    for key in (
+                        "signal_strength",
+                        "effective_observation_date",
+                        "qualifying_period_count",
+                        "signal_strength_areas",
+                    )
+                ):
+                    raise ValueError("report_dataset_agricultural_occurrence_fields_missing")
+
+
+def report_dataset_json_schema() -> dict[str, Any]:
+    """Contrato editorial v2; los subdocumentos científicos conservan su versión propia."""
+    nullable_object = {"type": ["object", "null"]}
+    selected_properties = {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "disturbance_source": {"enum": ["historical_robust", "rf_first_candidate_domain"]},
+        "disturbance": nullable_object,
+        "fusion_candidate": nullable_object,
+        "agricultural_collection": nullable_object,
+        "agricultural_persistence_schema_version": {"type": ["string", "null"]},
+        "agricultural_persistence": nullable_object,
+        "attribution": nullable_object,
+    }
+    occurrence_fields = {
+        "signal_strength": {"enum": ["weak", "moderate", "strong", None]},
+        "effective_observation_date": {
+            "type": ["string", "null"],
+            "format": "date",
+        },
+        "qualifying_period_count": {"type": "integer", "minimum": 0},
+        "signal_strength_areas": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/agriculturalStrengthArea"},
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": REPORT_DATASET_SCHEMA_ID,
+        "title": "Report dataset",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version",
+            "recorded_at",
+            "analysis",
+            "headline_metrics",
+            "selected_disturbances",
+            "disturbance_selection",
+            "component_statuses",
+            "source_paths_by_category",
+            "limitations",
+        ],
+        "properties": {
+            "schema_version": {"const": REPORT_DATASET_SCHEMA_VERSION},
+            "recorded_at": {"type": "string", "format": "date-time"},
+            "analysis": {"type": "object"},
+            "headline_metrics": {"type": "object"},
+            "selected_disturbances": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/selectedDisturbance"},
+            },
+            "disturbance_selection": {"type": "object"},
+            "component_statuses": {"type": "object"},
+            "source_paths_by_category": {"type": "object"},
+            "limitations": {"type": "array", "items": {"type": "string"}},
+        },
+        "$defs": {
+            "selectedDisturbance": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(selected_properties),
+                "properties": selected_properties,
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {
+                                "agricultural_persistence_schema_version": {
+                                    "enum": ["2.0.0", "2.1.0"]
+                                }
+                            },
+                            "required": ["agricultural_persistence_schema_version"],
+                        },
+                        "then": {
+                            "properties": {
+                                "agricultural_persistence": {
+                                    "anyOf": [
+                                        {"type": "null"},
+                                        {"$ref": "#/$defs/agriculturalOccurrence"},
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                ],
+            },
+            "agriculturalOccurrence": {
+                "type": "object",
+                "required": list(occurrence_fields),
+                "properties": occurrence_fields,
+            },
+            "agriculturalStrengthArea": {
+                "type": "object",
+                "required": ["signal_strength", "area_ha", "event_fraction"],
+                "properties": {
+                    "signal_strength": {"enum": ["weak", "moderate", "strong"]},
+                    "area_ha": {"type": "number", "minimum": 0},
+                    "event_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            },
+        },
+        "x-schema-version": REPORT_DATASET_SCHEMA_VERSION,
+        "x-readable-historical-versions": [
+            LEGACY_REPORT_DATASET_SCHEMA_VERSION,
+            PRIOR_REPORT_DATASET_SCHEMA_VERSION,
+        ],
+    }
 
 
 def _mapping(value: object) -> Mapping[str, object]:

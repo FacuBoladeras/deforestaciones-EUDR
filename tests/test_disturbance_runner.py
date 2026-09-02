@@ -144,7 +144,7 @@ def _successful_ccdc_scalar(grid: RasterGridSpec) -> bytes:
     (False, True),
     ids=("ccdc-unavailable", "ccdc-scalar-success"),
 )
-def test_range_pipeline_uses_internal_2017_support_and_publishes_five_outputs(
+def test_range_pipeline_uses_internal_2017_support_and_publishes_six_outputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ccdc_scalar_succeeds: bool,
@@ -369,7 +369,7 @@ def test_range_pipeline_uses_internal_2017_support_and_publishes_five_outputs(
     disturbance_artifacts = tuple(
         artifact for artifact in manifest["artifacts"] if artifact["path"] in set(paths.values())
     )
-    assert len(disturbance_artifacts) == 5
+    assert len(disturbance_artifacts) == 6
     assert {artifact["path"] for artifact in disturbance_artifacts} == set(paths.values())
     for artifact in disturbance_artifacts:
         assert (
