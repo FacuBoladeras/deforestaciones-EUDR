@@ -296,7 +296,6 @@ def agricultural_support_map(
             drawing.add(_ring_path(ring, transform, fill=_RED, stroke=_TEXT, stroke_width=0.8))
     for ring in event.agricultural_geometry:
         drawing.add(_ring_path(ring, transform, fill=_AMBER, stroke=_RED, stroke_width=0.6))
-    _event_locator_inset(drawing, event, establishment_geometry, width=width, height=height)
     drawing.add(Rect(10, 10, 10, 10, fillColor=_LIGHT_GRAY, strokeColor=_TEXT, strokeWidth=0.6))
     drawing.add(
         String(25, 12, "Perturbación candidata", fontName=_FONT, fontSize=7, fillColor=_TEXT)
@@ -554,68 +553,6 @@ def _faded_color(hex_color: str, opacity: float) -> colors.Color:
         1 - (1 - color.green) * opacity,
         1 - (1 - color.blue) * opacity,
     )
-
-
-def _event_locator_inset(
-    drawing: Drawing,
-    event: EventSummary,
-    establishment_geometry: GeometryRings,
-    *,
-    width: float,
-    height: float,
-) -> None:
-    if not establishment_geometry:
-        return
-    inset_width, inset_height = 118.0, 88.0
-    x, y = 55.0, height - inset_height - 12.0
-    drawing.add(
-        Rect(
-            x,
-            y,
-            inset_width,
-            inset_height,
-            fillColor=colors.white,
-            strokeColor=_BLUE,
-            strokeWidth=0.7,
-        )
-    )
-    drawing.add(
-        String(
-            x + 6,
-            y + inset_height - 11,
-            "Ubicación en el establecimiento",
-            fontName=_FONT_BOLD,
-            fontSize=5.8,
-            fillColor=_BLUE,
-        )
-    )
-    inset_box = (x + 8, y + 7, inset_width - 16, inset_height - 23)
-    bounds = _fit_bounds(
-        _bounds(establishment_geometry),
-        aspect=inset_box[2] / inset_box[3],
-        padding_fraction=0.08,
-    )
-    transform = _transform_bounds(bounds, map_box=inset_box)
-    for ring in establishment_geometry:
-        drawing.add(
-            _ring_path(
-                ring,
-                transform,
-                fill=colors.HexColor("#F8FAFC"),
-                stroke=_BLUE,
-                stroke_width=0.7,
-            )
-        )
-    for ring in event.event_geometry:
-        drawing.add(
-            _ring_path(
-                ring,
-                transform,
-                fill=_PALE_AMBER,
-                stroke=_RED,
-                stroke_width=0.8,
-            )
-        )
 
 
 def _north_arrow(drawing: Drawing, *, x: float, y: float) -> None:

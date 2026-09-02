@@ -674,10 +674,9 @@ def _priority_event_page(
     styles: dict[str, ParagraphStyle],
     osm_basemap_provider: OSMBasemapProvider,
 ) -> list[Any]:
-    # El contenido completo (incluidas las filas de occurrence v2) debe caber
-    # en el frame landscape de una sola página.  Estas dimensiones conservan
-    # legibilidad y dejan margen para IDs y estados largos.
-    map_width, map_height = 12.5 * cm, 4.7 * cm
+    # La ficha cliente reserva más superficie a mapas y gráficos; el detalle
+    # exhaustivo de gates permanece en el anexo técnico.
+    map_width, map_height = 12.5 * cm, 5.6 * cm
     geometry = event.candidate_geometry or event.event_geometry
     basemap = (
         osm_basemap_provider.get(
@@ -703,7 +702,7 @@ def _priority_event_page(
         evidence_flowable = _scaled_report_image(
             client_figure,
             max_width=12.5 * cm,
-            max_height=4.7 * cm,
+            max_height=5.6 * cm,
         )
     evidence_table = Table(
         [
@@ -720,7 +719,7 @@ def _priority_event_page(
         [
             [
                 _priority_summary_table(event, styles),
-                forest_trajectory_chart(event, width=12.5 * cm, height=2.8 * cm),
+                forest_trajectory_chart(event, width=12.5 * cm, height=3.8 * cm),
             ]
         ],
         colWidths=[12.9 * cm, 12.9 * cm],
@@ -744,34 +743,24 @@ def _priority_event_page(
         lower_table,
         Paragraph(
             f"Interpretación técnica: {_event_interpretation(event)}",
-            styles["landscape_caption"],
+            styles["fine_left"],
         ),
     ]
 
 
 def _priority_summary_table(event: EventSummary, styles: dict[str, ParagraphStyle]) -> Table:
-    if not event.gates:
-        alternative = "No evaluada"
-    else:
-        alternative = (
-            "No respaldada"
-            if any(
-                gate.key == "strong_alternative_explanation_absent" and gate.passed
-                for gate in event.gates
-            )
-            else "Presente o pendiente de evaluación"
-        )
     rows = [
         ("ID técnico", event.candidate_id),
         ("Estado", _event_status_label(event)),
         ("Área y fecha", f"{_ha(event.area_ha)} · {_event_onset(event)}"),
         ("Uso posterior", _event_post_use_label(event)),
         ("Área compatible", _ha(event.likely_conversion_area_ha)),
-        ("Explicación alternativa", alternative),
-        ("Estado de revisión", _review_label(event)),
-        ("Condiciones", _compact_gate_result(event)),
     ]
-    rows[4:4] = _agricultural_occurrence_rows(event)
+    rows[4:4] = [
+        (label, value)
+        for label, value in _agricultural_occurrence_rows(event)
+        if label not in {"Cobertura agrícola máxima", "Umbral de cobertura del candidato"}
+    ]
     return _two_column_table(rows, styles, widths=(4.2 * cm, 8.0 * cm), compact=True)
 
 
@@ -2086,7 +2075,7 @@ def _page_template(
 ) -> PageTemplate:
     width, height = pagesize
     horizontal_margin = 1.4 * cm if width > height else 1.7 * cm
-    vertical_margin = 1.4 * cm if width > height else 1.8 * cm
+    vertical_margin = 1.0 * cm if width > height else 1.8 * cm
     frame = Frame(
         horizontal_margin,
         vertical_margin,

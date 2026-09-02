@@ -27,6 +27,7 @@ from deforestation_reporting.basemap import (
     OSMFeature,
     OverpassOSMProvider,
 )
+from deforestation_reporting.graphics import _event_color, agricultural_support_map
 from deforestation_reporting.renderer import _secondary_event_annex, _styles
 from deforestation_reporting.source import (
     _attribution_interpretation_status,
@@ -885,10 +886,8 @@ def test_v2_1_reports_candidate_coverage_gate(tmp_path: Path) -> None:
     text = " ".join(
         " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
     )
-    assert "Cobertura agrícola máxima" in text
-    assert "7,10 %" in text
-    assert "Umbral de cobertura del candidato" in text
-    assert "5,00 %" in text
+    assert "Cobertura agrícola máxima" not in text
+    assert "Umbral de cobertura del candidato" not in text
 
 
 def test_v2_agricultural_occurrence_rejects_legacy_report_dataset(tmp_path: Path) -> None:
@@ -1795,6 +1794,7 @@ def test_splits_client_report_and_appendix_and_keeps_each_candidate_on_one_page(
     assert all("Anexos técnicos" not in page for page in main_pages)
     assert "Anexos técnicos" in appendix_text
     assert "Resumen ejecutivo" not in appendix_text
+    assert "Ubicación en el establecimiento" not in " ".join(main_pages)
     for ordinal in (1, 2):
         marker = f"6.{ordinal}."
         matching_pages = [page for page in main_pages if marker in page]
@@ -1802,6 +1802,20 @@ def test_splits_client_report_and_appendix_and_keeps_each_candidate_on_one_page(
         assert "ID técnico" in matching_pages[0]
         assert "Interpretación técnica:" in matching_pages[0]
     assert not any("6.1." in page and "6.2." in page for page in main_pages)
+
+
+def test_event_map_does_not_render_establishment_location_inset(tmp_path: Path) -> None:
+    view = build_report_view_model(load_report_package(_report_package(tmp_path)))
+    drawing = agricultural_support_map(
+        view.events[0], establishment_geometry=(), width=240, height=120
+    )
+    assert drawing.width == 240
+    assert drawing.height == 120
+    assert _event_color(
+        view.events[0].model_copy(
+            update={"record_type": "disturbance_candidate", "human_review_required": False}
+        )
+    )
 
 
 def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
