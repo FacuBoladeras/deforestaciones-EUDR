@@ -103,7 +103,13 @@ def test_default_report_adapter_loads_package_and_returns_rendered_path(
         assert output == output_path
         return SimpleNamespace(path=output)
 
+    def fake_appendix(received: object, output: Path) -> SimpleNamespace:
+        assert received is package
+        assert output == output_path.with_name("technical-appendix.pdf")
+        return SimpleNamespace(path=output)
+
     monkeypatch.setattr(worker_service, "render_technical_report", fake_render)
+    monkeypatch.setattr(worker_service, "render_technical_appendix", fake_appendix)
 
     assert render_client_report(result_root, output_path, input_path) == output_path
 
@@ -1272,18 +1278,22 @@ def test_client_report_is_published_and_packaged_outside_scientific_allowlist(
     )
     client_report = tmp_path / "generated.pdf"
     client_report.write_bytes(b"%PDF-1.4\nclient report\n")
+    client_appendix = tmp_path / "appendix.pdf"
+    client_appendix.write_bytes(b"%PDF-1.4\ntechnical appendix\n")
 
     published = publish_curated_results(
         result,
         tmp_path / "private",
         "analysis-1",
         client_report=client_report,
+        client_appendix=client_appendix,
     )
     package = create_evidence_package(
         result,
         tmp_path / "private",
         "analysis-1",
         client_report=client_report,
+        client_appendix=client_appendix,
     )
 
     assert published is not None
@@ -1291,10 +1301,17 @@ def test_client_report_is_published_and_packaged_outside_scientific_allowlist(
     assert (published / "client_report" / "informe-tecnico.pdf").read_bytes() == (
         client_report.read_bytes()
     )
+    assert (published / "client_report" / "anexo-tecnico.pdf").read_bytes() == (
+        client_appendix.read_bytes()
+    )
     with zipfile.ZipFile(package) as archive:
         assert archive.read("client_report/informe-tecnico.pdf") == client_report.read_bytes()
+        assert archive.read("client_report/anexo-tecnico.pdf") == client_appendix.read_bytes()
         metadata = json.loads(archive.read("client_report/report.json"))
+        appendix_metadata = json.loads(archive.read("client_report/appendix.json"))
     assert metadata["sha256"] == hashlib.sha256(client_report.read_bytes()).hexdigest()
+    assert appendix_metadata["sha256"] == hashlib.sha256(client_appendix.read_bytes()).hexdigest()
+    assert appendix_metadata["path"] == "client_report/anexo-tecnico.pdf"
 
     client_report.write_bytes(b"not-a-pdf")
     with pytest.raises(ValueError, match="client_report_invalid"):

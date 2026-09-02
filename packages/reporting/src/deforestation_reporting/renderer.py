@@ -26,6 +26,7 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    KeepTogether,
     NextPageTemplate,
     PageBreak,
     PageTemplate,
@@ -112,14 +113,45 @@ def render_technical_report(
     osm_basemap_provider: OSMBasemapProvider | None = None,
     issued_at: datetime | None = None,
 ) -> ReportArtifact:
-    """Renderiza el informe cliente sin mutar el expediente científico verificado."""
+    """Renderiza el informe principal cliente sin incluir los anexos técnicos."""
     view = build_report_view_model(package)
     emission_time = issued_at or view.analysis.recorded_at
+    basemap_provider = osm_basemap_provider or OverpassOSMProvider(
+        cache_dir=output_path.resolve().parent / ".osm-cache"
+    )
+    return _render_document(
+        view,
+        _main_story(view, basemap_provider, emission_time),
+        output_path,
+        emission_time,
+    )
+
+
+def render_technical_appendix(
+    package: ReportPackage,
+    output_path: Path,
+    *,
+    issued_at: datetime | None = None,
+) -> ReportArtifact:
+    """Renderiza los anexos auditables en un PDF separado del informe principal."""
+    view = build_report_view_model(package)
+    emission_time = issued_at or view.analysis.recorded_at
+    return _render_document(
+        view,
+        _appendix_story(view),
+        output_path,
+        emission_time,
+    )
+
+
+def _render_document(
+    view: ReportViewModel,
+    story: list[Any],
+    output_path: Path,
+    emission_time: datetime,
+) -> ReportArtifact:
     output = output_path.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    basemap_provider = osm_basemap_provider or OverpassOSMProvider(
-        cache_dir=output.parent / ".osm-cache"
-    )
     temporary = output.with_suffix(".tmp")
     temporary.unlink(missing_ok=True)
     try:
@@ -150,7 +182,7 @@ def render_technical_report(
             ]
         )
         document.build(
-            _story(view, basemap_provider, emission_time),
+            story,
             canvasmaker=partial(_dated_canvas, creation_time=emission_time),
         )
         temporary.replace(output)
@@ -160,7 +192,7 @@ def render_technical_report(
     return ReportArtifact(path=output, sha256=_sha256(output), size_bytes=output.stat().st_size)
 
 
-def _story(
+def _main_story(
     view: ReportViewModel,
     osm_basemap_provider: OSMBasemapProvider,
     emission_time: datetime,
@@ -186,8 +218,12 @@ def _story(
     story.extend(_priority_event_sections(view, priority, styles, osm_basemap_provider))
     story.extend(_temporal_evidence_section(view, styles))
     story.extend(_conclusion_section(view, styles))
-    story.extend(_technical_annexes(view, priority, styles))
     return story
+
+
+def _appendix_story(view: ReportViewModel) -> list[Any]:
+    styles = _styles()
+    return _technical_annexes(view, _priority_events(view), styles, standalone=True)
 
 
 def _executive_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
@@ -610,16 +646,20 @@ def _priority_event_sections(
         )
         return result
     for index, event in enumerate(priority, start=1):
-        if index > 1:
-            result.append(PageBreak())
-        result.extend(
-            _priority_event_page(
-                view,
-                event,
-                index,
-                _event_client_figure(view, event),
-                styles,
-                osm_basemap_provider,
+        # Cada ficha es una unidad editorial indivisible.  Dejamos la portada
+        # de la sección en su propia página para que el encabezado no consuma
+        # el espacio reservado a la primera ficha.
+        result.append(PageBreak())
+        result.append(
+            KeepTogether(
+                _priority_event_page(
+                    view,
+                    event,
+                    index,
+                    _event_client_figure(view, event),
+                    styles,
+                    osm_basemap_provider,
+                )
             )
         )
     result.extend([NextPageTemplate("content")])
@@ -634,7 +674,10 @@ def _priority_event_page(
     styles: dict[str, ParagraphStyle],
     osm_basemap_provider: OSMBasemapProvider,
 ) -> list[Any]:
-    map_width, map_height = 12.5 * cm, 5.9 * cm
+    # El contenido completo (incluidas las filas de occurrence v2) debe caber
+    # en el frame landscape de una sola página.  Estas dimensiones conservan
+    # legibilidad y dejan margen para IDs y estados largos.
+    map_width, map_height = 12.5 * cm, 4.7 * cm
     geometry = event.candidate_geometry or event.event_geometry
     basemap = (
         osm_basemap_provider.get(
@@ -660,7 +703,7 @@ def _priority_event_page(
         evidence_flowable = _scaled_report_image(
             client_figure,
             max_width=12.5 * cm,
-            max_height=5.9 * cm,
+            max_height=4.7 * cm,
         )
     evidence_table = Table(
         [
@@ -677,7 +720,7 @@ def _priority_event_page(
         [
             [
                 _priority_summary_table(event, styles),
-                forest_trajectory_chart(event, width=12.5 * cm, height=3.6 * cm),
+                forest_trajectory_chart(event, width=12.5 * cm, height=2.8 * cm),
             ]
         ],
         colWidths=[12.9 * cm, 12.9 * cm],
@@ -697,7 +740,7 @@ def _priority_event_page(
         ),
         Spacer(1, 0.15 * cm),
         evidence_table,
-        Spacer(1, 0.2 * cm),
+        Spacer(1, 0.12 * cm),
         lower_table,
         Paragraph(
             f"Interpretación técnica: {_event_interpretation(event)}",
@@ -860,11 +903,13 @@ def _technical_annexes(
     view: ReportViewModel,
     priority: tuple[EventSummary, ...],
     styles: dict[str, ParagraphStyle],
+    *,
+    standalone: bool = False,
 ) -> list[Any]:
+    section_prefix = "A" if standalone else "9"
     result: list[Any] = [
-        PageBreak(),
         _section_heading(
-            "9. Anexos técnicos",
+            "Anexos técnicos" if standalone else "9. Anexos técnicos",
             styles["heading"],
             "annexes",
             outline_title="Anexos técnicos",
@@ -876,7 +921,7 @@ def _technical_annexes(
             styles["body"],
         ),
         _section_heading(
-            "9.1. Inventario operativo y resumen subumbral",
+            f"{section_prefix}.1. Inventario operativo y resumen subumbral",
             styles["subheading"],
             "annex-inventory",
             level=1,
@@ -894,11 +939,13 @@ def _technical_annexes(
         Paragraph("Resumen de candidatos subumbrales", styles["subheading"]),
         _subthreshold_summary_table(view.events, styles),
     ]
-    result.extend(_secondary_event_annex(view, priority, styles))
-    result.extend(_complete_temporal_annex(view, styles))
-    result.extend(_methodology_quality_annex(view, styles))
-    result.extend(_sources_annex(view, styles))
-    result.extend(_traceability_annex(view, styles))
+    if not standalone:
+        result.insert(0, PageBreak())
+    result.extend(_secondary_event_annex(view, priority, styles, section_prefix=section_prefix))
+    result.extend(_complete_temporal_annex(view, styles, section_prefix=section_prefix))
+    result.extend(_methodology_quality_annex(view, styles, section_prefix=section_prefix))
+    result.extend(_sources_annex(view, styles, section_prefix=section_prefix))
+    result.extend(_traceability_annex(view, styles, section_prefix=section_prefix))
     return result
 
 
@@ -906,6 +953,8 @@ def _secondary_event_annex(
     view: ReportViewModel,
     priority: tuple[EventSummary, ...],
     styles: dict[str, ParagraphStyle],
+    *,
+    section_prefix: str = "9",
 ) -> list[Any]:
     priority_ids = {event.candidate_id for event in priority}
     secondary = [
@@ -916,7 +965,7 @@ def _secondary_event_annex(
     result: list[Any] = [
         PageBreak(),
         _section_heading(
-            "9.2. Fichas detalladas de eventos secundarios",
+            f"{section_prefix}.2. Fichas detalladas de eventos secundarios",
             styles["subheading"],
             "annex-secondary",
             level=1,
@@ -925,46 +974,30 @@ def _secondary_event_annex(
     if not secondary:
         result.append(Paragraph("No hay registros secundarios.", styles["body"]))
         return result
-    for batch_start in range(0, len(secondary), 6):
-        if batch_start:
-            result.append(PageBreak())
-        cards: list[list[Any]] = []
-        for event in secondary[batch_start : batch_start + 6]:
-            alternative = (
-                "No respaldada"
-                if any(
-                    gate.key == "strong_alternative_explanation_absent" and gate.passed
-                    for gate in event.gates
-                )
-                else "Presente o pendiente"
+    for event in secondary:
+        alternative = (
+            "No respaldada"
+            if any(
+                gate.key == "strong_alternative_explanation_absent" and gate.passed
+                for gate in event.gates
             )
-            cards.append(
-                [
-                    Paragraph(
-                        f"{_record_title(event)} · {_event_status_label(event)}",
-                        styles["annex_event_heading"],
-                    ),
-                    _compact_event_table(event, alternative, styles, narrow=True),
-                ]
-            )
-        grid_rows: list[list[Any]] = []
-        for index in range(0, len(cards), 2):
-            row: list[Any] = [cards[index]]
-            row.append(cards[index + 1] if index + 1 < len(cards) else "")
-            grid_rows.append(row)
-        grid = Table(grid_rows, colWidths=[7.55 * cm, 7.55 * cm], hAlign="LEFT")
-        grid.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
+            else "Presente o pendiente"
         )
-        result.append(grid)
+        result.extend(
+            [
+                PageBreak(),
+                KeepTogether(
+                    [
+                        Paragraph(
+                            f"{_record_title(event)} · {_event_status_label(event)}",
+                            styles["annex_event_heading"],
+                        ),
+                        Spacer(1, 0.2 * cm),
+                        _compact_event_table(event, alternative, styles),
+                    ]
+                ),
+            ]
+        )
     return result
 
 
@@ -998,7 +1031,12 @@ def _compact_event_table(
     return table
 
 
-def _complete_temporal_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _complete_temporal_annex(
+    view: ReportViewModel,
+    styles: dict[str, ParagraphStyle],
+    *,
+    section_prefix: str = "9",
+) -> list[Any]:
     specs = {
         "spectral_index_timeline": "Serie completa de índices espectrales",
         "observation_coverage": "Calidad observacional temporal",
@@ -1009,7 +1047,7 @@ def _complete_temporal_annex(view: ReportViewModel, styles: dict[str, ParagraphS
         NextPageTemplate("landscape"),
         PageBreak(),
         _section_heading(
-            "9.3. Series temporales completas",
+            f"{section_prefix}.3. Series temporales completas",
             styles["landscape_heading"],
             "annex-temporal",
             level=1,
@@ -1037,7 +1075,10 @@ def _complete_temporal_annex(view: ReportViewModel, styles: dict[str, ParagraphS
 
 
 def _methodology_quality_annex(
-    view: ReportViewModel, styles: dict[str, ParagraphStyle]
+    view: ReportViewModel,
+    styles: dict[str, ParagraphStyle],
+    *,
+    section_prefix: str = "9",
 ) -> list[Any]:
     quality = view.quality
     coverage = (
@@ -1057,7 +1098,7 @@ def _methodology_quality_annex(
     return [
         PageBreak(),
         _section_heading(
-            "9.4. Metodología y calidad observacional",
+            f"{section_prefix}.4. Metodología y calidad observacional",
             styles["subheading"],
             "annex-methodology",
             level=1,
@@ -1091,11 +1132,19 @@ def _methodology_quality_annex(
     ]
 
 
-def _sources_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _sources_annex(
+    view: ReportViewModel,
+    styles: dict[str, ParagraphStyle],
+    *,
+    section_prefix: str = "9",
+) -> list[Any]:
     return [
         PageBreak(),
         _section_heading(
-            "9.5. Fuentes y licencias", styles["subheading"], "annex-sources", level=1
+            f"{section_prefix}.5. Fuentes y licencias",
+            styles["subheading"],
+            "annex-sources",
+            level=1,
         ),
         _datasets_table(view.datasets, styles),
         Spacer(1, 0.35 * cm),
@@ -1107,11 +1156,19 @@ def _sources_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> 
     ]
 
 
-def _traceability_annex(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _traceability_annex(
+    view: ReportViewModel,
+    styles: dict[str, ParagraphStyle],
+    *,
+    section_prefix: str = "9",
+) -> list[Any]:
     return [
         PageBreak(),
         _section_heading(
-            "9.6. Trazabilidad técnica", styles["subheading"], "annex-traceability", level=1
+            f"{section_prefix}.6. Trazabilidad técnica",
+            styles["subheading"],
+            "annex-traceability",
+            level=1,
         ),
         _two_column_table(
             [

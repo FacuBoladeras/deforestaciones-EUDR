@@ -75,9 +75,9 @@ tests                  gates científicos e integración multiproceso
 | Atribución post-cambio | `7.0.0` |
 | `report_assets` / política de selección | `2.5.0` / `2.4.0` |
 | `report_dataset` | `2.1.0` |
-| Reporting / contrato editorial | `0.14.0` / `3.0.0` para occurrence v2 |
+| Reporting / contrato editorial | `0.15.0` / `3.0.0` para occurrence v2 |
 | API | `0.4.0` |
-| Worker | `0.3.0` |
+| Worker | `0.4.0` |
 | Web | `0.5.0` |
 | Domain / jobs | `0.1.0` / `0.1.0` |
 

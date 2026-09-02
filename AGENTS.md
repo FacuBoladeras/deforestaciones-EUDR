@@ -256,9 +256,9 @@ estimar AOI, bytes, requests, cuotas y almacenamiento.
 - Detección / evidencia de perturbación: `1.5.0` / `1.3.0`.
 - Dominio candidato RF-first / bundle: `2.0.0` / `2.0.0`.
 - Orquestador / atribución: `2.7.0` / `7.0.0`.
-- Reporting: `0.14.0`, editorial `3.0.0` para occurrence v2.
+- Reporting: `0.15.0`, editorial `3.0.0` para occurrence v2.
 - Report assets / selección / dataset: `2.5.0` / `2.4.0` / `2.1.0`.
-- API/web/worker: `0.4.0` / `0.5.0` / `0.3.0`.
+- API/web/worker: `0.4.0` / `0.5.0` / `0.4.0`.
 - Gate del incremento científico: 740 pruebas raíz, 90,40 % de cobertura;
   Ruff, formato y Mypy sobre 163 archivos, sin errores ni warnings.
 - El rerun GEE RF-first de Mojones Norte completó los siete componentes y seis

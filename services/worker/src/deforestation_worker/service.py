@@ -26,6 +26,7 @@ from deforestation_reporting import (
     ReportContractError,
     ReportIntegrityError,
     load_report_package,
+    render_technical_appendix,
     render_technical_report,
 )
 from deforestation_worker.package import (
@@ -56,7 +57,9 @@ class _StageFailure(Exception):
 def render_client_report(result_root: Path, output_path: Path, input_path: Path) -> Path:
     """Proyecta el contrato curado a PDF fuera del núcleo científico."""
     package = load_report_package(result_root, input_path=input_path)
-    return render_technical_report(package, output_path).path
+    rendered = render_technical_report(package, output_path).path
+    render_technical_appendix(package, _client_appendix_output_path(output_path))
+    return rendered
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,10 +367,14 @@ class AnalysisWorker:
         guard: _LeaseGuard,
     ) -> None:
         client_report = self._render_report(job, result, guard)
+        client_appendix = _client_appendix_path(
+            self.settings.storage_root, job.analysis_id, job.attempt
+        )
+        published_appendix = client_appendix if _valid_pdf(client_appendix) else None
         self._check_cancellation(job, guard)
-        published = self._publish(job, result, client_report, guard)
+        published = self._publish(job, result, client_report, published_appendix, guard)
         self._check_cancellation(job, guard)
-        self._package(job, result, client_report, guard)
+        self._package(job, result, client_report, published_appendix, guard)
         self._check_cancellation(job, guard)
         report_dataset = published / "report_assets" / "report_dataset.json"
         guard.ensure_owned()
@@ -392,7 +399,15 @@ class AnalysisWorker:
 
         def render() -> Path:
             if _valid_pdf(durable):
-                return durable
+                appendix_durable = _client_appendix_path(
+                    self.settings.storage_root, job.analysis_id, job.attempt
+                )
+                if self.report_renderer is not render_client_report or _valid_pdf(appendix_durable):
+                    return durable
+                retry_filesystem_operation(
+                    lambda: durable.unlink(),
+                    attempts=self.settings.filesystem_retry_attempts,
+                )
             attempt_path = durable.with_name(".client-report.tmp.pdf")
             attempt_path.parent.mkdir(parents=True, exist_ok=True)
             if attempt_path.exists():
@@ -407,7 +422,16 @@ class AnalysisWorker:
             ).resolve()
             if rendered != attempt_path.resolve() or not _valid_pdf(rendered):
                 raise RuntimeError("client_report_output_invalid")
+            appendix_attempt = _client_appendix_output_path(attempt_path)
             guard.ensure_owned()
+            if _valid_pdf(appendix_attempt):
+                appendix_durable = _client_appendix_path(
+                    self.settings.storage_root, job.analysis_id, job.attempt
+                )
+                retry_filesystem_operation(
+                    lambda: appendix_attempt.replace(appendix_durable),
+                    attempts=self.settings.filesystem_retry_attempts,
+                )
             retry_filesystem_operation(
                 lambda: rendered.replace(durable),
                 attempts=self.settings.filesystem_retry_attempts,
@@ -447,6 +471,7 @@ class AnalysisWorker:
         job: AnalysisJob,
         result: Path,
         client_report: Path,
+        client_appendix: Path | None,
         guard: _LeaseGuard,
     ) -> Path:
         try:
@@ -459,6 +484,7 @@ class AnalysisWorker:
                     self.settings.storage_root,
                     job.analysis_id,
                     client_report=client_report,
+                    client_appendix=client_appendix,
                     attempt=job.attempt,
                     before_commit=guard.ensure_owned,
                 ),
@@ -478,6 +504,7 @@ class AnalysisWorker:
         job: AnalysisJob,
         result: Path,
         client_report: Path,
+        client_appendix: Path | None,
         guard: _LeaseGuard,
     ) -> Path:
         try:
@@ -490,6 +517,7 @@ class AnalysisWorker:
                     self.settings.storage_root,
                     job.analysis_id,
                     client_report=client_report,
+                    client_appendix=client_appendix,
                     attempt=job.attempt,
                     before_commit=guard.ensure_owned,
                 ),
@@ -668,6 +696,21 @@ def _client_report_path(storage_root: Path, analysis_id: str, attempt: int) -> P
     if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
         raise ValueError("worker_attempt_invalid")
     return analysis_root / "postprocess" / f"attempt-{attempt}" / "client-report.pdf"
+
+
+def _client_appendix_path(storage_root: Path, analysis_id: str, attempt: int) -> Path:
+    return _client_report_path(storage_root, analysis_id, attempt).with_name(
+        "technical-appendix.pdf"
+    )
+
+
+def _client_appendix_output_path(report_path: Path) -> Path:
+    name = (
+        ".technical-appendix.tmp.pdf"
+        if report_path.name == ".client-report.tmp.pdf"
+        else "technical-appendix.pdf"
+    )
+    return report_path.with_name(name)
 
 
 def _valid_pdf(path: Path) -> bool:

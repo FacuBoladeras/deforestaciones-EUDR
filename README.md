@@ -13,8 +13,8 @@ manifiestos y un informe para revisión humana.
 Checkpoint verificado: **2 de septiembre de 2026**.
 
 - Pipeline científico integrado de siete componentes.
-- API local asíncrona `0.4.0`, worker `0.3.0` y cliente web `0.5.0`.
-- Informe PDF determinístico mediante `deforestation-reporting 0.14.0`.
+- API local asíncrona `0.4.0`, worker `0.4.0` y cliente web `0.5.0`.
+- Informe y anexo PDF determinísticos mediante `deforestation-reporting 0.15.0`.
 - Dos ejecuciones remotas históricas cerraron el flujo anterior de seis
   componentes. No validan el dominio RF-first `2.0.0` ni occurrence agrícola
   `2.0.0`.

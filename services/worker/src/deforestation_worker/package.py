@@ -14,6 +14,8 @@ from typing import Any
 
 _CLIENT_REPORT_PATH = "client_report/informe-tecnico.pdf"
 _CLIENT_REPORT_METADATA_PATH = "client_report/report.json"
+_CLIENT_APPENDIX_PATH = "client_report/anexo-tecnico.pdf"
+_CLIENT_APPENDIX_METADATA_PATH = "client_report/appendix.json"
 
 
 def retry_filesystem_operation[OperationResult](
@@ -43,6 +45,7 @@ def create_evidence_package(
     analysis_id: str,
     *,
     client_report: Path | None = None,
+    client_appendix: Path | None = None,
     attempt: int = 1,
     before_commit: Callable[[], None] | None = None,
 ) -> Path | None:
@@ -50,7 +53,16 @@ def create_evidence_package(
     files = _verified_files(result_root)
     if files is None:
         return None
-    report_metadata = _client_report_metadata(client_report) if client_report else None
+    report_metadata = (
+        _client_report_metadata(client_report, published_path=_CLIENT_REPORT_PATH)
+        if client_report
+        else None
+    )
+    appendix_metadata = (
+        _client_report_metadata(client_appendix, published_path=_CLIENT_APPENDIX_PATH)
+        if client_appendix
+        else None
+    )
     analysis_root = _analysis_root(storage_root, analysis_id)
     token = _attempt_token(attempt)
     generation = analysis_root / "downloads" / f"attempt-{token}"
@@ -77,6 +89,13 @@ def create_evidence_package(
                     archive,
                     _CLIENT_REPORT_METADATA_PATH,
                     json.dumps(report_metadata, sort_keys=True).encode("utf-8"),
+                )
+            if client_appendix is not None and appendix_metadata is not None:
+                _write_zip_entry(archive, _CLIENT_APPENDIX_PATH, client_appendix.read_bytes())
+                _write_zip_entry(
+                    archive,
+                    _CLIENT_APPENDIX_METADATA_PATH,
+                    json.dumps(appendix_metadata, sort_keys=True).encode("utf-8"),
                 )
         metadata_temporary.write_text(
             json.dumps(
@@ -105,6 +124,7 @@ def publish_curated_results(
     analysis_id: str,
     *,
     client_report: Path | None = None,
+    client_appendix: Path | None = None,
     attempt: int = 1,
     before_commit: Callable[[], None] | None = None,
 ) -> Path | None:
@@ -112,7 +132,16 @@ def publish_curated_results(
     files = _verified_files(result_root)
     if files is None:
         return None
-    report_metadata = _client_report_metadata(client_report) if client_report else None
+    report_metadata = (
+        _client_report_metadata(client_report, published_path=_CLIENT_REPORT_PATH)
+        if client_report
+        else None
+    )
+    appendix_metadata = (
+        _client_report_metadata(client_appendix, published_path=_CLIENT_APPENDIX_PATH)
+        if client_appendix
+        else None
+    )
     analysis_root = _analysis_root(storage_root, analysis_id)
     token = _attempt_token(attempt)
     generations_root = analysis_root / "results"
@@ -139,6 +168,16 @@ def publish_curated_results(
                 raise ValueError("client_report_copy_sha256_mismatch")
             (staging / _CLIENT_REPORT_METADATA_PATH).write_text(
                 json.dumps(report_metadata, sort_keys=True),
+                encoding="utf-8",
+            )
+        if client_appendix is not None and appendix_metadata is not None:
+            appendix_target = staging / _CLIENT_APPENDIX_PATH
+            appendix_target.parent.mkdir(parents=True, exist_ok=True)
+            retry_filesystem_operation(lambda: shutil.copyfile(client_appendix, appendix_target))
+            if _sha256(appendix_target) != appendix_metadata["sha256"]:
+                raise ValueError("client_appendix_copy_sha256_mismatch")
+            (staging / _CLIENT_APPENDIX_METADATA_PATH).write_text(
+                json.dumps(appendix_metadata, sort_keys=True),
                 encoding="utf-8",
             )
         fence()
@@ -215,7 +254,7 @@ def _noop() -> None:
     return None
 
 
-def _client_report_metadata(path: Path) -> dict[str, object]:
+def _client_report_metadata(path: Path, *, published_path: str) -> dict[str, object]:
     try:
         resolved = path.resolve(strict=True)
         size_bytes = resolved.stat().st_size
@@ -227,7 +266,7 @@ def _client_report_metadata(path: Path) -> dict[str, object]:
         raise ValueError("client_report_invalid")
     return {
         "media_type": "application/pdf",
-        "path": _CLIENT_REPORT_PATH,
+        "path": published_path,
         "schema_version": "1.0.0",
         "sha256": _sha256(resolved),
         "size_bytes": size_bytes,

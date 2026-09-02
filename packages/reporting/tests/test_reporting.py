@@ -18,6 +18,7 @@ from deforestation_reporting import (
     ReportIntegrityError,
     build_report_view_model,
     load_report_package,
+    render_technical_appendix,
     render_technical_report,
 )
 from deforestation_reporting.basemap import (
@@ -1128,17 +1129,19 @@ def test_renders_pdf_for_clean_run_without_events(tmp_path: Path) -> None:
         output,
         osm_basemap_provider=_static_osm_provider(),
     )
+    appendix = render_technical_appendix(package, tmp_path / "clean-run-appendix.pdf")
 
     assert artifact.path == output.resolve()
     assert artifact.size_bytes > 10_000
     reader = PdfReader(artifact.path)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    appendix_text = "\n".join(page.extract_text() or "" for page in PdfReader(appendix.path).pages)
     assert "No se identificó evidencia suficiente de conversión" in text.replace("\n", " ")
     assert "No se detectaron eventos de cambio en el período evaluado" in text.replace("\n", " ")
     assert "no constituye certificación" in text
-    assert "Inventario operativo y resumen subumbral" in text
-    assert "Resumen de candidatos subumbrales" in text
-    assert "No se detectaron candidatos en o bajo 0,5 ha" in text.replace("\n", " ")
+    assert "Inventario operativo y resumen subumbral" in appendix_text
+    assert "Resumen de candidatos subumbrales" in appendix_text
+    assert "No se detectaron candidatos en o bajo 0,5 ha" in appendix_text.replace("\n", " ")
     assert "Área compatible con conversión" in text
     assert "conversion_likely" not in text
     assert LEGAL_DISCLAIMER in text
@@ -1216,6 +1219,7 @@ def test_renders_honest_partial_pdf_when_agricultural_persistence_fails(
         output,
         osm_basemap_provider=_static_osm_provider(),
     )
+    appendix = render_technical_appendix(package, tmp_path / "partial-run-appendix.pdf")
 
     assert view.result_status == "partial_incomplete_evidence"
     assert len(view.events) == 2
@@ -1231,8 +1235,11 @@ def test_renders_honest_partial_pdf_when_agricultural_persistence_fails(
     assert persistence.reason == "component_validation_failed"
     text = "\n".join(page.extract_text() or "" for page in PdfReader(artifact.path).pages)
     normalized = text.replace("\n", " ")
+    appendix_text = " ".join(
+        (page.extract_text() or "").replace("\n", " ") for page in PdfReader(appendix.path).pages
+    )
     assert "La evidencia disponible es incompleta para evaluar conversión" in normalized
-    assert "No es posible concluir ausencia ni presencia de conversión" in normalized
+    assert "No es posible concluir ausencia ni presencia de conversión" in appendix_text
     assert "No se identificó evidencia suficiente de conversión" not in normalized
     assert "Candidato persistente; atribución no disponible" in normalized
     assert "La atribución post-cambio no está disponible" in normalized
@@ -1701,6 +1708,7 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
         tmp_path / "second.pdf",
         osm_basemap_provider=provider,
     )
+    appendix = render_technical_appendix(package, tmp_path / "appendix.pdf")
 
     assert first.sha256 == second.sha256
     assert first.path.read_bytes() == second.path.read_bytes()
@@ -1708,10 +1716,12 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
 
     reader = PdfReader(first.path)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    appendix_text = "\n".join(page.extract_text() or "" for page in PdfReader(appendix.path).pages)
+    complete_text = f"{text}\n{appendix_text}"
     page_sizes = [
         (float(page.mediabox.width), float(page.mediabox.height)) for page in reader.pages
     ]
-    assert 15 <= len(reader.pages) <= 22
+    assert 10 <= len(reader.pages) <= 15
     assert reader.metadata is not None
     assert reader.metadata.title == "Informe técnico de evidencia geoespacial"
     assert "establecimiento-sintetico" in text
@@ -1727,30 +1737,30 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
     assert "1.438,42 ha" in text
     assert "Se detectaron eventos de cambio que requieren revisión" in text.replace("\n", " ")
     assert "Evidencia compatible con conversión" in text
-    assert "Inventario operativo y resumen subumbral" in text
-    assert "Resumen de candidatos subumbrales" in text
-    assert "1 candidato" in text
-    assert "0,18 ha" in text
-    assert "subthreshold_candidates.csv" in text
+    assert "Inventario operativo y resumen subumbral" in appendix_text
+    assert "Resumen de candidatos subumbrales" in appendix_text
+    assert "1 candidato" in appendix_text
+    assert "0,18 ha" in appendix_text
+    assert "subthreshold_candidates.csv" in appendix_text
     assert "Candidato" in text
-    assert "detalle íntegro" in text.replace("\n", " ").casefold()
+    assert "detalle íntegro" in appendix_text.replace("\n", " ").casefold()
     assert "Cobertura forestal anual: referencia y trayectoria" in text
     assert "Cambios anuales respecto de la referencia 2020" in text
     assert "Cobertura/uso del suelo anual Dynamic World" in text
     assert "0 agua, 1 árboles" in text.replace("\n", " ")
     assert "doi:10.1038/s41597-022-01307-4" in text
-    assert "Fuentes y licencias" in text
-    assert "Trazabilidad técnica" in text
-    assert "99,00 %" in text
-    assert "Assets verificados" in text
-    assert str(len(package.assets)) in text
-    assert LEGAL_DISCLAIMER in text
-    assert "conversion_confirmed: true" not in text
-    assert "conversion_likely" not in text
-    assert "gate_passed" not in text
-    assert "P0" not in text
-    assert "Voto candidato" not in text
-    assert "línea base y perturbaciones" not in text
+    assert "Fuentes y licencias" in appendix_text
+    assert "Trazabilidad técnica" in appendix_text
+    assert "99,00 %" in appendix_text
+    assert "Assets verificados" in appendix_text
+    assert str(len(package.assets)) in appendix_text
+    assert LEGAL_DISCLAIMER in complete_text
+    assert "conversion_confirmed: true" not in complete_text
+    assert "conversion_likely" not in complete_text
+    assert "gate_passed" not in complete_text
+    assert "P0" not in complete_text
+    assert "Voto candidato" not in complete_text
+    assert "línea base y perturbaciones" not in complete_text
     assert page_sizes[0][0] < page_sizes[0][1]
     assert sum(width > height for width, height in page_sizes) >= 5
     assert page_sizes[-1][0] < page_sizes[-1][1]
@@ -1764,9 +1774,41 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
     assert any("BitstreamVeraSans" in font for font in embedded_fonts)
 
 
-def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
+def test_splits_client_report_and_appendix_and_keeps_each_candidate_on_one_page(
     tmp_path: Path,
 ) -> None:
+    package = load_report_package(_report_package(tmp_path))
+    main = render_technical_report(
+        package,
+        tmp_path / "client-report.pdf",
+        osm_basemap_provider=_static_osm_provider(),
+    )
+    appendix = render_technical_appendix(package, tmp_path / "technical-appendix.pdf")
+
+    main_pages = [
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(main.path).pages
+    ]
+    appendix_text = " ".join(
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(appendix.path).pages
+    )
+
+    assert all("Anexos técnicos" not in page for page in main_pages)
+    assert "Anexos técnicos" in appendix_text
+    assert "Resumen ejecutivo" not in appendix_text
+    for ordinal in (1, 2):
+        marker = f"6.{ordinal}."
+        matching_pages = [page for page in main_pages if marker in page]
+        assert len(matching_pages) == 1
+        assert "ID técnico" in matching_pages[0]
+        assert "Interpretación técnica:" in matching_pages[0]
+    assert not any("6.1." in page and "6.2." in page for page in main_pages)
+
+
+def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("deforestation_reporting.renderer._PRIORITY_EVENT_LIMIT", 1)
     root = _report_package(tmp_path)
     disturbance_path = root / "report_assets/data/main/030_disturbance_events.json"
     disturbance = json.loads(disturbance_path.read_text("utf-8"))
@@ -1783,13 +1825,11 @@ def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
     secondary_flowables = _secondary_event_annex(view, (view.events[0],), _styles())
     assert len(secondary_flowables) >= 3
 
-    artifact = render_technical_report(
-        load_report_package(root),
-        tmp_path / "secondary-operational.pdf",
-        osm_basemap_provider=_static_osm_provider(),
+    appendix = render_technical_appendix(
+        load_report_package(root), tmp_path / "secondary-operational-appendix.pdf"
     )
     text = " ".join(
-        " ".join((page.extract_text() or "").split()) for page in PdfReader(artifact.path).pages
+        " ".join((page.extract_text() or "").split()) for page in PdfReader(appendix.path).pages
     )
 
     assert "Fichas detalladas de eventos secundarios" in text
@@ -1800,17 +1840,22 @@ def test_operational_unselected_candidate_keeps_one_secondary_detail_card(
 def test_renderer_is_atomic_and_leaves_no_temporary_file(tmp_path: Path) -> None:
     package = load_report_package(_report_package(tmp_path))
     output = tmp_path / "nested" / "report.pdf"
+    appendix_output = tmp_path / "nested" / "appendix.pdf"
 
     artifact = render_technical_report(
         package,
         output,
         osm_basemap_provider=_static_osm_provider(),
     )
+    appendix = render_technical_appendix(package, appendix_output)
 
     assert artifact.path == output.resolve()
     assert output.is_file()
     assert not output.with_suffix(".tmp").exists()
     assert artifact.sha256 == _sha256(output)
+    assert appendix.path == appendix_output.resolve()
+    assert not appendix_output.with_suffix(".tmp").exists()
+    assert appendix.sha256 == _sha256(appendix_output)
 
 
 def test_professional_report_has_audit_structure_dynamic_headline_and_navigation(
@@ -1822,10 +1867,12 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
         tmp_path / "professional.pdf",
         osm_basemap_provider=_static_osm_provider(),
     )
+    appendix = render_technical_appendix(package, tmp_path / "professional-appendix.pdf")
 
     reader = PdfReader(artifact.path)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     compact = " ".join(text.split())
+    appendix_text = "\n".join(page.extract_text() or "" for page in PdfReader(appendix.path).pages)
     outline_titles = _outline_titles(reader.outline)
     view = build_report_view_model(package)
 
@@ -1842,13 +1889,13 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
     assert "Trazabilidad de animales o productos" in compact
     assert "Certificación EUDR" in text and "Fuera del alcance" in text
     assert "Eventos prioritarios" in text
-    assert "Inventario operativo y resumen subumbral" in text
-    assert "Anexos técnicos" in text
+    assert "Inventario operativo y resumen subumbral" in appendix_text
+    assert "Anexos técnicos" in appendix_text
     assert "Resultado automático" in text
     assert "Interpretación técnica" in text
     assert "Aspectos pendientes" in text
     assert "Revisor" in text and "Observaciones" in text
-    assert all(event.candidate_id in text for event in view.events)
+    assert all(event.candidate_id in f"{text}\n{appendix_text}" for event in view.events)
     assert "forest recovery" not in text
     assert "MVP" not in text
     assert text.count("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") <= 2

@@ -21,7 +21,7 @@ FastAPI 0.4.0
     |-- SQLite (packages/jobs)
     |-- almacenamiento privado
     |
-worker 0.3.0
+worker 0.4.0
     |-- lease + heartbeat + cancelación
     |-- deforestation_pipeline
     |-- deforestation_reporting

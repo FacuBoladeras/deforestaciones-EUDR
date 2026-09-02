@@ -478,7 +478,7 @@ dev = [
 
 [[package]]
 name = "deforestation-reporting"
-version = "0.14.0"
+version = "0.15.0"
 source = { editable = "packages/reporting" }
 dependencies = [
     { name = "pillow" },
@@ -509,7 +509,7 @@ dev = [
 
 [[package]]
 name = "deforestation-worker"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "services/worker" }
 dependencies = [
     { name = "deforestation-jobs" },

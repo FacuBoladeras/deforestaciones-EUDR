@@ -35,9 +35,10 @@ occurrence agrícola discriminen los candidatos sin promociones indebidas.
   persistente, asocia robusto/CCDC como soporte y conserva robust-only en un
   inventario sombra de revisión.
 - Disturbance evidence `1.3.0` preserva el estado robusto previo a convergencia.
-- Reporting `0.14.0` representa occurrence v2, cobertura/umbral y ausencia como
+- Reporting `0.15.0` representa occurrence v2, cobertura/umbral y ausencia como
   no evaluada; el dominio candidato RF-first es el fallback cuando attribution
-  no está disponible.
+  no está disponible. El informe cliente y el anexo técnico se publican como
+  PDF separados, con una ficha de candidato por página.
 - El informe conserva una serie anual categórica Dynamic World con la paleta
   oficial y agrega los candidatos `<= 0,5 ha` en una tabla, con detalle en CSV.
 - El transporte agrícola tipado por chunks conserva el presupuesto de 24 MB y

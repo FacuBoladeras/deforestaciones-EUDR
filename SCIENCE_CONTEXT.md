@@ -250,7 +250,7 @@ Versiones relevantes:
 - atribución `7.0.0`;
 - report assets `2.5.0`, política de selección `2.4.0`;
 - report dataset `2.1.0`;
-- reporting `0.14.0`, contrato editorial `3.0.0` para occurrence v2.
+- reporting `0.15.0`, contrato editorial `3.0.0` para occurrence v2.
 
 ## 7. Presentación
 
@@ -260,6 +260,8 @@ Versiones relevantes:
 El PDF:
 
 - es determinístico cuando usa el mismo cache de contexto;
+- separa el informe principal del anexo técnico en dos PDF independientes;
+- confina cada ficha de candidato a una única página editorial;
 - separa candidatos de eventos probables;
 - deriva para cada candidato RF-first seleccionado una comparación NDVI
   pre/post de la misma estación, su delta espacial y un único plot zonal con
@@ -279,7 +281,7 @@ El PDF:
   en un informe parcial;
 - no modifica ciencia ni introduce una conclusión legal.
 
-El worker renderiza fuera del request HTTP y publica PDF, metadatos y ZIP
+El worker renderiza fuera del request HTTP y publica ambos PDF, metadatos y ZIP
 atómicamente.
 
 ## 8. Incertidumbre y explicaciones alternativas
