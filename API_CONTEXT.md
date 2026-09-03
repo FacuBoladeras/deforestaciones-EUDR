@@ -1,6 +1,6 @@
 # Contexto de API, worker y cliente web
 
-Actualizado: **28 de agosto de 2026**.
+Actualizado: **3 de septiembre de 2026**.
 
 ## 1. Objetivo
 
@@ -190,7 +190,117 @@ Requisitos:
 Vite escucha en `127.0.0.1:5173` y proxya `/api` y `/health` a
 `127.0.0.1:8000`; no se abre CORS para el flujo local.
 
+El contrato productivo genera `apps/web/dist/` con assets hasheados bajo
+`assets/`, target ES2022, sourcemaps deshabilitados y manifest de Vite en
+`.vite/manifest.json`. El build conserva rutas `/api` same-origin; el proxy de
+desarrollo no forma parte del artefacto. Todo valor `VITE_*`, incluida la clave
+ArcGIS, queda expuesto al navegador y debe restringirse por origen y servicio.
+
 ## 9. Operación
+
+### Contrato de recursos runtime
+
+Los procesos admiten un bundle de recursos separado del paquete instalado:
+
+- `DEFORESTATION_RUNTIME_ROOT`: raíz que contiene `configs/`, `data/` y,
+  opcionalmente, `scripts/` para procedencia;
+- `DEFORESTATION_RF_MODEL_ARTIFACT`: path explícito al joblib RF montado o
+  descargado fuera del bundle.
+
+El registry y la configuración permanecen versionados dentro del runtime root.
+El joblib externo se acepta únicamente después de verificar tamaño, SHA-256 y
+metadata contra ambos contratos. La ubicación física no se registra como
+identidad del modelo. Las variables se resuelven al iniciar cada proceso; en
+despliegue deben existir antes de importar la aplicación.
+
+### Imagen API
+
+`Dockerfile.api` materializa sólo el adaptador HTTP y sus dependencias internas
+`deforestation-domain` y `deforestation-jobs`. Usa instalación no editable y
+locked, copia al runtime únicamente el virtualenv y el límite jurisdiccional,
+ejecuta Uvicorn con un proceso bajo UID/GID `10001` y comprueba `/health` con la
+biblioteca estándar. No contiene GEE, pipeline científico, reporting, worker,
+credenciales ni estado operacional.
+
+Contrato de filesystem:
+
+- `/opt/deforestation/runtime`: sólo lectura; recursos versionados incluidos;
+- `/var/lib/deforestation/private`: volumen privado escribible para SQLite y
+  objetos;
+- `/tmp`: tmpfs acotado cuando el root filesystem sea read-only.
+
+Las imágenes base están fijadas por digest de índice OCI además del tag. Para
+actualizarlas se debe inspeccionar el manifest, cambiar tag y digest juntos,
+ejecutar los gates, generar SBOM, escanear vulnerabilidades y recién entonces
+probar el smoke Compose. Sobrescribir un `ARG` con una base no fijada invalida
+esa garantía. El argumento obligatorio `VCS_REF` se propaga a
+`DEFORESTATION_CODE_REVISION`; el manifest científico usa esa revisión cuando
+Git no está presente en el runtime. En este incremento no se ejecutó ningún
+build de contenedor.
+
+### Imagen worker
+
+`Dockerfile.worker` instala desde el mismo lock el pipeline, domain, jobs,
+reporting y worker, pero no copia el código de la API. El runtime incluye
+configs, catálogos, licencias, schemas, registry RF y el script canónico usado
+para procedencia. Credenciales GEE y joblib se exigen como mounts read-only; no
+se hornean en ninguna capa.
+
+Contrato de filesystem:
+
+- `/opt/deforestation/runtime`: recursos científicos versionados, sólo lectura;
+- `/opt/deforestation/models`: mount read-only del joblib verificado;
+- `/run/secrets`: mount read-only de credenciales GEE;
+- `/var/lib/deforestation/private`: SQLite y objetos compartidos con la API;
+- `/var/lib/deforestation/runs`: staging y runs científicos persistentes;
+- `/tmp`: tmpfs para caches de librerías sin home escribible.
+
+El healthcheck del worker valida la presencia de los recursos, credenciales,
+modelo, revisión inyectada y directorios escribibles sin contactar GEE ni
+cargar el joblib. Esto es readiness local, no prueba conectividad, cuotas ni
+salud de Earth Engine.
+
+### Compose local
+
+`compose.yaml` define exactamente una API y un worker para el smoke mononodo.
+Comparten un bind privado en `/var/lib/deforestation` y la misma identidad
+numérica `10001:10001`; esto evita permisos incompatibles sobre SQLite/WAL y los
+objetos. No se debe escalar el worker mientras el backend sea SQLite y
+filesystem local.
+
+El worker recibe las credenciales mediante un secret de Compose y el joblib por
+bind read-only con `create_host_path: false`. Ambos servicios usan root
+filesystem read-only, `cap_drop: ALL`, `no-new-privileges`, init, logs rotados,
+tmpfs y límites de CPU/memoria/PIDs. La API se publica sólo en loopback.
+
+Los límites iniciales son deliberadamente configurables en
+`compose.env.example`; todavía no son sizing validado. Compose no ofrece una
+cuota portable para el bind persistente: la capacidad/cuota debe imponerse en
+el filesystem host y verificarse durante los casos de disco insuficiente. Se
+validó `docker compose config`, pero no se ejecutó build, `up` ni smoke.
+
+### Gate de release de imágenes
+
+`scripts/container_release_gate.py` formaliza el gate local previo al smoke. Su
+modo por defecto sólo imprime un plan JSON y no accede al daemon. Para API y
+worker fija plataforma y tag por SHA completo, fuerza pull de las bases, pide
+procedencia BuildKit `mode=max` y attestation SBOM, captura metadata e inspecciona
+que la revisión OCI, el usuario `10001:10001` y el healthcheck sobrevivan en la
+imagen final.
+
+Después genera un SBOM SPDX independiente y un reporte SARIF con Docker Scout.
+El proceso falla si aparece cualquier CVE `high` o `critical`; no filtra sólo
+vulnerabilidades corregibles porque eso ocultaría riesgo conocido sin parche.
+Únicamente tras pasar todos los controles escribe `release-evidence.json` con
+tamaño y SHA-256 de cada evidencia. Los artefactos quedan ignorados por Git.
+
+La ejecución requiere Docker con containerd image store, Buildx `>=0.14` y
+Scout `>=1.4`, y está protegida por `--execute`. Rechaza un checkout con cambios
+sin commit o una revisión distinta de `HEAD`, evitando etiquetar contenido
+mutable con una identidad Git falsa. En la estación inspeccionada el
+3 de septiembre de 2026, Scout es `1.4.1`, Buildx es `0.12.1` y el daemon está
+detenido. Por lo tanto, se validó el contrato y su modo plan, pero NO se ejecutó
+ningún build ni escaneo real.
 
 ```powershell
 uv run python scripts/run_local_stack.py
@@ -231,14 +341,14 @@ Antes de exponerlo en red se requieren:
 
 ## 11. Gates
 
-Gate completo del árbol actual, ejecutado el 28 de agosto de 2026:
+Gate completo del árbol actual, ejecutado el 3 de septiembre de 2026:
 
-- raíz: 737 pruebas, 90,39 % de cobertura;
-- Ruff, formato y Mypy: 153 archivos, sin errores ni warnings;
+- raíz: 760 pruebas, 90,41 % de cobertura;
+- Ruff, formato y Mypy: 169 archivos, sin errores ni warnings;
 - jobs: 10 pruebas, 94,14 %;
-- API: 19 pruebas, 90,62 %;
-- worker: 47 pruebas, 90,97 %;
-- web: 32 pruebas + typecheck;
+- API: 20 pruebas, 90,97 %;
+- worker: 51 pruebas, 90,13 %;
+- web: 34 pruebas + typecheck;
 - integración multiproceso sin GEE incluida en el gate raíz;
 - cero warnings.
 
@@ -251,14 +361,13 @@ No se ejecutó build de frontend ni de contenedor.
 ## 12. Evolución pendiente
 
 1. ampliar la regresión científica con casos independientes al smoke Mojones Norte;
-2. contenerizar API y worker por separado;
-3. definir volúmenes privados, healthchecks y límites en Compose;
-4. ejecutar smoke local con Compose;
-5. sustituir SQLite por cola/estado administrado sólo cuando el modelo de
+2. actualizar el runner a Buildx `>=0.14` y ejecutar el gate de imágenes;
+3. ejecutar los casos del smoke local con Compose;
+4. sustituir SQLite por cola/estado administrado sólo cuando el modelo de
    concurrencia esté definido;
-6. migrar objetos privados a almacenamiento compatible con S3;
-7. añadir identidad y autorización;
-8. desplegar gradualmente en AWS;
-9. medir costo, timeout, reintentos y backpressure.
+5. migrar objetos privados a almacenamiento compatible con S3;
+6. añadir identidad y autorización;
+7. desplegar gradualmente en AWS;
+8. medir costo, timeout, reintentos y backpressure.
 
 El orden y los gates están en [`NEXT_STEPS.md`](NEXT_STEPS.md).

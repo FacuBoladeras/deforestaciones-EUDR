@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_pipeline.agricultural_collector import (
     RasterProvider,
     load_agricultural_collector_config,
@@ -69,7 +71,7 @@ from deforestation_pipeline.rf_model_release import verify_local_rf_model_releas
 
 COMPLETE_ANALYSIS_SCHEMA_VERSION = "2.7.0"
 COMPONENT_STATUS_SCHEMA_VERSION = "1.0.0"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = resolve_runtime_root(Path(__file__).resolve().parents[2])
 DEFAULT_ANALYSIS_END_DATE = date(2025, 12, 31)
 _MANIFEST_RELATIVE_PATH = Path("json/run/manifest.json")
 _SAFE_SLUG = re.compile(r"[^a-z0-9]+")
@@ -107,6 +109,8 @@ class CompleteAnalysisRequest:
     hls_start_year: int = 2020
     hls_end_year: int = 2025
     credentials_path: Path | None = None
+    runtime_root: Path = PROJECT_ROOT
+    model_artifact_path: Path | None = None
     gee_project: str | None = None
     source_crs: str | None = None
     vector_layer: str | None = None
@@ -176,7 +180,8 @@ def run_complete_analysis(
     if getattr(model_config, "schema_version", None) == "1.1.0":
         verify_local_rf_model_release(
             model_config,
-            project_root=PROJECT_ROOT,
+            project_root=request.runtime_root,
+            model_artifact_path=request.model_artifact_path,
             load_bundle=False,
         )
     hampel_config = hampel_loader(resolved["hampel"])
@@ -288,6 +293,8 @@ def run_complete_analysis(
                 generate_disturbance_detection=True,
                 vector_layer=request.vector_layer,
                 dissolve_all=request.dissolve_all,
+                runtime_root=request.runtime_root,
+                model_artifact_path=request.model_artifact_path,
             ),
         )
         try:
@@ -332,6 +339,8 @@ def run_complete_analysis(
                 generate_disturbance_detection=False,
                 vector_layer=request.vector_layer,
                 dissolve_all=request.dissolve_all,
+                runtime_root=request.runtime_root,
+                model_artifact_path=request.model_artifact_path,
             ),
         )
         fused_events = full
@@ -1046,7 +1055,7 @@ def _base_manifest(
                 ),
             }
         ),
-        "code": _code_provenance(),
+        "code": _code_provenance(request.runtime_root),
         "gee_authentication_mode": gee_authentication_mode,
         "agricultural_mode": agricultural_mode,
         "component_order": [item["name"] for item in components],
@@ -1078,21 +1087,23 @@ def _base_manifest(
     }
 
 
-def _code_provenance() -> dict[str, Any]:
+def _code_provenance(runtime_root: Path = PROJECT_ROOT) -> dict[str, Any]:
+    root = runtime_root.resolve()
+
     def git(*args: str) -> str | None:
         try:
             result = subprocess.run(
-                ["git", *args], cwd=PROJECT_ROOT, text=True, capture_output=True, check=False
+                ["git", *args], cwd=root, text=True, capture_output=True, check=False
             )
         except OSError:
             return None
         return result.stdout.strip() if result.returncode == 0 else None
 
-    revision = git("rev-parse", "HEAD")
+    revision = git("rev-parse", "HEAD") or os.environ.get("DEFORESTATION_CODE_REVISION") or None
     status = git("status", "--porcelain")
     dirty = None if status is None else bool(status)
     module = Path(__file__).resolve()
-    script = PROJECT_ROOT / "scripts" / "run_complete_analysis.py"
+    script = root / "scripts" / "run_complete_analysis.py"
     return {
         "git_revision": revision,
         "git_dirty": dirty,

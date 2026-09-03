@@ -23,6 +23,7 @@ import numpy as np
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_pipeline.area import AreaMeasurement, measure_area, select_projected_crs
 from deforestation_pipeline.artifact_layout import (
     annual_figure,
@@ -129,7 +130,7 @@ from deforestation_pipeline.vector_ingestion import (
 
 LOCAL_BUNDLE_SCHEMA_VERSION = "3.1.0"
 ATOMIC_PUBLISH_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.4, 0.8, 1.6)
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = resolve_runtime_root(Path(__file__).resolve().parents[2])
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yml"
 DEFAULT_CATALOG_PATH = PROJECT_ROOT / "data" / "catalog.yml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "local_tests"
@@ -161,6 +162,8 @@ def run_local_vector_pipeline(
     generate_disturbance_detection: bool = False,
     vector_layer: str | None = None,
     dissolve_all: bool = False,
+    runtime_root: Path = PROJECT_ROOT,
+    model_artifact_path: Path | None = None,
 ) -> Path:
     """Ejecuta validación y medición local, y publica un paquete auditable."""
     run_created_at = created_at or datetime.now(UTC)
@@ -246,7 +249,8 @@ def run_local_vector_pipeline(
     if generate_rf_deltas:
         verify_local_rf_model_release(
             resolved_config.forest_model,
-            project_root=PROJECT_ROOT,
+            project_root=runtime_root,
+            model_artifact_path=model_artifact_path,
             load_bundle=False,
         )
     if generate_disturbance_detection and hls_seasonal_request is None:
@@ -407,6 +411,8 @@ def run_local_vector_pipeline(
             output_config=resolved_config.output,
             grid_spec=raster_grid,
             generated_at=run_created_at,
+            runtime_root=runtime_root,
+            model_artifact_path=model_artifact_path,
         )
     if generate_forest_baseline:
         if raster_grid is None:

@@ -1,6 +1,6 @@
 # Contexto general del proyecto
 
-Actualizado: **1 de septiembre de 2026**.
+Actualizado: **3 de septiembre de 2026**.
 
 ## 1. Propósito
 
@@ -56,6 +56,16 @@ tests                  gates científicos e integración multiproceso
 - El navegador no decide validez geoespacial.
 - `report_assets` cura una vista; no reemplaza los bundles científicos.
 - El PDF presenta evidencia; no altera métricas ni reglas de dominio.
+- La imagen API se define separada del worker y no contiene el stack científico;
+  su build, escaneo y smoke aún no fueron ejecutados.
+- La imagen worker contiene el stack científico pero no la API; credenciales y
+  modelo RF son mounts obligatorios y los runs viven fuera de la imagen.
+- Compose conecta una API y un worker mononodo mediante almacenamiento privado
+  común, identidad numérica compartida y límites operativos parametrizables;
+  todavía no se ejecutó el smoke.
+- El gate de imágenes ya tiene un plan seguro y testeado para build por SHA,
+  procedencia, SBOM SPDX, SARIF y bloqueo high/critical; la ejecución espera un
+  runner con Buildx `>=0.14`, containerd image store y daemon activo.
 
 ## 4. Versiones autoritativas
 
@@ -88,16 +98,16 @@ No se eliminan por falta de referencias directas.
 
 ### Calidad de código
 
-Gate completo del árbol actual, ejecutado el 2 de septiembre de 2026:
+Gate completo del árbol actual, ejecutado el 3 de septiembre de 2026:
 
 - Ruff check: aprobado.
-- Ruff format: 163 archivos conformes.
-- Mypy: 163 archivos, sin errores.
-- Pytest raíz: 740 pruebas, 90,40 % de cobertura.
+- Ruff format: 169 archivos conformes.
+- Mypy: 169 archivos, sin errores.
+- Pytest raíz: 760 pruebas, 90,41 % de cobertura.
 - Jobs: 10 pruebas, 94,14 %.
-- API: 19 pruebas, 90,62 %.
-- Worker: 47 pruebas, 90,97 %.
-- Web: 32 pruebas y typecheck estricto.
+- API: 20 pruebas, 90,97 %.
+- Worker: 51 pruebas, 90,13 %.
+- Web: 34 pruebas y typecheck estricto.
 - Warnings: cero.
 
 El primer intento web con Node 18 falló por incompatibilidad del runtime. Con

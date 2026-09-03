@@ -1079,6 +1079,21 @@ def test_code_provenance_does_not_claim_clean_when_git_status_fails(
     assert provenance["git_dirty"] is None
 
 
+def test_code_provenance_uses_injected_revision_without_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEFORESTATION_CODE_REVISION", "image-abc123")
+    monkeypatch.setattr(
+        "deforestation_pipeline.complete_analysis.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    provenance = _code_provenance()
+
+    assert provenance["git_revision"] == "image-abc123"
+    assert provenance["git_dirty"] is None
+
+
 def test_cli_defaults_and_forwarding_without_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1095,6 +1110,8 @@ def test_cli_defaults_and_forwarding_without_credentials(
     exit_code = SCRIPT_MODULE.main(
         [
             str(vector),
+            "--model-artifact",
+            str(tmp_path / "candidate.joblib"),
             "--source-crs",
             "EPSG:4326",
             "--layer",
@@ -1109,6 +1126,7 @@ def test_cli_defaults_and_forwarding_without_credentials(
     assert request.source_crs == "EPSG:4326"
     assert request.vector_layer == "plots"
     assert request.dissolve_all is True
+    assert request.model_artifact_path == tmp_path / "candidate.joblib"
     assert request.hls_start_year == 2020 and request.hls_end_year == 2025
     assert request.declared_land_use == "unknown"
     assert request.declared_context_source == "not_provided"

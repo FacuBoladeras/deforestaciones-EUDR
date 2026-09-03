@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_jobs.models import AnalysisJob, JobStatus
 from deforestation_jobs.repository import InvalidJobTransitionError, SQLiteJobRepository
 from deforestation_pipeline.complete_analysis import (
@@ -35,11 +37,24 @@ from deforestation_worker.package import (
     retry_filesystem_operation,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PROJECT_ROOT = resolve_runtime_root(Path(__file__).resolve().parents[4])
 LOGGER = logging.getLogger("deforestation_worker")
 AnalysisRunner = Callable[..., Path]
 ReportRenderer = Callable[[Path, Path, Path], Path]
 _Result = TypeVar("_Result")
+WORKER_RUNTIME_REQUIRED_FILES = (
+    Path("configs/default.yml"),
+    Path("configs/rf-forest-entrerios-2020-2024.yml"),
+    Path("configs/hampel-benchmark.yml"),
+    Path("configs/agricultural-evidence.yml"),
+    Path("configs/agricultural-collector.yml"),
+    Path("configs/agricultural-persistence.yml"),
+    Path("data/catalog.yml"),
+    Path("data/licenses.yml"),
+    Path("data/models/rf_forest_multiyear_2020_2024_v1.json"),
+    Path("data/schemas/post-change-attribution-v7.0.0.json"),
+)
+_FULL_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class _LeaseLostError(RuntimeError):
@@ -69,6 +84,8 @@ class WorkerSettings:
     output_root: Path
     project_root: Path
     credentials_path: Path | None
+    model_artifact_path: Path | None = None
+    code_revision: str = "working-tree"
     poll_interval_seconds: float = 2.0
     worker_id: str = "local-worker-1"
     lease_duration_seconds: float = 300.0
@@ -86,6 +103,7 @@ class WorkerSettings:
 
     @classmethod
     def from_environment(cls) -> WorkerSettings:
+        runtime_root = resolve_runtime_root(PROJECT_ROOT)
         private_root = Path(
             os.environ.get(
                 "DEFORESTATION_API_PRIVATE_ROOT",
@@ -93,7 +111,8 @@ class WorkerSettings:
             )
         )
         credentials_value = os.environ.get("DEFORESTATION_GEE_CREDENTIALS")
-        default_credentials = PROJECT_ROOT / "credentials.json"
+        model_artifact_value = os.environ.get("DEFORESTATION_RF_MODEL_ARTIFACT")
+        default_credentials = runtime_root / "credentials.json"
         credentials = (
             Path(credentials_value)
             if credentials_value
@@ -111,11 +130,13 @@ class WorkerSettings:
             output_root=Path(
                 os.environ.get(
                     "DEFORESTATION_ANALYSIS_OUTPUT_ROOT",
-                    PROJECT_ROOT / "outputs" / "runs",
+                    runtime_root / "outputs" / "runs",
                 )
             ),
-            project_root=PROJECT_ROOT,
+            project_root=runtime_root,
             credentials_path=credentials,
+            model_artifact_path=(Path(model_artifact_value) if model_artifact_value else None),
+            code_revision=os.environ.get("DEFORESTATION_CODE_REVISION", "working-tree"),
             poll_interval_seconds=float(os.environ.get("DEFORESTATION_WORKER_POLL_SECONDS", "2")),
             worker_id=os.environ.get("DEFORESTATION_WORKER_ID", "local-worker-1"),
             lease_duration_seconds=float(
@@ -129,6 +150,33 @@ class WorkerSettings:
                 os.environ.get("DEFORESTATION_WORKER_FILESYSTEM_RETRIES", "5")
             ),
         )
+
+
+def check_worker_runtime(settings: WorkerSettings) -> bool:
+    """Comprueba mounts y escritura local sin contactar GEE ni cargar el modelo."""
+    runtime_root = settings.project_root.resolve()
+    for relative in WORKER_RUNTIME_REQUIRED_FILES:
+        candidate = (runtime_root / relative).resolve()
+        if not candidate.is_relative_to(runtime_root) or not candidate.is_file():
+            return False
+    required_external_files = (settings.credentials_path, settings.model_artifact_path)
+    if any(path is None or not path.is_file() for path in required_external_files):
+        return False
+    if _FULL_GIT_REVISION.fullmatch(settings.code_revision.strip().lower()) is None:
+        return False
+    try:
+        writable_roots = (
+            settings.database_path.parent,
+            settings.storage_root,
+            settings.output_root,
+        )
+        for directory in writable_roots:
+            directory.mkdir(parents=True, exist_ok=True)
+            if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 class _LeaseGuard:
@@ -649,6 +697,8 @@ class AnalysisWorker:
             catalog_path=project / "data" / "catalog.yml",
             licenses_path=project / "data" / "licenses.yml",
             credentials_path=self.settings.credentials_path,
+            runtime_root=project,
+            model_artifact_path=self.settings.model_artifact_path,
             declared_land_use=cast(
                 Literal["unknown", "managed_forest_plantation"], job.declared_land_use
             ),

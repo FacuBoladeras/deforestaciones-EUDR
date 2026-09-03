@@ -23,6 +23,8 @@ build/
 .env
 .env.*
 !.env.example
+compose.env
+/artifacts/container-release/
 credentials.json
 *.pem
 *.key

@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Sequence
 
-from deforestation_worker.service import AnalysisWorker, WorkerSettings
+from deforestation_worker.service import AnalysisWorker, WorkerSettings, check_worker_runtime
 
 
 class WorkerJsonFormatter(logging.Formatter):
@@ -39,12 +39,20 @@ def configure_logging() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--once", action="store_true", help="procesa como máximo un job")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="procesa como máximo un job")
+    mode.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help="valida recursos y mounts sin contactar servicios remotos",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    if arguments.healthcheck:
+        return 0 if check_worker_runtime(WorkerSettings.from_environment()) else 1
     configure_logging()
     worker = AnalysisWorker(WorkerSettings.from_environment())
     if arguments.once:

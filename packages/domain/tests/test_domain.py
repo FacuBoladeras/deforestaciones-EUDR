@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from deforestation_domain.area import (
@@ -11,6 +13,7 @@ from deforestation_domain.area import (
     select_projected_crs,
 )
 from deforestation_domain.geometry import GeometryValidationError, validate_geometry
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_domain.schemas import GeoJSONGeometry
 
 
@@ -42,3 +45,16 @@ def test_domain_errors_require_at_least_one_violation() -> None:
         AreaMeasurementError([])
     with pytest.raises(ValueError, match="al menos una violación"):
         GeometryValidationError([])
+
+
+def test_runtime_root_can_be_externalized_without_changing_package_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "source-checkout"
+    runtime = tmp_path / "runtime-bundle"
+    runtime.mkdir()
+
+    assert resolve_runtime_root(fallback) == fallback.resolve()
+
+    monkeypatch.setenv("DEFORESTATION_RUNTIME_ROOT", str(runtime))
+    assert resolve_runtime_root(fallback) == runtime.resolve()

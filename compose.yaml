@@ -1,0 +1,93 @@
+name: deforestation-eudr
+
+x-runtime-security: &runtime-security
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+x-private-storage: &private-storage
+  type: bind
+  source: ${DEFORESTATION_PRIVATE_ROOT:?Defina DEFORESTATION_PRIVATE_ROOT}
+  target: /var/lib/deforestation
+  bind:
+    create_host_path: false
+
+services:
+  api:
+    <<: *runtime-security
+    image: deforestation-api:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        VCS_REF: ${VCS_REF:?Defina VCS_REF con el commit completo}
+    user: "10001:10001"
+    environment:
+      DEFORESTATION_CODE_REVISION: ${VCS_REF:?Defina VCS_REF con el commit completo}
+      DEFORESTATION_API_OWNER_ID: ${DEFORESTATION_API_OWNER_ID:-local-internal}
+      DEFORESTATION_API_RETENTION_DAYS: ${DEFORESTATION_API_RETENTION_DAYS:-30}
+    volumes:
+      - *private-storage
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${DEFORESTATION_API_TMPFS_SIZE:-64m},uid=10001,gid=10001,mode=1770
+    ports:
+      - target: 8000
+        published: "8000"
+        host_ip: 127.0.0.1
+    cpus: ${DEFORESTATION_API_CPUS:-0.50}
+    mem_limit: ${DEFORESTATION_API_MEMORY:-512m}
+    mem_reservation: ${DEFORESTATION_API_MEMORY_RESERVATION:-256m}
+    pids_limit: 128
+    stop_grace_period: 30s
+
+  worker:
+    <<: *runtime-security
+    image: deforestation-worker:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        VCS_REF: ${VCS_REF:?Defina VCS_REF con el commit completo}
+    user: "10001:10001"
+    environment:
+      DEFORESTATION_CODE_REVISION: ${VCS_REF:?Defina VCS_REF con el commit completo}
+      DEFORESTATION_WORKER_ID: ${DEFORESTATION_WORKER_ID:-compose-worker-1}
+      DEFORESTATION_WORKER_POLL_SECONDS: ${DEFORESTATION_WORKER_POLL_SECONDS:-2}
+      DEFORESTATION_WORKER_LEASE_SECONDS: ${DEFORESTATION_WORKER_LEASE_SECONDS:-300}
+      DEFORESTATION_WORKER_HEARTBEAT_SECONDS: ${DEFORESTATION_WORKER_HEARTBEAT_SECONDS:-30}
+      DEFORESTATION_WORKER_MAX_ATTEMPTS: ${DEFORESTATION_WORKER_MAX_ATTEMPTS:-3}
+    depends_on:
+      api:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - *private-storage
+      - type: bind
+        source: ${DEFORESTATION_RF_MODEL_ARTIFACT:?Defina DEFORESTATION_RF_MODEL_ARTIFACT}
+        target: /opt/deforestation/models/random_forest_forest_multiyear_2020_2024.joblib
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - source: gee_credentials
+        target: gee-credentials.json
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${DEFORESTATION_WORKER_TMPFS_SIZE:-512m},uid=10001,gid=10001,mode=1770
+    cpus: ${DEFORESTATION_WORKER_CPUS:-4.0}
+    mem_limit: ${DEFORESTATION_WORKER_MEMORY:-8g}
+    mem_reservation: ${DEFORESTATION_WORKER_MEMORY_RESERVATION:-2g}
+    pids_limit: 512
+    stop_grace_period: 90s
+
+secrets:
+  gee_credentials:
+    file: ${DEFORESTATION_GEE_CREDENTIALS:?Defina DEFORESTATION_GEE_CREDENTIALS}

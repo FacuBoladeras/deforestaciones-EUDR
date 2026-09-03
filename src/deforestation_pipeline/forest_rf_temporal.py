@@ -22,6 +22,7 @@ from matplotlib.patches import Patch
 from rasterio.io import MemoryFile
 from rasterio.transform import Affine
 
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_pipeline.artifact_layout import (
     evidence_figure,
     evidence_json,
@@ -58,7 +59,7 @@ from matplotlib import pyplot as plt
 
 FOREST_RF_TEMPORAL_SCHEMA_VERSION: Final = "1.2.0"
 FOREST_RF_TEMPORAL_BUNDLE_SCHEMA_VERSION: Final = "3.5.0"
-PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
+PROJECT_ROOT: Final = resolve_runtime_root(Path(__file__).resolve().parents[2])
 _MULTIBAND_TRANSPORT_FALLBACK_CODES: Final = frozenset(
     {
         "direct_download_limit_exceeded",
@@ -450,6 +451,8 @@ def materialize_forest_rf_temporal(
     output_config: OutputConfig,
     grid_spec: RasterGridSpec,
     generated_at: datetime,
+    runtime_root: Path = PROJECT_ROOT,
+    model_artifact_path: Path | None = None,
     fetch_bytes: FetchBytes | None = None,
 ) -> ForestRfTemporalMaterialization:
     """Descarga clases/scores y deriva deltas locales sobre una única grilla."""
@@ -464,7 +467,11 @@ def materialize_forest_rf_temporal(
     validations: list[RasterValidation] = []
     used_individual_fallback = False
     transport_fallback_codes: list[str] = []
-    model_bundle = _load_local_model_bundle(config)
+    model_bundle = _load_local_model_bundle(
+        config,
+        runtime_root=runtime_root,
+        model_artifact_path=model_artifact_path,
+    )
     candidate_arrays: dict[int, dict[str, np.ndarray]] = {}
 
     for year in years:
@@ -886,12 +893,18 @@ def _validate_same_shape(*arrays: np.ndarray) -> tuple[np.ndarray, ...]:
     return normalized
 
 
-def _load_local_model_bundle(config: ForestRandomForestConfig) -> Mapping[str, Any]:
+def _load_local_model_bundle(
+    config: ForestRandomForestConfig,
+    *,
+    runtime_root: Path,
+    model_artifact_path: Path | None,
+) -> Mapping[str, Any]:
     if config.inference_backend != "local_sklearn_joblib":
         raise ValueError("la materialización temporal requiere backend local_sklearn_joblib")
     verified = verify_local_rf_model_release(
         config,
-        project_root=PROJECT_ROOT,
+        project_root=runtime_root,
+        model_artifact_path=model_artifact_path,
         load_bundle=True,
     )
     if verified.bundle is None:

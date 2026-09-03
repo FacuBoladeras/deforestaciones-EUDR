@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from deforestation_api.app import create_app
@@ -67,6 +68,19 @@ def _feature(*, west: float = -60.3, south: float = -32.1) -> dict[str, object]:
             ],
         },
     }
+
+
+def test_environment_runtime_root_owns_default_boundary_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("DEFORESTATION_RUNTIME_ROOT", str(runtime))
+
+    settings = ApiSettings.from_environment()
+
+    assert settings.jurisdiction_boundary_path == (
+        runtime / "data" / "boundaries" / "argentina_operational.geojson"
+    )
 
 
 def test_health_and_openapi_expose_versioned_contract(tmp_path: Path) -> None:

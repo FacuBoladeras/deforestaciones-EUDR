@@ -10,7 +10,7 @@ manifiestos y un informe para revisión humana.
 
 ## Estado actual
 
-Checkpoint verificado: **2 de septiembre de 2026**.
+Checkpoint verificado: **3 de septiembre de 2026**.
 
 - Pipeline científico integrado de siete componentes.
 - API local asíncrona `0.4.0`, worker `0.4.0` y cliente web `0.5.0`.
@@ -18,15 +18,16 @@ Checkpoint verificado: **2 de septiembre de 2026**.
 - Dos ejecuciones remotas históricas cerraron el flujo anterior de seis
   componentes. No validan el dominio RF-first `2.0.0` ni occurrence agrícola
   `2.0.0`.
-- Gate Python actual: 740 pruebas, 90,40 % de cobertura; Ruff, formato y Mypy
-  sobre 163 archivos, sin errores ni warnings.
-- Gate modular: jobs 10/94,14 %, API 19/90,62 % y worker 47/90,97 %.
-- Cliente: 32 pruebas Vitest y typecheck estricto, con Node compatible.
+- Gate Python actual: 760 pruebas, 90,41 % de cobertura; Ruff, formato y Mypy
+  sobre 169 archivos, sin errores ni warnings.
+- Gate modular: jobs 10/94,14 %, API 20/90,97 % y worker 51/90,13 %.
+- Cliente: 34 pruebas Vitest y typecheck estricto, con Node compatible.
 - Mojones Norte fue regenerado desde cero con el flujo RF-first y occurrence
   `2.1.0`: 22 de 139 candidatos superaron el gate agrícola y 6 quedaron como
   `conversion_likely`; el informe incorpora contexto anual Dynamic World y
   resumen subumbral consultable en CSV.
-- No hay contenedores ni despliegue AWS todavía.
+- Existen contratos separados de imagen API/worker y Compose mononodo, todavía
+  sin build ni smoke; el despliegue AWS permanece pendiente.
 
 Las versiones, límites y decisiones actuales se detallan en
 [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md).
@@ -94,6 +95,14 @@ cd ../..
 `credentials.json` y `apps/web/.env.local` están ignorados por Git. Nunca deben
 aparecer en logs, commits, bundles o documentación.
 
+Para una instalación que no conserve el layout del checkout, definir
+`DEFORESTATION_RUNTIME_ROOT` apuntando al bundle que contiene `configs/` y
+`data/`. El modelo RF puede montarse por separado mediante
+`DEFORESTATION_RF_MODEL_ARTIFACT`; también está disponible
+`--model-artifact` en `scripts/run_complete_analysis.py`. El binario externo no
+se confía por ubicación: se verifican tamaño, SHA-256 y metadata contra el
+registry versionado antes de usarlo.
+
 ## Operación local recomendada
 
 El supervisor inicia exactamente una API, un worker y Vite con almacenamiento
@@ -121,6 +130,119 @@ El launcher no libera puertos ni mata procesos ajenos.
 Para el mapa web, copiar `apps/web/.env.example` a `apps/web/.env.local` y
 configurar `VITE_ARCGIS_API_KEY`. Los mapas base son contexto visual, no
 evidencia científica.
+
+El artefacto web productivo se define mediante `pnpm build`: ejecuta primero el
+typecheck y luego genera `apps/web/dist/`, con manifest, assets hasheados y sin
+sourcemaps. La clave `VITE_ARCGIS_API_KEY` se incorpora al JavaScript cliente:
+no es un secreto y debe restringirse por origen y servicios autorizados. El
+artefacto mantiene `/api` como ruta same-origin para su futuro enrutamiento por
+el frontend de despliegue.
+
+## Contrato de imagen API
+
+[`Dockerfile.api`](Dockerfile.api) define una imagen multi-stage exclusiva para
+`deforestation-api`: instala desde `uv.lock` sólo API, domain y jobs; no copia el
+pipeline científico, reporting ni el worker. El runtime usa UID/GID `10001`,
+expone el healthcheck `/health`, incorpora únicamente el límite jurisdiccional
+público y reserva `/var/lib/deforestation/private` para estado privado montado.
+
+Las bases están fijadas por tag y digest multi-arquitectura: Python
+`3.12-slim-bookworm` —resuelto como `3.12.14` el 2 de septiembre de 2026— y uv
+`0.10.12`. [`.dockerignore`](.dockerignore) excluye credenciales, variables
+locales, outputs, caches, AOI GeoJSON y modelos binarios; sólo reingresa el
+límite operacional versionado. Los secretos y `DEFORESTATION_CODE_REVISION`
+no se hornean como archivos. El build exige `VCS_REF`; ambas imágenes lo
+propagan como `DEFORESTATION_CODE_REVISION` para que la procedencia no dependa
+de incluir Git dentro del runtime.
+
+Ejemplo de ejecución futura, limitado a loopback mientras no existan identidad,
+TLS y autorización:
+
+```powershell
+docker volume create deforestation-api-private
+docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m `
+  --cpus 1 --memory 512m --pids-limit 200 `
+  --mount type=volume,src=deforestation-api-private,dst=/var/lib/deforestation `
+  --env DEFORESTATION_CODE_REVISION=<commit> `
+  --publish 127.0.0.1:8000:8000 deforestation-api:<version>
+```
+
+[`Dockerfile.worker`](Dockerfile.worker) define por separado el runtime
+científico completo: pipeline, jobs, reporting, GEE y librerías geoespaciales.
+No incorpora API, credenciales ni el joblib RF. Ambos artefactos se montan
+read-only en `/run/secrets/gee-credentials.json` y
+`/opt/deforestation/models/random_forest_forest_multiyear_2020_2024.joblib`.
+El worker escribe el estado compartido bajo `/var/lib/deforestation/private` y
+los runs científicos bajo `/var/lib/deforestation/runs`.
+
+El comando `deforestation-worker --healthcheck` comprueba recursos versionados,
+artefactos externos y permisos de los mounts sin cargar el modelo ni contactar
+GEE. También rechaza una revisión vacía, `unknown` o `working-tree`. El
+contenedor ejecuta como UID/GID `10001`, usa `/tmp` para caches y espera un
+filesystem raíz read-only. Ausencia de credenciales o del modelo significa
+`unhealthy`, no evidencia negativa ni un worker parcialmente operativo.
+
+No se construyeron ni escanearon las imágenes. Tamaño, disponibilidad de wheels
+Linux, vulnerabilidades, CPU, memoria, cuota de disco y smoke quedan como gates
+antes de promoverlas. El contrato automatizado de build, procedencia, SBOM y
+escaneo se describe más abajo.
+
+## Contrato Compose local
+
+[`compose.yaml`](compose.yaml) conecta una API y un único worker mediante un
+directorio privado compartido. Ambos usan UID/GID `10001` para que SQLite, WAL y
+objetos conserven permisos coherentes entre contenedores. La API sólo publica
+`127.0.0.1:8000`; el worker no expone puertos y espera que la API esté healthy.
+
+El contrato aplica filesystem raíz read-only, capabilities vacías,
+`no-new-privileges`, init, tmpfs acotados, rotación de logs y límites iniciales
+parametrizables. Los defaults —API `0.5 CPU/512 MiB`, worker `4 CPU/8 GiB`— son
+techos PROVISIONALES para el smoke, no sizing productivo medido.
+
+Preparación:
+
+```powershell
+Copy-Item compose.env.example compose.env
+New-Item -ItemType Directory -Force .\tmp\compose-private
+# Reemplazar VCS_REF por el SHA completo y verificar paths de credenciales/modelo.
+docker compose --env-file compose.env config --quiet
+```
+
+El bind privado usa `create_host_path: false`: un typo falla en vez de crear un
+directorio vacío. Compose limita CPU, memoria, PIDs y tmpfs, pero no impone una
+cuota portable al filesystem persistente. Para el smoke, ese directorio debe
+vivir en un volumen con cuota/capacidad administrada por el host; luego se mide
+el pico real antes de fijar almacenamiento en cloud.
+
+## Gate local de release de imágenes
+
+[`scripts/container_release_gate.py`](scripts/container_release_gate.py) arma un
+plan determinístico para API y worker. El modo por defecto **no ejecuta Docker**:
+
+```powershell
+$revision = (git rev-parse HEAD).Trim()
+uv run python scripts/container_release_gate.py --revision $revision
+```
+
+El plan usa tags con el SHA completo, `linux/amd64` por defecto, bases frescas,
+procedencia `mode=max`, attestations SBOM, metadata BuildKit, inspección de la
+configuración final y un SBOM SPDX independiente. Docker Scout bloquea la
+promoción ante cualquier CVE `high` o `critical` y emite SARIF. Si TODO pasa,
+el gate genera `artifacts/container-release/<revision>/release-evidence.json`
+con tamaños y SHA-256 de las evidencias.
+
+La ejecución real requiere Docker con containerd image store, Buildx `>=0.14`
+y Docker Scout `>=1.4`; además exige `--execute` explícito, un checkout limpio
+y que `--revision` coincida exactamente con `git rev-parse HEAD`:
+
+```powershell
+# Sólo operador o CI autorizado: construye y escanea ambas imágenes.
+uv run python scripts/container_release_gate.py --revision $revision --execute
+```
+
+Este checkout tiene Scout `1.4.1`, pero Buildx `0.12.1` y el daemon detenido:
+el plan es verificable, pero el gate real debe ejecutarse en un runner que
+satisfaga esos prerrequisitos. No se ejecutó `--execute` en este incremento.
 
 ## Ejecución científica directa
 

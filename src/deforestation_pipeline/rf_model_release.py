@@ -26,6 +26,7 @@ def verify_local_rf_model_release(
     config: Any,
     *,
     project_root: Path,
+    model_artifact_path: Path | None = None,
     load_bundle: bool,
 ) -> VerifiedRfModelRelease:
     """Valida registro, binario y metadata sin aceptar paths fuera del proyecto."""
@@ -53,7 +54,11 @@ def verify_local_rf_model_release(
             raise ValueError(f"model registry {key} no coincide con la configuración")
 
     joblib_record = _mapping(payload, "joblib")
-    joblib_path = _project_file(root, joblib_record.get("path"), "joblib")
+    joblib_path = (
+        _external_artifact(model_artifact_path)
+        if model_artifact_path is not None
+        else _project_file(root, joblib_record.get("path"), "joblib")
+    )
     joblib_bytes = joblib_path.read_bytes()
     joblib_sha = _sha256(joblib_bytes)
     if (
@@ -116,6 +121,13 @@ def _project_file(root: Path, configured: object, label: str) -> Path:
     resolved = (root / relative).resolve()
     if root not in resolved.parents or not resolved.is_file():
         raise ValueError(f"{label} file no existe dentro del proyecto")
+    return resolved
+
+
+def _external_artifact(path: Path) -> Path:
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise ValueError("joblib artifact externo no existe")
     return resolved
 
 

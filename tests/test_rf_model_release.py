@@ -77,6 +77,26 @@ def test_release_preflight_verifies_registry_artifact_and_bundle_metadata(tmp_pa
     assert verified.bundle is not None
 
 
+def test_release_preflight_accepts_verified_artifact_outside_runtime_root(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    config, registry_path = _fixture(runtime_root)
+    external_artifact = tmp_path / "mounted-model" / "candidate.joblib"
+    external_artifact.parent.mkdir()
+    source = runtime_root / "models" / "model.joblib"
+    source.replace(external_artifact)
+
+    verified = verify_local_rf_model_release(
+        config,
+        project_root=runtime_root,
+        model_artifact_path=external_artifact,
+        load_bundle=False,
+    )
+
+    assert registry_path.is_file()
+    assert verified.joblib_path == external_artifact.resolve()
+
+
 @pytest.mark.parametrize("tamper", ["registry", "joblib", "bundle_metadata"])
 def test_release_preflight_fails_closed_on_tampering(tmp_path: Path, tamper: str) -> None:
     config, registry_path = _fixture(tmp_path)

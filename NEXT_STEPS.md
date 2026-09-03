@@ -1,6 +1,6 @@
 # Próximos pasos
 
-Actualizado: **1 de septiembre de 2026**.
+Actualizado: **3 de septiembre de 2026**.
 
 Este archivo es el único backlog canónico. No acumula historia cerrada.
 
@@ -13,8 +13,8 @@ Ya existe:
 - API/worker/web locales;
 - PDF y ZIP verificados;
 - dos runs remotos recientes `complete`;
-- gate actual verde: 740 pruebas raíz, 90,40 % de cobertura; Ruff, formato y
-  Mypy sobre 163 archivos; jobs 10, API 19, worker 47 y web 32 + typecheck;
+- gate actual verde: 760 pruebas raíz, 90,41 % de cobertura; Ruff, formato y
+  Mypy sobre 169 archivos; jobs 10, API 20, worker 51 y web 34 + typecheck;
 - cero warnings en el gate;
 - perfiles `lean/debug`.
 
@@ -83,8 +83,8 @@ editoriales y ampliar la validación después del smoke GEE acotado ya completad
 
 ### Gate
 
-- gate local actual: 740 pruebas raíz, 90,40 %; Ruff, formato y Mypy sobre 163
-  archivos; jobs 10/94,14 %, API 19/90,62 %, worker 47/90,97 %, web 32 más
+- gate local actual: 760 pruebas raíz, 90,41 %; Ruff, formato y Mypy sobre 169
+  archivos; jobs 10/94,14 %, API 20/90,97 %, worker 51/90,13 %, web 34 más
   typecheck y cero warnings;
 - tests de contratos, fusión, occurrence, reporting parcial y paridad raster;
 - Ruff, formato, Mypy y cobertura >=90 %;
@@ -95,6 +95,32 @@ editoriales y ampliar la validación después del smoke GEE acotado ya completad
 - documentación actualizada.
 
 ## P1 — Contenerización separada
+
+### Preparación implementada
+
+- `DEFORESTATION_RUNTIME_ROOT` desacopla `configs/` y `data/` del layout del
+  paquete Python instalado;
+- `DEFORESTATION_RF_MODEL_ARTIFACT` y `--model-artifact` permiten montar el
+  joblib canónico fuera de la imagen, conservando la verificación contra el
+  registry, tamaño, SHA-256 y metadata;
+- API, worker y los módulos científicos que consumen recursos comparten la
+  misma resolución explícita del runtime root;
+- el web dispone de un build productivo tipado hacia `dist/`, sin sourcemaps y
+  con manifest para inventario y publicación del artefacto estático.
+- `Dockerfile.api` define una imagen multi-stage API-only, locked y no editable,
+  con bases fijadas por digest, usuario no root, healthcheck y estado privado
+  externo;
+- `.dockerignore` impide enviar credenciales, outputs, caches, AOI GeoJSON y
+  modelos binarios al daemon; sólo admite el límite jurisdiccional público.
+- `Dockerfile.worker` instala el stack científico separado de la API, exige
+  credenciales y joblib como mounts externos, ejecuta como no root y conserva
+  estado privado y runs en rutas distintas;
+- `deforestation-worker --healthcheck` valida recursos y mounts sin contactar
+  GEE ni cargar el modelo, y exige una revisión de código inyectada.
+- `scripts/container_release_gate.py` prepara build por SHA/plataforma,
+  procedencia máxima, attestation SBOM, metadata, inspección no-root, SBOM SPDX,
+  SARIF y bloqueo ante CVE high/critical; su modo seguro sólo imprime el plan y
+  la ejecución rechaza un checkout sucio o una revisión distinta de `HEAD`.
 
 ### Objetivo
 
@@ -119,7 +145,29 @@ Crear imágenes independientes para API y worker sin acoplar la API al stack GEE
 - escaneo de imagen y SBOM;
 - no afirmar reproducibilidad hasta ejecutar el smoke Compose.
 
+### Pendiente de ejecución
+
+- actualizar el runner actual de Buildx `0.12.1` a `>=0.14` y habilitar el
+  containerd image store;
+- ejecutar el gate con `--execute` y revisar tamaño, wheels, procedencia, SBOM y
+  vulnerabilidades de ambas imágenes;
+- no promover una imagen mientras exista una CVE high/critical sin una decisión
+  de riesgo explícita y versionada.
+
 ## P2 — Smoke local con Compose
+
+### Preparación implementada
+
+- `compose.yaml` define una API y un worker mononodo, con build args de revisión,
+  dependencia por healthcheck y API publicada sólo en loopback;
+- un bind privado común usa UID/GID `10001`, rechaza paths inexistentes y
+  mantiene credenciales/modelo como mounts read-only específicos del worker;
+- root filesystem read-only, capabilities vacías, `no-new-privileges`, init,
+  tmpfs, logs rotados y límites parametrizables de CPU, memoria y PIDs;
+- `compose.env.example` documenta paths y límites iniciales sin contener
+  secretos;
+- `docker compose config --quiet` aprueba con Compose `2.24.5`; no se ejecutó
+  build, `up` ni smoke.
 
 ### Objetivo
 

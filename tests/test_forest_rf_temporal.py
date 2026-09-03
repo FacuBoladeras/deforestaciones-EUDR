@@ -460,7 +460,7 @@ def test_temporal_materialization_preserves_12_band_qa_with_hash_and_grid(
     monkeypatch.setattr(
         temporal,
         "_load_local_model_bundle",
-        lambda config: {
+        lambda config, **_kwargs: {
             "model": FakeModel(),
             "feature_columns": list(forest_rf_predictor_band_names()),
             "label_to_int": {"non_forest": 0, "forest": 1},

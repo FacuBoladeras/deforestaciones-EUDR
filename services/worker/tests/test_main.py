@@ -42,6 +42,32 @@ def test_once_exit_code_reflects_whether_a_job_was_processed(
     assert events == ["logging", "initialized", "run_once"]
 
 
+@pytest.mark.parametrize(("healthy", "expected"), [(True, 0), (False, 1)])
+def test_healthcheck_exit_code_reflects_runtime_readiness(
+    monkeypatch: pytest.MonkeyPatch, healthy: bool, expected: int
+) -> None:
+    settings = object()
+
+    class FakeSettings:
+        @classmethod
+        def from_environment(cls) -> object:
+            return settings
+
+    monkeypatch.setattr(__main__, "WorkerSettings", FakeSettings)
+    monkeypatch.setattr(
+        __main__,
+        "check_worker_runtime",
+        lambda received: received is settings and healthy,
+    )
+    monkeypatch.setattr(
+        __main__,
+        "configure_logging",
+        lambda: pytest.fail("healthcheck must stay silent"),
+    )
+
+    assert __main__.main(["--healthcheck"]) == expected
+
+
 def test_forever_mode_delegates_initialization_to_worker_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

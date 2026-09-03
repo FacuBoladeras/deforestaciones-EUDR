@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "configs" / "rf-forest-entrerios-2020-2024.yml",
     )
     parser.add_argument(
+        "--model-artifact",
+        type=Path,
+        help="joblib RF externo; su tamaño y SHA-256 se verifican contra el registry",
+    )
+    parser.add_argument(
         "--hampel-config",
         type=Path,
         default=PROJECT_ROOT / "configs" / "hampel-benchmark.yml",
@@ -124,6 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agricultural_evidence_path=arguments.agricultural_evidence_json,
         agricultural_persistence_bundle_path=arguments.agricultural_persistence_bundle,
         credentials_path=credentials,
+        model_artifact_path=arguments.model_artifact,
         gee_project=arguments.gee_project,
         establishment_id=arguments.establishment_id or arguments.vector.stem,
         analysis_end_date=arguments.analysis_end_date,

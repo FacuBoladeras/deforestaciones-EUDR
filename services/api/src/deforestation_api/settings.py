@@ -6,7 +6,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+from deforestation_domain.runtime import resolve_runtime_root
+
+PROJECT_ROOT = resolve_runtime_root(Path(__file__).resolve().parents[4])
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,7 @@ class ApiSettings:
 
     @classmethod
     def from_environment(cls) -> ApiSettings:
+        runtime_root = resolve_runtime_root(PROJECT_ROOT)
         private_root = Path(
             os.environ.get(
                 "DEFORESTATION_API_PRIVATE_ROOT",
@@ -46,7 +49,7 @@ class ApiSettings:
             jurisdiction_boundary_path=Path(
                 os.environ.get(
                     "DEFORESTATION_API_JURISDICTION",
-                    PROJECT_ROOT / "data" / "boundaries" / "argentina_operational.geojson",
+                    runtime_root / "data" / "boundaries" / "argentina_operational.geojson",
                 )
             ),
             max_vertices=int(os.environ.get("DEFORESTATION_API_MAX_VERTICES", "50000")),

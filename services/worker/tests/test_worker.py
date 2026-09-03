@@ -25,7 +25,13 @@ from deforestation_jobs.repository import SQLiteJobRepository
 from deforestation_pipeline.complete_analysis import CompleteAnalysisError, CompleteAnalysisRequest
 from deforestation_reporting import ReportContractError, ReportIntegrityError
 from deforestation_worker.package import create_evidence_package, publish_curated_results
-from deforestation_worker.service import AnalysisWorker, WorkerSettings, render_client_report
+from deforestation_worker.service import (
+    WORKER_RUNTIME_REQUIRED_FILES,
+    AnalysisWorker,
+    WorkerSettings,
+    check_worker_runtime,
+    render_client_report,
+)
 
 
 def _enqueue(repository: SQLiteJobRepository, storage_root: Path) -> AnalysisJob:
@@ -78,6 +84,38 @@ def _settings(tmp_path: Path) -> WorkerSettings:
         poll_interval_seconds=0.01,
         worker_id="test-worker",
     )
+
+
+def test_worker_healthcheck_validates_runtime_artifacts_and_writable_roots(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    for relative in WORKER_RUNTIME_REQUIRED_FILES:
+        path = runtime_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture", encoding="utf-8")
+    credentials = tmp_path / "secrets" / "gee.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    model = tmp_path / "models" / "forest.joblib"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    settings = replace(
+        _settings(tmp_path),
+        project_root=runtime_root,
+        credentials_path=credentials,
+        model_artifact_path=model,
+        code_revision="a" * 40,
+    )
+
+    assert check_worker_runtime(settings) is True
+    assert settings.database_path.parent.is_dir()
+    assert settings.storage_root.is_dir()
+    assert settings.output_root.is_dir()
+
+    model.unlink()
+    assert check_worker_runtime(settings) is False
+
+    assert check_worker_runtime(replace(settings, code_revision="working-tree")) is False
+    assert check_worker_runtime(replace(settings, code_revision="image-abc123")) is False
 
 
 def test_default_report_adapter_loads_package_and_returns_rendered_path(
@@ -795,6 +833,9 @@ def test_settings_from_environment_and_forever_idle_sleep(
     monkeypatch.setenv("DEFORESTATION_API_PRIVATE_ROOT", str(tmp_path / "private"))
     monkeypatch.setenv("DEFORESTATION_ANALYSIS_OUTPUT_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("DEFORESTATION_GEE_CREDENTIALS", str(tmp_path / "credentials.json"))
+    monkeypatch.setenv("DEFORESTATION_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("DEFORESTATION_RF_MODEL_ARTIFACT", str(tmp_path / "model.joblib"))
+    monkeypatch.setenv("DEFORESTATION_CODE_REVISION", "a" * 40)
     monkeypatch.setenv("DEFORESTATION_WORKER_POLL_SECONDS", "0.25")
     monkeypatch.setenv("DEFORESTATION_WORKER_ID", "worker-env")
     settings = WorkerSettings.from_environment()
@@ -802,6 +843,9 @@ def test_settings_from_environment_and_forever_idle_sleep(
     assert settings.database_path == tmp_path / "private" / "jobs.sqlite3"
     assert settings.output_root == tmp_path / "runs"
     assert settings.credentials_path == tmp_path / "credentials.json"
+    assert settings.project_root == (tmp_path / "runtime").resolve()
+    assert settings.model_artifact_path == tmp_path / "model.joblib"
+    assert settings.code_revision == "a" * 40
     assert settings.poll_interval_seconds == 0.25
     assert settings.worker_id == "worker-env"
     assert settings.lease_duration_seconds == 300.0
@@ -819,6 +863,17 @@ def test_settings_from_environment_and_forever_idle_sleep(
     monkeypatch.setattr("deforestation_worker.service.time.sleep", stop_after_sleep)
     with pytest.raises(RuntimeError, match="stop-loop"):
         worker.run_forever()
+
+
+def test_worker_forwards_external_model_artifact_to_scientific_request(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), model_artifact_path=tmp_path / "model.joblib")
+    repository = SQLiteJobRepository(settings.database_path)
+    repository.initialize()
+    job = _enqueue(repository, settings.storage_root)
+
+    request = AnalysisWorker(settings, repository=repository)._build_request(job)
+
+    assert request.model_artifact_path == tmp_path / "model.joblib"
 
 
 @pytest.mark.parametrize(

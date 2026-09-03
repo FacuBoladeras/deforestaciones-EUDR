@@ -28,6 +28,7 @@ from rasterio.warp import reproject, transform_geom
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.ops import unary_union
 
+from deforestation_domain.runtime import resolve_runtime_root
 from deforestation_pipeline.agricultural_evidence import (
     AgriculturalEvidenceDocument,
     AgriculturalEvidenceDocumentV2,
@@ -62,7 +63,7 @@ DeclaredLandUse = Literal["unknown", "managed_forest_plantation"]
 LEGACY_POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "6.0.0"
 POST_CHANGE_ATTRIBUTION_SCHEMA_VERSION: Final = "7.0.0"
 POST_CHANGE_ATTRIBUTION_BUNDLE_SCHEMA_VERSION: Final = "7.0.0"
-PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
+PROJECT_ROOT: Final = resolve_runtime_root(Path(__file__).resolve().parents[2])
 _YEARS: Final = (2020, 2021, 2022, 2023, 2024)
 _CANDIDATE_TOPOLOGY_OVERLAP_TOLERANCE_HA: Final = 1e-5
 _CLASS_COLORS: Final = {
