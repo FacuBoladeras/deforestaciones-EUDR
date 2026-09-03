@@ -147,7 +147,7 @@ expone el healthcheck `/health`, incorpora únicamente el límite jurisdiccional
 público y reserva `/var/lib/deforestation/private` para estado privado montado.
 
 Las bases están fijadas por tag y digest multi-arquitectura: Python
-`3.12-slim-bookworm` —resuelto como `3.12.14` el 2 de septiembre de 2026— y uv
+`3.12-slim-trixie` —resuelto como `3.12.14` el 1 de septiembre de 2026— y uv
 `0.10.12`. [`.dockerignore`](.dockerignore) excluye credenciales, variables
 locales, outputs, caches, AOI GeoJSON y modelos binarios; sólo reingresa el
 límite operacional versionado. Los secretos y `DEFORESTATION_CODE_REVISION`

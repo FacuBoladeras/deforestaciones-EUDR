@@ -28,8 +28,8 @@ def test_api_image_versions_are_explicit_and_never_use_latest() -> None:
     dockerfile = (PROJECT_ROOT / "Dockerfile.api").read_text(encoding="utf-8")
 
     assert (
-        "ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:"
-        "782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254"
+        "ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:"
+        "78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea"
     ) in dockerfile
     assert (
         "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10.12@sha256:"
