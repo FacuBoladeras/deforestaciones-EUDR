@@ -147,8 +147,8 @@ Crear imágenes independientes para API y worker sin acoplar la API al stack GEE
 
 ### Pendiente de ejecución
 
-- actualizar el runner actual de Buildx `0.12.1` a `>=0.14` y habilitar el
-  containerd image store;
+- runner local preparado: Docker Desktop `4.89.0`, Engine `29.7.2`, Buildx
+  `0.36.1`, BuildKit `0.32.2`, Scout `1.24.0` y containerd image store;
 - ejecutar el gate con `--execute` y revisar tamaño, wheels, procedencia, SBOM y
   vulnerabilidades de ambas imágenes;
 - no promover una imagen mientras exista una CVE high/critical sin una decisión

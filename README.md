@@ -240,9 +240,10 @@ y que `--revision` coincida exactamente con `git rev-parse HEAD`:
 uv run python scripts/container_release_gate.py --revision $revision --execute
 ```
 
-Este checkout tiene Scout `1.4.1`, pero Buildx `0.12.1` y el daemon detenido:
-el plan es verificable, pero el gate real debe ejecutarse en un runner que
-satisfaga esos prerrequisitos. No se ejecutó `--execute` en este incremento.
+El runner local quedó preparado con Docker Desktop `4.89.0`, Engine `29.7.2`,
+Buildx `0.36.1`, BuildKit `0.32.2`, Scout `1.24.0` y containerd image store. El
+preflight pasó para el commit documentado, pero no se ejecutó `--execute` ni se
+construyó ninguna imagen en este incremento.
 
 ## Ejecución científica directa
 

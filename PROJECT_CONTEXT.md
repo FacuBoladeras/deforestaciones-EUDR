@@ -64,8 +64,9 @@ tests                  gates científicos e integración multiproceso
   común, identidad numérica compartida y límites operativos parametrizables;
   todavía no se ejecutó el smoke.
 - El gate de imágenes ya tiene un plan seguro y testeado para build por SHA,
-  procedencia, SBOM SPDX, SARIF y bloqueo high/critical; la ejecución espera un
-  runner con Buildx `>=0.14`, containerd image store y daemon activo.
+  procedencia, SBOM SPDX, SARIF y bloqueo high/critical; el runner local ya usa
+  Buildx `0.36.1`, BuildKit `0.32.2` y containerd image store, con preflight
+  aprobado y ejecución real aún pendiente.
 
 ## 4. Versiones autoritativas
 

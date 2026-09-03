@@ -297,10 +297,10 @@ tamaño y SHA-256 de cada evidencia. Los artefactos quedan ignorados por Git.
 La ejecución requiere Docker con containerd image store, Buildx `>=0.14` y
 Scout `>=1.4`, y está protegida por `--execute`. Rechaza un checkout con cambios
 sin commit o una revisión distinta de `HEAD`, evitando etiquetar contenido
-mutable con una identidad Git falsa. En la estación inspeccionada el
-3 de septiembre de 2026, Scout es `1.4.1`, Buildx es `0.12.1` y el daemon está
-detenido. Por lo tanto, se validó el contrato y su modo plan, pero NO se ejecutó
-ningún build ni escaneo real.
+mutable con una identidad Git falsa. El 3 de septiembre de 2026 el runner local
+quedó en Docker Desktop `4.89.0`, Engine `29.7.2`, Buildx `0.36.1`, BuildKit
+`0.32.2`, Scout `1.24.0` y containerd image store. El daemon Linux y el preflight
+están operativos; NO se ejecutó ningún build ni escaneo real.
 
 ```powershell
 uv run python scripts/run_local_stack.py
@@ -361,7 +361,7 @@ No se ejecutó build de frontend ni de contenedor.
 ## 12. Evolución pendiente
 
 1. ampliar la regresión científica con casos independientes al smoke Mojones Norte;
-2. actualizar el runner a Buildx `>=0.14` y ejecutar el gate de imágenes;
+2. ejecutar el gate de imágenes en el runner local ya preparado;
 3. ejecutar los casos del smoke local con Compose;
 4. sustituir SQLite por cola/estado administrado sólo cuando el modelo de
    concurrencia esté definido;
