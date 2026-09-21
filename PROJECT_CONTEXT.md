@@ -87,6 +87,7 @@ tests                  gates científicos e integración multiproceso
 | `report_assets` / política de selección | `2.5.0` / `2.4.0` |
 | `report_dataset` | `2.1.0` |
 | Reporting / contrato editorial | `0.15.0` / `3.0.0` para occurrence v2 |
+| Plantilla narrativa PDF | `1.1.0` |
 | API | `0.4.0` |
 | Worker | `0.4.0` |
 | Web | `0.5.0` |

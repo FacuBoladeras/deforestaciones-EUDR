@@ -250,7 +250,8 @@ Versiones relevantes:
 - atribución `7.0.0`;
 - report assets `2.5.0`, política de selección `2.4.0`;
 - report dataset `2.1.0`;
-- reporting `0.15.0`, contrato editorial `3.0.0` para occurrence v2.
+- reporting `0.15.0`, contrato editorial `3.0.0` para occurrence v2 y plantilla
+  narrativa `1.1.0`.
 
 ## 7. Presentación
 
@@ -261,6 +262,17 @@ El PDF:
 
 - es determinístico cuando usa el mismo cache de contexto;
 - separa el informe principal del anexo técnico en dos PDF independientes;
+- organiza el informe principal como propósito, método, síntesis, identificación,
+  mapa, eventos prioritarios, evidencia temporal, interpretación y conclusión;
+- abre con una carátula ejecutiva que separa resultado automático, estado de
+  revisión humana, alcance y descargo legal;
+- incluye índice multipaso, marcadores PDF, jerarquía navegable de tres niveles y
+  versión explícita de plantilla;
+- incorpora un marco conceptual común, parafraseado a partir del Reglamento (UE)
+  2023/1115 y del Protocolo VISEC Carne suministrado como referencia, con
+  atribución y aclaración expresa de que no constituye una evaluación VISEC;
+- mantiene el contenido conceptual estable separado de las métricas dinámicas del
+  expediente;
 - confina cada ficha de candidato a una única página editorial;
 - separa candidatos de eventos probables;
 - deriva para cada candidato RF-first seleccionado una comparación NDVI
@@ -280,6 +292,12 @@ El PDF:
 - usa el dominio candidato RF-first como fallback para no perder candidatos RF
   en un informe parcial;
 - no modifica ciencia ni introduce una conclusión legal.
+
+`scripts/render_existing_report.py` permite regenerar ambos PDF desde un
+expediente verificado sin ejecutar el pipeline. Exige una salida externa al run,
+no sobrescribe artefactos existentes, deshabilita la red por defecto y registra
+en `render-metadata.json` la versión de plantilla y los hashes de las fuentes y
+de los PDF resultantes.
 
 El worker renderiza fuera del request HTTP y publica ambos PDF, metadatos y ZIP
 atómicamente.

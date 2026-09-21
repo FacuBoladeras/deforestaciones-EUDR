@@ -14,7 +14,10 @@ Checkpoint verificado: **3 de septiembre de 2026**.
 
 - Pipeline científico integrado de siete componentes.
 - API local asíncrona `0.4.0`, worker `0.4.0` y cliente web `0.5.0`.
-- Informe y anexo PDF determinísticos mediante `deforestation-reporting 0.15.0`.
+- Informe y anexo PDF determinísticos mediante `deforestation-reporting 0.15.0`;
+  la plantilla narrativa `1.1.0` incorpora carátula ejecutiva, índice y
+  navegación jerárquica de tres niveles, y un marco conceptual EUDR/VISEC
+  común a todos los expedientes.
 - Dos ejecuciones remotas históricas cerraron el flujo anterior de seis
   componentes. No validan el dominio RF-first `2.0.0` ni occurrence agrícola
   `2.0.0`.
@@ -264,6 +267,25 @@ También se admite `--gee-project <id>` para OAuth persistido. Es excluyente con
 
 La salida se publica atómicamente bajo la raíz configurada en
 `DEFORESTATION_ANALYSIS_OUTPUT_ROOT` o, por defecto, `outputs/`.
+
+### Regenerar sólo el informe
+
+Para rediseñar o verificar la presentación de un expediente ya cerrado sin
+volver a ejecutar ciencia ni GEE:
+
+```powershell
+uv run python scripts/render_existing_report.py `
+  --run-root .\outputs\runs\<run-id> `
+  --input .\ruta\al\input.geojson `
+  --output-dir .\output\pdf-redesign\<version>
+```
+
+La salida debe quedar fuera del run fuente y en un directorio nuevo. La red está
+deshabilitada por defecto; el comando reutiliza el cache OSM disponible y genera
+`render-metadata.json` con hashes de procedencia. `--allow-network-context`
+habilita explícitamente la consulta de contexto cartográfico cuando sea necesaria.
+El informe identifica la versión de plantilla y mantiene separados el marco
+conceptual estable, los resultados dinámicos del expediente y la decisión humana.
 
 ## Verificación
 

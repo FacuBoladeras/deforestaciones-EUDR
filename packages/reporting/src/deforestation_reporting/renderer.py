@@ -38,8 +38,24 @@ from reportlab.platypus import (
 from reportlab.platypus import (
     Image as ReportImage,
 )
+from reportlab.platypus.tableofcontents import TableOfContents
 
 from deforestation_reporting.basemap import OSMBasemapProvider, OverpassOSMProvider
+from deforestation_reporting.editorial_content import (
+    CONCEPTUAL_SOURCE_NOTE,
+    CUTOFF_DEFINITION,
+    DEFORESTATION_DEFINITION,
+    DEFORESTATION_FREE_REQUIREMENTS,
+    EUDR_CONTEXT_PARAGRAPHS,
+    FOREST_DEFINITION,
+    INTERPRETATION_INTRODUCTION,
+    METHOD_INTRODUCTION,
+    METHOD_STEPS,
+    OUT_OF_SCOPE_INTERPRETATIONS,
+    REPORT_SCOPE_PARAGRAPHS,
+    REPORT_TEMPLATE_VERSION,
+    SUPPORTED_INTERPRETATIONS,
+)
 from deforestation_reporting.graphics import (
     agricultural_map_bounds,
     agricultural_support_map,
@@ -87,6 +103,8 @@ class _AuditDocTemplate(BaseDocTemplate):  # type: ignore[misc]
             title = flowable.getPlainText() if isinstance(flowable, Paragraph) else str(bookmark)
         self.canv.bookmarkPage(bookmark)
         self.canv.addOutlineEntry(title, bookmark, level=level, closed=False)
+        if getattr(flowable, "_audit_include_in_toc", True):
+            self.notify("TOCEntry", (level, title, self.page, bookmark))
 
 
 def _register_fonts() -> None:
@@ -181,7 +199,7 @@ def _render_document(
                 ),
             ]
         )
-        document.build(
+        document.multiBuild(
             story,
             canvasmaker=partial(_dated_canvas, creation_time=emission_time),
         )
@@ -199,26 +217,116 @@ def _main_story(
 ) -> list[Any]:
     styles = _styles()
     priority = _priority_events(view)
-    story: list[Any] = [
-        Spacer(1, 1.9 * cm),
-        _section_heading(view.title, styles["cover_title"], "cover", outline_title="Portada"),
-        Spacer(1, 1.1 * cm),
-        _cover_metadata_table(view, emission_time, styles),
+    story = _cover_section(view, emission_time, styles)
+    story.extend(_contents_section(styles))
+    story.extend(_conceptual_framework_section(styles))
+    story.extend(_method_section(styles))
+    story.extend(_executive_section(view, styles))
+    story.extend(_identification_section(view, styles))
+    story.extend(_events_overview_section(view, priority, styles))
+    story.extend(_priority_event_sections(view, priority, styles, osm_basemap_provider))
+    story.extend(_temporal_evidence_section(view, styles))
+    story.extend(_interpretation_section(view, styles))
+    story.extend(_conclusion_section(view, styles))
+    return story
+
+
+def _cover_section(
+    view: ReportViewModel,
+    emission_time: datetime,
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    return [
+        _cover_kicker(styles),
+        Spacer(1, 1.15 * cm),
+        _section_heading(
+            view.title,
+            styles["cover_title"],
+            "cover",
+            outline_title="Portada",
+            include_in_toc=False,
+        ),
+        Paragraph(
+            "Evaluación territorial posterior a la fecha de corte EUDR",
+            styles["cover_subtitle"],
+        ),
+        Spacer(1, 0.5 * cm),
+        Paragraph(
+            "Documento técnico para revisión humana",
+            styles["cover_eyebrow"],
+        ),
+        Spacer(1, 1.15 * cm),
+        _cover_identity_table(view, emission_time, styles),
         Spacer(1, 0.9 * cm),
-        Paragraph(_headline_messages(view)[0], styles["cover_result"]),
-        Spacer(1, 1.0 * cm),
+        _cover_result_panel(view, styles),
+        Spacer(1, 0.65 * cm),
+        Paragraph(
+            "ALCANCE · evidencia geoespacial y documental del expediente",
+            styles["cover_scope_label"],
+        ),
+        Paragraph(
+            "No evalúa por sí sola legalidad, trazabilidad de animales o productos, ni emite "
+            "una declaración de debida diligencia.",
+            styles["cover_scope"],
+        ),
+        Spacer(1, 0.55 * cm),
         Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
         NextPageTemplate("content"),
         PageBreak(),
     ]
-    story.extend(_executive_section(view, styles))
-    story.extend(_identification_section(view, styles))
-    story.extend(_eudr_scope_section(styles))
-    story.extend(_events_overview_section(view, priority, styles))
-    story.extend(_priority_event_sections(view, priority, styles, osm_basemap_provider))
-    story.extend(_temporal_evidence_section(view, styles))
-    story.extend(_conclusion_section(view, styles))
-    return story
+
+
+def _cover_kicker(styles: dict[str, ParagraphStyle]) -> Table:
+    table = Table(
+        [[Paragraph("EUDR  ·  EVIDENCIA GEOESPACIAL", styles["cover_kicker"])]],
+        colWidths=[17.6 * cm],
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), _BLUE),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+            ]
+        )
+    )
+    return table
+
+
+def _cover_result_panel(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+    primary, changes, area, _review = _headline_messages(view)
+    if not _component_available(view, "post_change_attribution"):
+        accent, background = _AMBER, _LIGHT_AMBER
+    elif (view.metrics.likely_conversion_area_ha or 0) > 0:
+        accent, background = _RED, colors.HexColor("#FDECEC")
+    else:
+        accent, background = _GREEN, _LIGHT_GREEN
+    table = Table(
+        [
+            [Paragraph("RESULTADO AUTOMÁTICO", styles["cover_result_label"])],
+            [Paragraph(primary, styles["cover_result"])],
+            [Paragraph(f"{changes} {area}", styles["cover_result_detail"])],
+            [Paragraph(f"Revisión humana: {_review_state(view)}", styles["cover_status"])],
+        ],
+        colWidths=[15.4 * cm],
+        hAlign="CENTER",
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), background),
+                ("BOX", (0, 0), (-1, -1), 1.0, accent),
+                ("LINEBEFORE", (0, 0), (0, -1), 5.0, accent),
+                ("LEFTPADDING", (0, 0), (-1, -1), 14),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+    return table
 
 
 def _appendix_story(view: ReportViewModel) -> list[Any]:
@@ -230,19 +338,29 @@ def _executive_section(view: ReportViewModel, styles: dict[str, ParagraphStyle])
     messages = _headline_messages(view)
     return [
         _section_heading(
-            "2. Resumen ejecutivo",
+            "3. Síntesis de resultados",
             styles["heading"],
             "executive",
-            outline_title="Resumen ejecutivo",
+        ),
+        _section_heading(
+            "3.1. Resumen ejecutivo",
+            styles["subheading"],
+            "executive-result",
+            level=1,
         ),
         Paragraph(messages[0], styles["headline_primary"]),
         Paragraph(messages[1], styles["headline_secondary"]),
         Paragraph(messages[2], styles["headline_secondary"]),
         Paragraph(messages[3], styles["headline_secondary"]),
         Spacer(1, 0.35 * cm),
-        _dashboard_table(view, styles),
+        _results_summary_table(view, styles),
         Spacer(1, 0.55 * cm),
-        Paragraph("Tres niveles de interpretación", styles["subheading"]),
+        _section_heading(
+            "3.2. Tres niveles de interpretación",
+            styles["subheading"],
+            "executive-layers",
+            level=1,
+        ),
         _interpretation_layers_table(view, styles),
         Spacer(1, 0.4 * cm),
         Paragraph(
@@ -261,26 +379,27 @@ def _section_heading(
     *,
     level: int = 0,
     outline_title: str | None = None,
+    include_in_toc: bool = True,
 ) -> Paragraph:
     paragraph = Paragraph(text, style)
     paragraph._audit_bookmark = bookmark
     paragraph._audit_level = level
     paragraph._audit_title = outline_title or text
+    paragraph._audit_include_in_toc = include_in_toc
     return paragraph
 
 
-def _cover_metadata_table(
+def _cover_identity_table(
     view: ReportViewModel,
     emission_time: datetime,
     styles: dict[str, ParagraphStyle],
 ) -> Table:
     rows = [
         ("Establecimiento", view.analysis.establishment_id),
-        ("ID del análisis", view.analysis.analysis_id),
-        ("Fecha de emisión", emission_time.date().isoformat()),
         ("Fecha de corte EUDR", _EUDR_CUTOFF),
         ("Período analizado", f"01/01/2020 a {view.analysis.analysis_end_date:%d/%m/%Y}"),
-        ("Resultado técnico", _headline_messages(view)[0]),
+        ("Fecha de emisión", emission_time.date().isoformat()),
+        ("ID del análisis", view.analysis.analysis_id),
     ]
     data = [
         [
@@ -289,18 +408,226 @@ def _cover_metadata_table(
         ]
         for label, value in rows
     ]
-    table = Table(data, colWidths=[5.2 * cm, 9.2 * cm], hAlign="CENTER")
+    table = Table(data, colWidths=[4.2 * cm, 10.2 * cm], hAlign="CENTER")
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (0, -1), _LIGHT_BLUE),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D7DEE7")),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 9),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.35, colors.HexColor("#CBD5E1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    return table
+
+
+def _contents_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
+    contents = TableOfContents()
+    contents.levelStyles = [
+        styles["toc_level_0"],
+        styles["toc_level_1"],
+        styles["toc_level_2"],
+    ]
+    return [
+        _cover_kicker(styles),
+        Spacer(1, 0.75 * cm),
+        _section_heading(
+            "Índice",
+            styles["contents_title"],
+            "contents",
+            outline_title="Índice",
+            include_in_toc=False,
+        ),
+        Paragraph("Estructura del informe", styles["contents_subtitle"]),
+        Paragraph(
+            "Los colores, tamaños y sangrías expresan la jerarquía entre capítulos, "
+            "apartados y definiciones. Las entradas son navegables desde el archivo PDF.",
+            styles["contents_intro"],
+        ),
+        Spacer(1, 0.45 * cm),
+        contents,
+        PageBreak(),
+    ]
+
+
+def _conceptual_framework_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
+    result: list[Any] = [
+        _section_heading(
+            "1. Marco conceptual y alcance",
+            styles["heading"],
+            "conceptual-framework",
+        ),
+        _section_heading(
+            "1.1. El EUDR y la cadena bovina",
+            styles["subheading"],
+            "conceptual-eudr",
+            level=1,
+        ),
+    ]
+    result.extend(Paragraph(text, styles["body"]) for text in EUDR_CONTEXT_PARAGRAPHS)
+    result.extend(
+        [
+            _section_heading(
+                "1.2. Qué significa «libre de deforestación»",
+                styles["subheading"],
+                "conceptual-deforestation-free",
+                level=1,
+            ),
+            Paragraph(
+                "En la cadena bovina, la expresión describe una condición del producto y de "
+                "su cadena de origen; no es el nombre de un resultado satelital aislado. "
+                "Requiere considerar conjuntamente:",
+                styles["body"],
+            ),
+            _conceptual_requirements_table(styles),
+            PageBreak(),
+            _section_heading(
+                "1.3. Definiciones de referencia",
+                styles["subheading"],
+                "conceptual-definitions",
+                level=1,
+            ),
+            _section_heading(
+                "1.3.1. Bosque",
+                styles["minor_heading"],
+                "conceptual-forest",
+                level=2,
+            ),
+            Paragraph(FOREST_DEFINITION, styles["body"]),
+            _section_heading(
+                "1.3.2. Deforestación",
+                styles["minor_heading"],
+                "conceptual-deforestation",
+                level=2,
+            ),
+            Paragraph(DEFORESTATION_DEFINITION, styles["body"]),
+            _section_heading(
+                "1.3.3. Fecha de corte y superficie",
+                styles["minor_heading"],
+                "conceptual-cutoff",
+                level=2,
+            ),
+            Paragraph(CUTOFF_DEFINITION, styles["body"]),
+            PageBreak(),
+            _section_heading(
+                "1.4. Propósito y límites de este informe",
+                styles["subheading"],
+                "conceptual-report-scope",
+                level=1,
+            ),
+        ]
+    )
+    result.extend(Paragraph(text, styles["body"]) for text in REPORT_SCOPE_PARAGRAPHS)
+    result.extend(
+        [
+            _section_heading(
+                "1.4.1. Alcance EUDR de esta evidencia",
+                styles["minor_heading"],
+                "conceptual-eudr-scope",
+                level=2,
+            ),
+            _eudr_scope_table(styles),
+            Spacer(1, 0.4 * cm),
+            _section_heading(
+                "1.5. Fuente conceptual",
+                styles["subheading"],
+                "conceptual-source",
+                level=1,
+            ),
+            Paragraph(CONCEPTUAL_SOURCE_NOTE, styles["source_note"]),
+            Spacer(1, 0.4 * cm),
+            Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
+            PageBreak(),
+        ]
+    )
+    return result
+
+
+def _conceptual_requirements_table(styles: dict[str, ParagraphStyle]) -> Table:
+    data = [
+        [
+            Paragraph(title, styles["concept_title"]),
+            Paragraph(description, styles["concept_body"]),
+        ]
+        for title, description in DEFORESTATION_FREE_REQUIREMENTS
+    ]
+    table = Table(data, colWidths=[4.5 * cm, 10.8 * cm], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, _LIGHT_BLUE]),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.4, colors.HexColor("#CBD5E1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
                 ("TOPPADDING", (0, 0), (-1, -1), 8),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    return table
+
+
+def _method_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
+    return [
+        _section_heading(
+            "2. Método de evaluación",
+            styles["heading"],
+            "method",
+        ),
+        _section_heading(
+            "2.1. Secuencia de análisis",
+            styles["subheading"],
+            "method-sequence",
+            level=1,
+        ),
+        Paragraph(METHOD_INTRODUCTION, styles["body"]),
+        Spacer(1, 0.25 * cm),
+        _method_steps_table(styles),
+        Spacer(1, 0.55 * cm),
+        _section_heading(
+            "2.2. Criterios de lectura",
+            styles["subheading"],
+            "method-reading",
+            level=1,
+        ),
+        Paragraph(
+            "Una anomalía no equivale a un evento, un cambio detectado no demuestra su causa y "
+            "una ocurrencia agrícola no confirma conversión. La clasificación más alta exige "
+            "convergencia espacial de las condiciones documentadas y permanece sujeta a revisión.",
+            styles["body"],
+        ),
+        Paragraph(
+            "La referencia operativa de superficie se aplica sobre la conjunción materializada "
+            "y es estrictamente mayor a 0,5 ha. Los candidatos subumbrales se conservan en el "
+            "expediente y no se interpretan como irrelevantes.",
+            styles["body"],
+        ),
+        PageBreak(),
+    ]
+
+
+def _method_steps_table(styles: dict[str, ParagraphStyle]) -> Table:
+    data = [
+        [
+            Paragraph(_escape(title), styles["method_step_title"]),
+            Paragraph(_escape(description), styles["method_step_body"]),
+        ]
+        for title, description in METHOD_STEPS
+    ]
+    table = Table(data, colWidths=[4.4 * cm, 10.9 * cm], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("LINEBELOW", (0, 0), (-1, -2), 0.3, colors.HexColor("#D7DEE7")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ]
         )
     )
@@ -336,152 +663,42 @@ def _review_state(view: ReportViewModel) -> str:
     return "Sin revisión documentada"
 
 
-def _dashboard_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+def _results_summary_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
     baseline = view.baseline
     metrics = view.metrics
     event_summary = (
         f"{_number(metrics.spectral_candidate_count)} registros · "
         f"{_ha(metrics.spectral_candidate_area_ha)}"
     )
-    cards = [
-        ("Superficie declarada", _ha(metrics.establishment_area_ha), "blue"),
-        ("Bosque 2020", _ha(baseline.automated_forest_area_ha), "green"),
-        ("No bosque", _ha(baseline.automated_nonforest_area_ha), "gray"),
-        ("Revisión requerida", _ha(baseline.review_required_area_ha), "amber"),
-        ("Sin datos", _ha(baseline.insufficient_data_area_ha), "gray"),
-        ("Eventos de cambio", event_summary, "amber"),
-        (
-            "Área compatible con conversión",
-            _ha(metrics.likely_conversion_area_ha),
-            "red" if (metrics.likely_conversion_area_ha or 0) > 0 else "green",
-        ),
-        ("Estado de revisión", _review_state(view), "amber"),
-    ]
-    data = [
-        [_dashboard_card(*cards[index], styles) for index in range(row, row + 2)]
-        for row in range(0, len(cards), 2)
-    ]
-    table = Table(data, colWidths=[7.45 * cm, 7.45 * cm], rowHeights=[2.0 * cm] * 4)
-    table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    return table
-
-
-def _dashboard_card(
-    label: str,
-    value: str,
-    tone: str,
-    styles: dict[str, ParagraphStyle],
-) -> Table:
-    palette = {
-        "blue": (_LIGHT_BLUE, _BLUE),
-        "green": (_LIGHT_GREEN, _GREEN),
-        "amber": (_LIGHT_AMBER, _AMBER),
-        "red": (colors.HexColor("#FDECEC"), _RED),
-        "gray": (_LIGHT_GRAY, _MUTED),
-    }
-    background, accent = palette[tone]
-    table = Table(
-        [
-            [Paragraph(_escape(label), styles["dashboard_label"])],
-            [Paragraph(_escape(value), styles["dashboard_value"])],
-        ]
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), background),
-                ("BOX", (0, 0), (-1, -1), 1.0, accent),
-                ("LINEBEFORE", (0, 0), (0, -1), 4.0, accent),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, 0), 7),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 7),
-            ]
-        )
-    )
-    return table
-
-
-def _interpretation_layers_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
-    detected = view.metrics.spectral_candidate_count or 0
-    compatible = view.metrics.conversion_likely_count or 0
     rows = [
-        (
-            "1 · Cambio de cobertura detectado",
-            f"{detected} registros, {_ha(view.metrics.spectral_candidate_area_ha)}",
-            "Señal espacial posterior al corte; no atribuye causa.",
-        ),
-        (
-            "2 · Evidencia compatible con conversión",
-            f"{compatible} eventos, {_ha(view.metrics.likely_conversion_area_ha)}",
-            "Exige convergencia de bosque, pérdida, persistencia, uso y superficie.",
-        ),
-        (
-            "3 · Decisión humana y estado de revisión",
-            _review_state(view),
-            "La conclusión documentada corresponde al operador, auditor o certificador.",
-        ),
+        ("Superficie declarada", _ha(metrics.establishment_area_ha)),
+        ("Bosque de referencia 2020", _ha(baseline.automated_forest_area_ha)),
+        ("Área no forestal", _ha(baseline.automated_nonforest_area_ha)),
+        ("Área que requiere revisión", _ha(baseline.review_required_area_ha)),
+        ("Cambios conservados", event_summary),
+        ("Eventos con evidencia compatible", _number(metrics.conversion_likely_count)),
+        ("Superficie compatible con conversión", _ha(metrics.likely_conversion_area_ha)),
+        ("Estado de revisión humana", _review_state(view)),
     ]
     data = [
+        [
+            Paragraph("Magnitud", styles["table_header"]),
+            Paragraph("Resultado", styles["table_header"]),
+        ]
+    ]
+    data.extend(
         [
             Paragraph(_escape(label), styles["table_cell_bold"]),
-            Paragraph(_escape(value), styles["table_cell_bold"]),
-            Paragraph(_escape(explanation), styles["table_cell"]),
+            Paragraph(_escape(value), styles["table_cell"]),
         ]
-        for label, value, explanation in rows
-    ]
-    table = Table(data, colWidths=[5.2 * cm, 3.5 * cm, 6.6 * cm])
-    table.setStyle(_table_style(header=False))
+        for label, value in rows
+    )
+    table = Table(data, colWidths=[9.2 * cm, 6.1 * cm], repeatRows=1)
+    table.setStyle(_table_style())
     return table
 
 
-def _identification_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
-    return [
-        PageBreak(),
-        _section_heading(
-            "3. Identificación y geolocalización",
-            styles["heading"],
-            "identification",
-            outline_title="Identificación y geolocalización",
-        ),
-        _two_column_table(
-            [
-                ("Establecimiento", view.analysis.establishment_id),
-                ("ID abreviado del análisis", view.analysis.analysis_id[:8]),
-                ("Tipo de geometría", view.geometry.geometry_type),
-                ("CRS de intercambio", view.geometry.normalized_crs),
-                ("CRS de cálculo de superficie", view.geometry.calculation_crs),
-                ("Superficie declarada", _ha(view.metrics.establishment_area_ha)),
-                ("Reparación topológica", "Sí" if view.geometry.repair_performed else "No"),
-            ],
-            styles,
-        ),
-        Spacer(1, 0.45 * cm),
-        events_overview_map(
-            (),
-            establishment_geometry=view.establishment_geometry,
-            width=15.3 * cm,
-            height=9.5 * cm,
-        ),
-        Paragraph(
-            "La geometría se intercambia en WGS 84 (EPSG:4326). Las superficies se calculan "
-            f"en {view.geometry.calculation_crs} para evitar distorsiones métricas.",
-            styles["fine_left"],
-        ),
-    ]
-
-
-def _eudr_scope_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _eudr_scope_table(styles: dict[str, ParagraphStyle]) -> Table:
     rows = [
         ("Geolocalización", "Cubierta", "Geometría declarada y validada espacialmente."),
         ("Bosque de referencia 2020", "Cubierto", "Línea base automática al 31/12/2020."),
@@ -516,22 +733,75 @@ def _eudr_scope_section(styles: dict[str, ParagraphStyle]) -> list[Any]:
     )
     table = Table(data, colWidths=[5.3 * cm, 3.6 * cm, 6.4 * cm], repeatRows=1)
     table.setStyle(_table_style())
+    return table
+
+
+def _interpretation_layers_table(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> Table:
+    detected = view.metrics.spectral_candidate_count or 0
+    compatible = view.metrics.conversion_likely_count or 0
+    compatible_noun = "evento" if compatible == 1 else "eventos"
+    rows = [
+        (
+            "1 · Cambio de cobertura detectado",
+            f"{detected} registros, {_ha(view.metrics.spectral_candidate_area_ha)}",
+            "Señal espacial posterior al corte; no atribuye causa.",
+        ),
+        (
+            "2 · Evidencia compatible con conversión",
+            f"{compatible} {compatible_noun}, {_ha(view.metrics.likely_conversion_area_ha)}",
+            "Exige convergencia de bosque, pérdida, persistencia, uso y superficie.",
+        ),
+        (
+            "3 · Decisión humana y estado de revisión",
+            _review_state(view),
+            "La conclusión documentada corresponde al operador, auditor o certificador.",
+        ),
+    ]
+    data = [
+        [
+            Paragraph(_escape(label), styles["table_cell_bold"]),
+            Paragraph(_escape(value), styles["table_cell_bold"]),
+            Paragraph(_escape(explanation), styles["table_cell"]),
+        ]
+        for label, value, explanation in rows
+    ]
+    table = Table(data, colWidths=[5.2 * cm, 3.5 * cm, 6.6 * cm])
+    table.setStyle(_table_style(header=False))
+    return table
+
+
+def _identification_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
     return [
         PageBreak(),
         _section_heading(
-            "4. Alcance EUDR",
+            "4. Identificación y geolocalización",
             styles["heading"],
-            "eudr-scope",
-            outline_title="Alcance EUDR",
+            "identification",
+        ),
+        _two_column_table(
+            [
+                ("Establecimiento", view.analysis.establishment_id),
+                ("ID abreviado del análisis", view.analysis.analysis_id[:8]),
+                ("Tipo de geometría", view.geometry.geometry_type),
+                ("CRS de intercambio", view.geometry.normalized_crs),
+                ("CRS de cálculo de superficie", view.geometry.calculation_crs),
+                ("Superficie declarada", _ha(view.metrics.establishment_area_ha)),
+                ("Reparación topológica", "Sí" if view.geometry.repair_performed else "No"),
+            ],
+            styles,
+        ),
+        Spacer(1, 0.45 * cm),
+        events_overview_map(
+            (),
+            establishment_geometry=view.establishment_geometry,
+            width=15.3 * cm,
+            height=9.5 * cm,
         ),
         Paragraph(
-            "La tabla distingue lo cubierto por el análisis geoespacial de aquello que "
-            "requiere verificaciones legales, documentales o de trazabilidad independientes.",
-            styles["body"],
+            "La geometría se intercambia en WGS 84 (EPSG:4326). Las superficies se calculan "
+            f"en {view.geometry.calculation_crs} para evitar distorsiones métricas.",
+            styles["fine_left"],
         ),
-        table,
-        Spacer(1, 0.6 * cm),
-        Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
     ]
 
 
@@ -552,7 +822,6 @@ def _events_overview_section(
             "5. Resultado cartográfico",
             styles["heading"],
             "cartography",
-            outline_title="Resultado cartográfico",
         ),
         Paragraph(
             "El mapa representa todos los cambios conservados en el inventario. Sólo se "
@@ -621,34 +890,23 @@ def _priority_event_sections(
     styles: dict[str, ParagraphStyle],
     osm_basemap_provider: OSMBasemapProvider,
 ) -> list[Any]:
-    result: list[Any] = [
-        NextPageTemplate("landscape"),
-        PageBreak(),
-        _section_heading(
-            "6. Eventos prioritarios",
-            styles["landscape_heading"],
-            "priority",
-            outline_title="Eventos prioritarios",
-        ),
-        Paragraph(
-            "La prioridad se determina de forma reproducible: primero evidencia compatible "
-            "con conversión y luego mayor superficie observada. La prioridad ordena la "
-            "revisión; no modifica el resultado científico.",
-            styles["landscape_body"],
-        ),
-    ]
+    result: list[Any] = [NextPageTemplate("landscape")]
     if not priority:
         result.extend(
             [
+                PageBreak(),
+                _section_heading(
+                    "6. Eventos prioritarios",
+                    styles["landscape_heading"],
+                    "priority",
+                ),
                 Paragraph("No hay registros prioritarios para presentar.", styles["lead"]),
                 NextPageTemplate("content"),
             ]
         )
         return result
     for index, event in enumerate(priority, start=1):
-        # Cada ficha es una unidad editorial indivisible.  Dejamos la portada
-        # de la sección en su propia página para que el encabezado no consuma
-        # el espacio reservado a la primera ficha.
+        # Cada ficha, incluidos sus títulos jerárquicos, permanece en una sola página.
         result.append(PageBreak())
         result.append(
             KeepTogether(
@@ -659,6 +917,7 @@ def _priority_event_sections(
                     _event_client_figure(view, event),
                     styles,
                     osm_basemap_provider,
+                    first=index == 1,
                 )
             )
         )
@@ -673,6 +932,8 @@ def _priority_event_page(
     client_figure: ClientFigure | None,
     styles: dict[str, ParagraphStyle],
     osm_basemap_provider: OSMBasemapProvider,
+    *,
+    first: bool = False,
 ) -> list[Any]:
     # La ficha cliente reserva más superficie a mapas y gráficos; el detalle
     # exhaustivo de gates permanece en el anexo técnico.
@@ -725,13 +986,25 @@ def _priority_event_page(
         colWidths=[12.9 * cm, 12.9 * cm],
     )
     lower_table.setStyle(_panel_table_style())
-    return [
+    headings: list[Any] = []
+    if first:
+        headings.append(
+            _section_heading(
+                "6. Eventos prioritarios",
+                styles["landscape_heading"],
+                "priority",
+            )
+        )
+    headings.append(
         _section_heading(
             f"6.{priority_ordinal}. {_record_title(event)}",
             styles["landscape_subheading"],
             f"priority-{priority_ordinal}",
             level=1,
-        ),
+        )
+    )
+    return [
+        *headings,
         Paragraph(
             f"{_event_status_label(event)} · {_ha(event.area_ha)} · inicio estimado "
             f"{_event_onset(event)} · revisión humana {_review_label(event)}.",
@@ -792,7 +1065,6 @@ def _temporal_evidence_section(
                 "7. Evidencia temporal",
                 styles["heading"],
                 "temporal",
-                outline_title="Evidencia temporal",
             ),
             Paragraph(
                 "No hay figuras temporales disponibles en el contrato editorial verificado.",
@@ -811,7 +1083,6 @@ def _temporal_evidence_section(
                             "7. Evidencia temporal",
                             styles["landscape_heading"],
                             "temporal",
-                            outline_title="Evidencia temporal",
                         ),
                         Paragraph(
                             "La lectura principal prioriza referencia 2020, ventana del cambio, "
@@ -827,6 +1098,41 @@ def _temporal_evidence_section(
     return result
 
 
+def _interpretation_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    return [
+        PageBreak(),
+        _section_heading(
+            "8. Interpretación y limitaciones",
+            styles["heading"],
+            "interpretation",
+        ),
+        Paragraph(INTERPRETATION_INTRODUCTION, styles["body"]),
+        _section_heading(
+            "8.1. Qué sostiene esta evidencia",
+            styles["subheading"],
+            "interpretation-supported",
+            level=1,
+        ),
+        *[_bullet(item, styles) for item in SUPPORTED_INTERPRETATIONS],
+        Spacer(1, 0.25 * cm),
+        _section_heading(
+            "8.2. Qué permanece fuera del alcance",
+            styles["subheading"],
+            "interpretation-out-of-scope",
+            level=1,
+        ),
+        *[_bullet(item, styles) for item in OUT_OF_SCOPE_INTERPRETATIONS],
+        Spacer(1, 0.25 * cm),
+        _section_heading(
+            "8.3. Limitaciones específicas del análisis",
+            styles["subheading"],
+            "interpretation-limitations",
+            level=1,
+        ),
+        *[_bullet(item, styles) for item in view.limitations],
+    ]
+
+
 def _conclusion_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]) -> list[Any]:
     messages = _headline_messages(view)
     pending = [
@@ -839,25 +1145,44 @@ def _conclusion_section(view: ReportViewModel, styles: dict[str, ParagraphStyle]
     return [
         PageBreak(),
         _section_heading(
-            "8. Conclusión y revisión humana",
+            "9. Conclusión y revisión humana",
             styles["heading"],
             "conclusion",
-            outline_title="Conclusión y revisión humana",
         ),
-        Paragraph("Resultado automático", styles["subheading"]),
+        _section_heading(
+            "9.1. Resultado automático",
+            styles["subheading"],
+            "conclusion-result",
+            level=1,
+        ),
         Paragraph(messages[0], styles["headline_primary"]),
         Paragraph(messages[1], styles["body"]),
         Paragraph(messages[2], styles["body"]),
-        Paragraph("Interpretación técnica", styles["subheading"]),
+        _section_heading(
+            "9.2. Interpretación técnica",
+            styles["subheading"],
+            "conclusion-interpretation",
+            level=1,
+        ),
         Paragraph(
             "El resultado distingue cambio detectado, atribución compatible con conversión "
             "y decisión humana. La ausencia de evidencia suficiente de conversión no equivale "
             "a certificación de cumplimiento.",
             styles["body"],
         ),
-        Paragraph("Aspectos pendientes", styles["subheading"]),
+        _section_heading(
+            "9.3. Aspectos pendientes",
+            styles["subheading"],
+            "conclusion-pending",
+            level=1,
+        ),
         *[_bullet(item, styles) for item in pending],
-        Paragraph("Estado de revisión humana", styles["subheading"]),
+        _section_heading(
+            "9.4. Estado de revisión humana",
+            styles["subheading"],
+            "conclusion-review",
+            level=1,
+        ),
         _review_fields_table(view, styles),
         Spacer(1, 0.5 * cm),
         Paragraph(LEGAL_DISCLAIMER, styles["disclaimer"]),
@@ -1201,14 +1526,16 @@ def _dynamic_world_annual_land_cover_pages(
 ) -> list[list[Any]]:
     return [
         [
-            Paragraph(
+            _section_heading(
                 "7.5. Cobertura/uso del suelo anual Dynamic World",
-                styles["landscape_heading"],
+                styles["landscape_subheading"],
+                "temporal-dynamic-world",
+                level=1,
             ),
             Paragraph(
                 "Cada año resume por píxel la clase top-1 más frecuente (moda) dentro del "
                 "dominio de candidatos RF-first. Es contexto descriptivo de cobertura/uso "
-                "del suelo y no reemplaza los gates de atribución agrícola.",
+                "del suelo y no reemplaza los criterios de atribución agrícola.",
                 styles["landscape_body"],
             ),
             _scaled_report_image(figure, max_width=26.2 * cm, max_height=14.2 * cm),
@@ -1262,9 +1589,11 @@ def _annual_forest_pages(
     transition_grid = _compose_panel_grid(transition_panels, columns=2)
     return [
         [
-            Paragraph(
+            _section_heading(
                 "7.1. Cobertura forestal anual: referencia y trayectoria",
-                styles["landscape_heading"],
+                styles["landscape_subheading"],
+                "temporal-forest-trajectory",
+                level=1,
             ),
             Paragraph(
                 "Cada panel representa la clasificación forestal automática del mismo "
@@ -1281,9 +1610,11 @@ def _annual_forest_pages(
             ),
         ],
         [
-            Paragraph(
+            _section_heading(
                 "7.2. Cambios anuales respecto de la referencia 2020",
-                styles["landscape_heading"],
+                styles["landscape_subheading"],
+                "temporal-forest-change",
+                level=1,
             ),
             Paragraph(
                 "Los cuatro paneles comparan 2021-2024 contra la línea base 2020. El panel "
@@ -1335,9 +1666,11 @@ def _rgb_timeline_pages(
     )
     return [
         [
-            Paragraph(
+            _section_heading(
                 "7.3. Referencia 2020 y primeras ventanas de cambio",
-                styles["landscape_heading"],
+                styles["landscape_subheading"],
+                "temporal-rgb-early",
+                level=1,
             ),
             Paragraph(
                 "Las composiciones RGB HLS usan la misma grilla y escala. Dividir la serie en "
@@ -1353,9 +1686,11 @@ def _rgb_timeline_pages(
             Paragraph(common_caption, styles["landscape_caption"]),
         ],
         [
-            Paragraph(
+            _section_heading(
                 "7.4. Período posterior y situación reciente",
-                styles["landscape_heading"],
+                styles["landscape_subheading"],
+                "temporal-rgb-recent",
+                level=1,
             ),
             Paragraph(
                 "La segunda mitad de la serie conserva el mismo encuadre para que los cambios "
@@ -1692,10 +2027,29 @@ def _styles() -> dict[str, ParagraphStyle]:
             "CoverTitle",
             parent=base["Title"],
             fontName=_FONT_BOLD,
-            fontSize=25,
-            leading=31,
+            fontSize=27,
+            leading=32,
             textColor=_BLUE,
-            alignment=TA_CENTER,
+            alignment=TA_LEFT,
+            spaceAfter=4,
+        ),
+        "cover_kicker": ParagraphStyle(
+            "CoverKicker",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=10,
+            leading=13,
+            textColor=colors.white,
+            charSpace=0.8,
+        ),
+        "cover_eyebrow": ParagraphStyle(
+            "CoverEyebrow",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=9,
+            leading=12,
+            textColor=_GREEN,
+            alignment=TA_LEFT,
         ),
         "cover_field_label": ParagraphStyle(
             "CoverFieldLabel",
@@ -1717,14 +2071,28 @@ def _styles() -> dict[str, ParagraphStyle]:
             "CoverResult",
             parent=base["BodyText"],
             fontName=_FONT_BOLD,
-            fontSize=15,
-            leading=20,
-            textColor=_GREEN,
-            alignment=TA_CENTER,
-            borderColor=_GREEN,
-            borderWidth=1,
-            borderPadding=12,
-            backColor=_LIGHT_GREEN,
+            fontSize=14.5,
+            leading=18.5,
+            textColor=_TEXT,
+            alignment=TA_LEFT,
+        ),
+        "cover_result_label": ParagraphStyle(
+            "CoverResultLabel",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=7.5,
+            leading=9,
+            textColor=_MUTED,
+            charSpace=0.7,
+        ),
+        "cover_result_detail": ParagraphStyle(
+            "CoverResultDetail",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=9.2,
+            leading=12.5,
+            textColor=_TEXT,
+            alignment=TA_LEFT,
         ),
         "cover_subtitle": ParagraphStyle(
             "CoverSubtitle",
@@ -1733,7 +2101,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=14,
             leading=19,
             textColor=_TEXT,
-            alignment=TA_CENTER,
+            alignment=TA_LEFT,
         ),
         "cover_meta": ParagraphStyle(
             "CoverMeta",
@@ -1778,10 +2146,28 @@ def _styles() -> dict[str, ParagraphStyle]:
             "CoverStatus",
             parent=base["BodyText"],
             fontName=_FONT_REGULAR,
-            fontSize=11,
-            leading=15,
+            fontSize=8.5,
+            leading=11,
+            textColor=_MUTED,
+            alignment=TA_LEFT,
+        ),
+        "cover_scope_label": ParagraphStyle(
+            "CoverScopeLabel",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=8,
+            leading=10,
+            textColor=_GREEN,
+            alignment=TA_LEFT,
+        ),
+        "cover_scope": ParagraphStyle(
+            "CoverScope",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=8.7,
+            leading=12,
             textColor=_TEXT,
-            alignment=TA_CENTER,
+            alignment=TA_LEFT,
         ),
         "cover_index_heading": ParagraphStyle(
             "CoverIndexHeading",
@@ -1822,20 +2208,143 @@ def _styles() -> dict[str, ParagraphStyle]:
             "Heading",
             parent=base["Heading1"],
             fontName=_FONT_BOLD,
-            fontSize=16,
-            leading=20,
+            fontSize=18,
+            leading=22,
             textColor=_BLUE,
-            spaceAfter=10,
+            backColor=_LIGHT_BLUE,
+            borderColor=colors.HexColor("#CBD5E1"),
+            borderWidth=0.5,
+            borderPadding=7,
+            spaceAfter=12,
         ),
         "subheading": ParagraphStyle(
             "Subheading",
             parent=base["Heading2"],
             fontName=_FONT_BOLD,
-            fontSize=11,
-            leading=15,
+            fontSize=12.5,
+            leading=16,
             textColor=_GREEN,
-            spaceBefore=4,
-            spaceAfter=5,
+            spaceBefore=8,
+            spaceAfter=6,
+        ),
+        "minor_heading": ParagraphStyle(
+            "MinorHeading",
+            parent=base["Heading3"],
+            fontName=_FONT_BOLD,
+            fontSize=10.5,
+            leading=14,
+            textColor=_BLUE,
+            leftIndent=0.35 * cm,
+            borderColor=_GREEN,
+            borderWidth=0,
+            borderPadding=0,
+            spaceBefore=6,
+            spaceAfter=4,
+        ),
+        "contents_title": ParagraphStyle(
+            "ContentsTitle",
+            parent=base["Title"],
+            fontName=_FONT_BOLD,
+            fontSize=24,
+            leading=29,
+            textColor=_BLUE,
+            spaceAfter=4,
+        ),
+        "contents_subtitle": ParagraphStyle(
+            "ContentsSubtitle",
+            parent=base["Heading2"],
+            fontName=_FONT_BOLD,
+            fontSize=11,
+            leading=14,
+            textColor=_GREEN,
+            spaceAfter=4,
+        ),
+        "contents_intro": ParagraphStyle(
+            "ContentsIntro",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=8.8,
+            leading=12,
+            textColor=_MUTED,
+        ),
+        "toc_level_0": ParagraphStyle(
+            "TocLevel0",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=10.5,
+            leading=15,
+            textColor=_BLUE,
+            leftIndent=0,
+            firstLineIndent=0,
+            spaceBefore=5,
+            spaceAfter=1,
+        ),
+        "toc_level_1": ParagraphStyle(
+            "TocLevel1",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=9,
+            leading=12,
+            textColor=_GREEN,
+            leftIndent=0.7 * cm,
+            firstLineIndent=0,
+            spaceBefore=1,
+        ),
+        "toc_level_2": ParagraphStyle(
+            "TocLevel2",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=8,
+            leading=10.5,
+            textColor=_MUTED,
+            leftIndent=1.4 * cm,
+            firstLineIndent=0,
+        ),
+        "concept_title": ParagraphStyle(
+            "ConceptTitle",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=9,
+            leading=12,
+            textColor=_BLUE,
+        ),
+        "concept_body": ParagraphStyle(
+            "ConceptBody",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=8.8,
+            leading=12,
+            textColor=_TEXT,
+        ),
+        "source_note": ParagraphStyle(
+            "SourceNote",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=8.2,
+            leading=11.5,
+            textColor=_MUTED,
+            leftIndent=0.35 * cm,
+            rightIndent=0.35 * cm,
+            borderColor=colors.HexColor("#CBD5E1"),
+            borderWidth=0.5,
+            borderPadding=7,
+            backColor=_LIGHT_GRAY,
+        ),
+        "method_step_title": ParagraphStyle(
+            "MethodStepTitle",
+            parent=base["BodyText"],
+            fontName=_FONT_BOLD,
+            fontSize=9,
+            leading=12.5,
+            textColor=_BLUE,
+        ),
+        "method_step_body": ParagraphStyle(
+            "MethodStepBody",
+            parent=base["BodyText"],
+            fontName=_FONT_REGULAR,
+            fontSize=9,
+            leading=12.5,
+            textColor=_TEXT,
         ),
         "lead": ParagraphStyle(
             "Lead",
@@ -1881,10 +2390,14 @@ def _styles() -> dict[str, ParagraphStyle]:
             "LandscapeHeading",
             parent=base["Heading1"],
             fontName=_FONT_BOLD,
-            fontSize=14,
-            leading=17,
+            fontSize=15,
+            leading=18,
             textColor=_BLUE,
-            spaceAfter=5,
+            backColor=_LIGHT_BLUE,
+            borderColor=colors.HexColor("#CBD5E1"),
+            borderWidth=0.4,
+            borderPadding=4,
+            spaceAfter=6,
         ),
         "landscape_body": ParagraphStyle(
             "LandscapeBody",
@@ -1958,29 +2471,13 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=_TEXT,
             spaceAfter=3,
         ),
-        "dashboard_label": ParagraphStyle(
-            "DashboardLabel",
-            parent=base["BodyText"],
-            fontName=_FONT_BOLD,
-            fontSize=8.2,
-            leading=10,
-            textColor=_MUTED,
-        ),
-        "dashboard_value": ParagraphStyle(
-            "DashboardValue",
-            parent=base["BodyText"],
-            fontName=_FONT_BOLD,
-            fontSize=12,
-            leading=15,
-            textColor=_TEXT,
-        ),
         "landscape_subheading": ParagraphStyle(
             "LandscapeSubheading",
             parent=base["Heading2"],
             fontName=_FONT_BOLD,
-            fontSize=12.5,
-            leading=15,
-            textColor=_BLUE,
+            fontSize=11.5,
+            leading=14,
+            textColor=_GREEN,
             spaceAfter=4,
         ),
         "panel_heading": ParagraphStyle(
@@ -2137,7 +2634,11 @@ def _decorate_page(
         )
     pdf.setFont(_FONT_REGULAR, 7)
     pdf.setFillColor(_MUTED)
-    pdf.drawString(horizontal_margin, 0.72 * cm, f"Contrato editorial {view.schema_version}")
+    pdf.drawString(
+        horizontal_margin,
+        0.72 * cm,
+        f"Plantilla {REPORT_TEMPLATE_VERSION} · Contrato editorial {view.schema_version}",
+    )
     pdf.drawCentredString(page_width / 2, 0.72 * cm, emission_time.date().isoformat())
     pdf.drawRightString(
         page_width - horizontal_margin,

@@ -49,6 +49,18 @@ def _outline_titles(items: object) -> list[str]:
     return titles
 
 
+def _outline_hierarchy(items: object, *, level: int = 0) -> list[tuple[int, str]]:
+    hierarchy: list[tuple[int, str]] = []
+    if not isinstance(items, list):
+        return hierarchy
+    for item in items:
+        if isinstance(item, list):
+            hierarchy.extend(_outline_hierarchy(item, level=level + 1))
+        elif hasattr(item, "title"):
+            hierarchy.append((level, str(item.title)))
+    return hierarchy
+
+
 class _StaticOSMProvider:
     def get(self, bounds: MapBounds) -> OSMBasemap:
         minimum_x, minimum_y, maximum_x, maximum_y = bounds
@@ -1720,12 +1732,21 @@ def test_renders_deterministic_pdf_with_required_technical_language(tmp_path: Pa
     page_sizes = [
         (float(page.mediabox.width), float(page.mediabox.height)) for page in reader.pages
     ]
-    assert 10 <= len(reader.pages) <= 15
+    assert 17 <= len(reader.pages) <= 23
     assert reader.metadata is not None
     assert reader.metadata.title == "Informe técnico de evidencia geoespacial"
     assert "establecimiento-sintetico" in text
     assert "ID del análisis" in text
     assert "Resumen ejecutivo" in text
+    assert "Índice" in text
+    assert "Marco conceptual y alcance" in text
+    assert "Qué significa «libre de deforestación»" in text
+    assert "1.3.1. Bosque" in text
+    assert "1.3.2. Deforestación" in text
+    assert "1.3.3. Fecha de corte y superficie" in text
+    assert "Protocolo VISEC Carne Libre de Deforestación Argentina" in " ".join(text.split())
+    assert "Método de evaluación" in text
+    assert "Interpretación y limitaciones" in text
     assert "Fecha de corte EUDR" in text
     assert "Período analizado" in text
     assert "Alcance EUDR" in text
@@ -1797,11 +1818,13 @@ def test_splits_client_report_and_appendix_and_keeps_each_candidate_on_one_page(
     assert "Ubicación en el establecimiento" not in " ".join(main_pages)
     for ordinal in (1, 2):
         marker = f"6.{ordinal}."
-        matching_pages = [page for page in main_pages if marker in page]
+        matching_pages = [page for page in main_pages if marker in page and "ID técnico" in page]
         assert len(matching_pages) == 1
         assert "ID técnico" in matching_pages[0]
         assert "Interpretación técnica:" in matching_pages[0]
-    assert not any("6.1." in page and "6.2." in page for page in main_pages)
+    assert not any(
+        "6.1." in page and "6.2." in page and "ID técnico" in page for page in main_pages
+    )
 
 
 def test_event_map_does_not_render_establishment_location_inset(tmp_path: Path) -> None:
@@ -1888,6 +1911,7 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
     compact = " ".join(text.split())
     appendix_text = "\n".join(page.extract_text() or "" for page in PdfReader(appendix.path).pages)
     outline_titles = _outline_titles(reader.outline)
+    outline_hierarchy = _outline_hierarchy(reader.outline)
     view = build_report_view_model(package)
 
     assert "Fecha de emisión" in text
@@ -1898,11 +1922,13 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
     assert "Cambio de cobertura detectado" in compact
     assert "Evidencia compatible con conversión" in compact
     assert "Decisión humana y estado de revisión" in compact
-    assert "Alcance EUDR" in text
+    assert "Alcance EUDR de esta evidencia" in text
     assert "Legalidad" in text and "No evaluada" in text
     assert "Trazabilidad de animales o productos" in compact
     assert "Certificación EUDR" in text and "Fuera del alcance" in text
     assert "Eventos prioritarios" in text
+    assert "1 evento, 8,09 ha" in compact
+    assert "1 eventos" not in compact
     assert "Inventario operativo y resumen subumbral" in appendix_text
     assert "Anexos técnicos" in appendix_text
     assert "Resultado automático" in text
@@ -1916,10 +1942,19 @@ def test_professional_report_has_audit_structure_dynamic_headline_and_navigation
     assert reader.metadata is not None
     assert reader.metadata.creation_date is not None
     assert reader.metadata.creation_date.year == 2026
-    assert len(outline_titles) >= 9
-    assert outline_titles[:4] == [
+    assert len(outline_titles) >= 28
+    assert outline_titles[:5] == [
         "Portada",
-        "Resumen ejecutivo",
-        "Identificación y geolocalización",
-        "Alcance EUDR",
+        "Índice",
+        "1. Marco conceptual y alcance",
+        "1.1. El EUDR y la cadena bovina",
+        "1.2. Qué significa «libre de deforestación»",
     ]
+    assert (1, "1.3. Definiciones de referencia") in outline_hierarchy
+    assert (2, "1.3.1. Bosque") in outline_hierarchy
+    assert (2, "1.3.2. Deforestación") in outline_hierarchy
+    assert (0, "6. Eventos prioritarios") in outline_hierarchy
+    assert (1, "6.1. Evento probable E1") in outline_hierarchy
+    assert (0, "7. Evidencia temporal") in outline_hierarchy
+    assert (1, "7.1. Cobertura forestal anual: referencia y trayectoria") in outline_hierarchy
+    assert (1, "7.5. Cobertura/uso del suelo anual Dynamic World") in outline_hierarchy
