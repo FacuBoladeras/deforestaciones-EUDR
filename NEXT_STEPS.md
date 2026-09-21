@@ -1,6 +1,6 @@
 # Próximos pasos
 
-Actualizado: **3 de septiembre de 2026**.
+Actualizado: **21 de septiembre de 2026**.
 
 Este archivo es el único backlog canónico. No acumula historia cerrada.
 
@@ -13,8 +13,8 @@ Ya existe:
 - API/worker/web locales;
 - PDF y ZIP verificados;
 - dos runs remotos recientes `complete`;
-- gate actual verde: 760 pruebas raíz, 90,41 % de cobertura; Ruff, formato y
-  Mypy sobre 169 archivos; jobs 10, API 20, worker 51 y web 34 + typecheck;
+- gate actual verde: 760 pruebas raíz, 90,40 % de cobertura; Ruff, formato y
+  Mypy sobre 171 archivos; jobs 10, API 20, worker 51 y web 34 + typecheck;
 - cero warnings en el gate;
 - perfiles `lean/debug`.
 
@@ -83,7 +83,7 @@ editoriales y ampliar la validación después del smoke GEE acotado ya completad
 
 ### Gate
 
-- gate local actual: 760 pruebas raíz, 90,41 %; Ruff, formato y Mypy sobre 169
+- gate local actual: 760 pruebas raíz, 90,40 %; Ruff, formato y Mypy sobre 171
   archivos; jobs 10/94,14 %, API 20/90,97 %, worker 51/90,13 %, web 34 más
   typecheck y cero warnings;
 - tests de contratos, fusión, occurrence, reporting parcial y paridad raster;
@@ -149,8 +149,13 @@ Crear imágenes independientes para API y worker sin acoplar la API al stack GEE
 
 - runner local preparado: Docker Desktop `4.89.0`, Engine `29.7.2`, Buildx
   `0.36.1`, BuildKit `0.32.2`, Scout `1.24.0` y containerd image store;
-- ejecutar el gate con `--execute` y revisar tamaño, wheels, procedencia, SBOM y
-  vulnerabilidades de ambas imágenes;
+- el gate real descartó Bookworm por vulnerabilidades heredadas; con Trixie la
+  API pasó y el worker quedó bloqueado por CVE-2026-69247 en
+  `cryptography==49.0.0`;
+- el lock ya usa `cryptography==50.0.1` y la raíz impone
+  `cryptography>=50.0.1,<51` como restricción transitiva;
+- repetir el gate con `--execute` y revisar tamaño, wheels, procedencia, SBOM y
+  vulnerabilidades de ambas imágenes sobre la nueva revisión;
 - no promover una imagen mientras exista una CVE high/critical sin una decisión
   de riesgo explícita y versionada.
 

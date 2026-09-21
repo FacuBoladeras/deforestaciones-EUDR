@@ -1,6 +1,6 @@
 # Contexto general del proyecto
 
-Actualizado: **3 de septiembre de 2026**.
+Actualizado: **21 de septiembre de 2026**.
 
 ## 1. Propósito
 
@@ -57,16 +57,18 @@ tests                  gates científicos e integración multiproceso
 - `report_assets` cura una vista; no reemplaza los bundles científicos.
 - El PDF presenta evidencia; no altera métricas ni reglas de dominio.
 - La imagen API se define separada del worker y no contiene el stack científico;
-  su build, escaneo y smoke aún no fueron ejecutados.
+  su build y escaneo reales ya se ejecutaron, mientras que el smoke aún está
+  pendiente.
 - La imagen worker contiene el stack científico pero no la API; credenciales y
   modelo RF son mounts obligatorios y los runs viven fuera de la imagen.
 - Compose conecta una API y un worker mononodo mediante almacenamiento privado
   común, identidad numérica compartida y límites operativos parametrizables;
   todavía no se ejecutó el smoke.
-- El gate de imágenes ya tiene un plan seguro y testeado para build por SHA,
-  procedencia, SBOM SPDX, SARIF y bloqueo high/critical; el runner local ya usa
-  Buildx `0.36.1`, BuildKit `0.32.2` y containerd image store, con preflight
-  aprobado y ejecución real aún pendiente.
+- El gate de imágenes ya ejecutó build por SHA, procedencia, SBOM SPDX, SARIF y
+  bloqueo high/critical. Bookworm quedó descartado por vulnerabilidades de base;
+  con Trixie la API pasó sin hallazgos high/critical y el worker quedó bloqueado
+  únicamente por `cryptography==49.0.0`. El lock y la restricción de resolución
+  ya exigen `cryptography>=50.0.1,<51`; falta repetir el gate sobre ese commit.
 
 ## 4. Versiones autoritativas
 
@@ -100,12 +102,12 @@ No se eliminan por falta de referencias directas.
 
 ### Calidad de código
 
-Gate completo del árbol actual, ejecutado el 3 de septiembre de 2026:
+Gate completo del árbol actual, ejecutado el 21 de septiembre de 2026:
 
 - Ruff check: aprobado.
-- Ruff format: 169 archivos conformes.
-- Mypy: 169 archivos, sin errores.
-- Pytest raíz: 760 pruebas, 90,41 % de cobertura.
+- Ruff format: 171 archivos conformes.
+- Mypy: 171 archivos, sin errores.
+- Pytest raíz: 760 pruebas, 90,40 % de cobertura.
 - Jobs: 10 pruebas, 94,14 %.
 - API: 20 pruebas, 90,97 %.
 - Worker: 51 pruebas, 90,13 %.

@@ -1,6 +1,6 @@
 # Contexto de API, worker y cliente web
 
-Actualizado: **3 de septiembre de 2026**.
+Actualizado: **21 de septiembre de 2026**.
 
 ## 1. Objetivo
 
@@ -229,14 +229,13 @@ Contrato de filesystem:
   objetos;
 - `/tmp`: tmpfs acotado cuando el root filesystem sea read-only.
 
-Las imágenes base están fijadas por digest de índice OCI además del tag. Para
+Las imágenes base Trixie están fijadas por digest de índice OCI además del tag. Para
 actualizarlas se debe inspeccionar el manifest, cambiar tag y digest juntos,
 ejecutar los gates, generar SBOM, escanear vulnerabilidades y recién entonces
 probar el smoke Compose. Sobrescribir un `ARG` con una base no fijada invalida
 esa garantía. El argumento obligatorio `VCS_REF` se propaga a
 `DEFORESTATION_CODE_REVISION`; el manifest científico usa esa revisión cuando
-Git no está presente en el runtime. En este incremento no se ejecutó ningún
-build de contenedor.
+Git no está presente en el runtime.
 
 ### Imagen worker
 
@@ -299,8 +298,12 @@ Scout `>=1.4`, y está protegida por `--execute`. Rechaza un checkout con cambio
 sin commit o una revisión distinta de `HEAD`, evitando etiquetar contenido
 mutable con una identidad Git falsa. El 3 de septiembre de 2026 el runner local
 quedó en Docker Desktop `4.89.0`, Engine `29.7.2`, Buildx `0.36.1`, BuildKit
-`0.32.2`, Scout `1.24.0` y containerd image store. El daemon Linux y el preflight
-están operativos; NO se ejecutó ningún build ni escaneo real.
+`0.32.2`, Scout `1.24.0` y containerd image store. El gate real sobre Bookworm
+bloqueó vulnerabilidades heredadas de la base. Después de migrar a Trixie, la
+API pasó sin hallazgos high/critical y el worker quedó bloqueado sólo por
+CVE-2026-69247 en `cryptography==49.0.0`. El 21 de septiembre el workspace
+incorporó una restricción transitiva `cryptography>=50.0.1,<51` y regeneró el
+lock con `50.0.1`; el gate de imágenes aún debe repetirse sobre el nuevo commit.
 
 ```powershell
 uv run python scripts/run_local_stack.py
@@ -341,10 +344,10 @@ Antes de exponerlo en red se requieren:
 
 ## 11. Gates
 
-Gate completo del árbol actual, ejecutado el 3 de septiembre de 2026:
+Gate completo del árbol actual, ejecutado el 21 de septiembre de 2026:
 
-- raíz: 760 pruebas, 90,41 % de cobertura;
-- Ruff, formato y Mypy: 169 archivos, sin errores ni warnings;
+- raíz: 760 pruebas, 90,40 % de cobertura;
+- Ruff, formato y Mypy: 171 archivos, sin errores ni warnings;
 - jobs: 10 pruebas, 94,14 %;
 - API: 20 pruebas, 90,97 %;
 - worker: 51 pruebas, 90,13 %;
@@ -356,7 +359,8 @@ Los runs GEE históricos preservan el flujo anterior de seis componentes. El
 smoke RF-first de Mojones Norte completó el flujo nuevo de siete componentes;
 esto valida la integración remota del caso, no exactitud temática generalizable.
 
-No se ejecutó build de frontend ni de contenedor.
+No se ejecutó un nuevo build de frontend ni de contenedor después de actualizar
+`cryptography`; el release gate de esa revisión sigue pendiente.
 
 ## 12. Evolución pendiente
 
