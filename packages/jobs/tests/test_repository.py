@@ -33,7 +33,7 @@ def _job(*, analysis_id: str = "11111111-1111-4111-8111-111111111111") -> Analys
         updated_at=datetime(2026, 8, 17, tzinfo=UTC),
         configuration_versions="{}",
         code_revision="test-revision",
-        expires_at=datetime(2026, 9, 16, tzinfo=UTC),
+        expires_at=datetime(2100, 1, 1, tzinfo=UTC),
     )
 
 

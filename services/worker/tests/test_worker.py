@@ -65,7 +65,7 @@ def _enqueue(repository: SQLiteJobRepository, storage_root: Path) -> AnalysisJob
         updated_at=now,
         configuration_versions="{}",
         code_revision="test-revision",
-        expires_at=now + timedelta(days=30),
+        expires_at=datetime(2100, 1, 1, tzinfo=UTC),
         declared_land_use="unknown",
         declared_context_source="user_declared",
     )
