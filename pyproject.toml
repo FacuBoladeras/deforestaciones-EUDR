@@ -39,6 +39,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/deforestation_pipeline"]
 
+[tool.uv]
+constraint-dependencies = ["cryptography>=50.0.1,<51"]
+
 [tool.uv.sources]
 deforestation-domain = { workspace = true }
 
