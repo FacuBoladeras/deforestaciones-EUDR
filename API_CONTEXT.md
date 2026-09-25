@@ -229,11 +229,19 @@ Contrato de filesystem:
   objetos;
 - `/tmp`: tmpfs acotado cuando el root filesystem sea read-only.
 
-Las imágenes base Trixie están fijadas por digest de índice OCI además del tag. Para
-actualizarlas se debe inspeccionar el manifest, cambiar tag y digest juntos,
-ejecutar los gates, generar SBOM, escanear vulnerabilidades y recién entonces
-probar el smoke Compose. Sobrescribir un `ARG` con una base no fijada invalida
-esa garantía. El argumento obligatorio `VCS_REF` se propaga a
+El intento actual usa `cgr.dev/chainguard/wolfi-base:latest` fijada por digest
+de índice OCI en ambas imágenes. Builder y runtime instalan el mismo paquete
+`python-3.12=3.12.14-r9` de Wolfi (glibc); la base sola pasó el escaneo remoto
+high/critical, y se comprobó que el paquete está disponible, arranca Python
+3.12.14 y admite directorios con UID/GID `10001`. El índice APK y sus
+dependencias transitivas pueden cambiar entre builds: la versión directa y el
+digest de base no fijan por sí solos todo el sistema. Sólo el build con SBOM y
+escaneo finales permite validar este intento; falta comprobar los wheels
+geoespaciales del worker. Para actualizar la base se debe inspeccionar el
+manifest, cambiar tag y digest juntos, ejecutar los gates, generar SBOM,
+escanear vulnerabilidades y recién entonces probar el smoke Compose.
+Sobrescribir un `ARG` con una base no fijada invalida esa garantía. El
+argumento obligatorio `VCS_REF` se propaga a
 `DEFORESTATION_CODE_REVISION`; el manifest científico usa esa revisión cuando
 Git no está presente en el runtime.
 
@@ -309,6 +317,8 @@ al worker. El pin Trixie actualizado se verificó por índice OCI remoto: su
 imagen base `linux/amd64` presenta todavía dos high sin parche declarado,
 CVE-2026-82560 (Perl) y CVE-2026-85091 (zlib). Cambiar el digest reduce
 hallazgos conocidos, pero no aprueba el gate ni demuestra el estado del worker.
+Por eso se preparó el intento con Wolfi descrito arriba; sus imágenes finales
+aún no se construyeron ni escanearon.
 
 ```powershell
 uv run python scripts/run_local_stack.py
@@ -365,8 +375,8 @@ smoke RF-first de Mojones Norte completó el flujo nuevo de siete componentes;
 esto valida la integración remota del caso, no exactitud temática generalizable.
 
 El build de API de `a66c24f1f0b2aef7c62e7be4ed59e0e17d45265e` se detuvo en
-el escaneo; no se ejecutó el build del worker ni el smoke Compose. El nuevo pin
-de base aún no fue construido ni escaneado como imagen de aplicación.
+el escaneo; no se ejecutó el build del worker ni el smoke Compose. La variante
+Wolfi aún no fue construida ni escaneada como imagen de aplicación.
 
 ## 12. Evolución pendiente
 

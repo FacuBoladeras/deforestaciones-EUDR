@@ -160,10 +160,12 @@ Crear imágenes independientes para API y worker sin acoplar la API al stack GEE
 - la base Trixie actualizada y fijada por digest conserva dos high sin parche
   declarado: CVE-2026-82560 (Perl) y CVE-2026-85091 (zlib). Bookworm actual
   presenta más hallazgos y no es una alternativa equivalente;
-- investigar una base compatible sin hallazgos bloqueantes o registrar una
-  decisión de riesgo explícita y versionada para los residuales; después
-  repetir el gate con `--execute` y revisar tamaño, wheels, procedencia, SBOM
-  y vulnerabilidades de ambas imágenes sobre la nueva revisión;
+- se preparó un intento con `wolfi-base` fijada por digest, cero hallazgos
+  high/critical en el escaneo remoto de la base y Python 3.12.14 instalado
+  desde APK. Verificar con `--execute` disponibilidad de wheels manylinux,
+  librerías nativas del worker, tamaño, procedencia, SBOM y vulnerabilidades
+  de **ambas imágenes finales** sobre un nuevo commit; el índice APK conserva
+  dependencias transitivas mutables;
 - no promover una imagen mientras exista una CVE high/critical sin una decisión
   de riesgo explícita y versionada.
 

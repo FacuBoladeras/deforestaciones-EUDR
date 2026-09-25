@@ -24,18 +24,18 @@ def test_api_image_contract_is_minimal_and_non_root() -> None:
     assert 'test "${#VCS_REF}" -eq 40' in dockerfile
 
 
-def test_api_image_versions_are_explicit_and_never_use_latest() -> None:
+def test_api_image_versions_are_explicit_and_pinned_by_digest() -> None:
     dockerfile = (PROJECT_ROOT / "Dockerfile.api").read_text(encoding="utf-8")
 
     assert (
-        "ARG PYTHON_IMAGE=python:3.12-slim-trixie@sha256:"
-        "2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+        "ARG PYTHON_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:"
+        "08df5982c3d27e70a4ce1607e3bb9af09d746f8722cf135a7694afef879fc5a2"
     ) in dockerfile
+    assert dockerfile.count("RUN apk add --no-cache python-3.12=3.12.14-r9") == 2
     assert (
         "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10.12@sha256:"
         "72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec"
     ) in dockerfile
-    assert ":latest" not in dockerfile
 
 
 def test_docker_context_excludes_private_and_regenerable_state() -> None:
@@ -86,4 +86,4 @@ def test_worker_image_uses_the_same_pinned_toolchain_as_api() -> None:
     pinned_args = [line for line in api.splitlines() if line.startswith("ARG ")][:2]
     assert pinned_args
     assert all(argument in worker for argument in pinned_args)
-    assert ":latest" not in worker
+    assert worker.count("RUN apk add --no-cache python-3.12=3.12.14-r9") == 2

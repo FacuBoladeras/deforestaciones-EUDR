@@ -68,8 +68,10 @@ tests                  gates científicos e integración multiproceso
   bloqueo high/critical. Bookworm quedó descartado por vulnerabilidades de base;
   después de resolver `cryptography==49.0.0`, el gate de la revisión siguiente
   construyó la API pero bloqueó 16 hallazgos high/critical de la base Trixie
-  fijada. El pin actualizado reduce los hallazgos conocidos de base a dos
-  pendientes sin parche; falta escanear ambas imágenes y ejecutar Compose.
+  fijada. La base Trixie actual conserva dos high sin parche declarado. Se
+  preparó un intento con Wolfi/glibc y Python 3.12 fijados; la base remota no
+  tiene hallazgos high/critical, pero falta comprobar las imágenes finales,
+  especialmente los wheels geoespaciales del worker, y ejecutar Compose.
 
 ## 4. Versiones autoritativas
 

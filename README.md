@@ -152,9 +152,11 @@ pipeline científico, reporting ni el worker. El runtime usa UID/GID `10001`,
 expone el healthcheck `/health`, incorpora únicamente el límite jurisdiccional
 público y reserva `/var/lib/deforestation/private` para estado privado montado.
 
-Las bases están fijadas por tag y digest multi-arquitectura: Python
-`3.12-slim-trixie` —resuelto como `3.12.14` el 1 de septiembre de 2026— y uv
-`0.10.12`. [`.dockerignore`](.dockerignore) excluye credenciales, variables
+Las bases están fijadas por tag y digest multi-arquitectura: Wolfi/glibc con
+`python-3.12=3.12.14-r9` instalado en builder y runtime, y uv `0.10.12`.
+El índice APK y las dependencias transitivas no están fijados por el digest
+de base: se verifican con el SBOM de cada build. [`.dockerignore`](.dockerignore)
+excluye credenciales, variables
 locales, outputs, caches, AOI GeoJSON y modelos binarios; sólo reingresa el
 límite operacional versionado. Los secretos y `DEFORESTATION_CODE_REVISION`
 no se hornean como archivos. El build exige `VCS_REF`; ambas imágenes lo
@@ -190,8 +192,8 @@ filesystem raíz read-only. Ausencia de credenciales o del modelo significa
 
 El gate construyó la API de una revisión anterior y bloqueó su escaneo por
 vulnerabilidades de base; el worker de esa revisión no llegó a construirse.
-El pin de base actualizado todavía tiene dos hallazgos high según el escaneo
-remoto de Scout. Tamaño, wheels Linux, vulnerabilidades de las imágenes finales,
+El intento actual con Wolfi se escaneó sólo como imagen base (sin high/critical).
+Tamaño, wheels Linux, vulnerabilidades de las imágenes finales,
 CPU, memoria, disco y smoke siguen pendientes antes de promoverlas. El contrato
 de build, procedencia, SBOM y escaneo se describe más abajo.
 
