@@ -188,10 +188,12 @@ contenedor ejecuta como UID/GID `10001`, usa `/tmp` para caches y espera un
 filesystem raíz read-only. Ausencia de credenciales o del modelo significa
 `unhealthy`, no evidencia negativa ni un worker parcialmente operativo.
 
-No se construyeron ni escanearon las imágenes. Tamaño, disponibilidad de wheels
-Linux, vulnerabilidades, CPU, memoria, cuota de disco y smoke quedan como gates
-antes de promoverlas. El contrato automatizado de build, procedencia, SBOM y
-escaneo se describe más abajo.
+El gate construyó la API de una revisión anterior y bloqueó su escaneo por
+vulnerabilidades de base; el worker de esa revisión no llegó a construirse.
+El pin de base actualizado todavía tiene dos hallazgos high según el escaneo
+remoto de Scout. Tamaño, wheels Linux, vulnerabilidades de las imágenes finales,
+CPU, memoria, disco y smoke siguen pendientes antes de promoverlas. El contrato
+de build, procedencia, SBOM y escaneo se describe más abajo.
 
 ## Contrato Compose local
 
@@ -248,8 +250,9 @@ uv run python scripts/container_release_gate.py --revision $revision --execute
 
 El runner local quedó preparado con Docker Desktop `4.89.0`, Engine `29.7.2`,
 Buildx `0.36.1`, BuildKit `0.32.2`, Scout `1.24.0` y containerd image store. El
-preflight pasó para el commit documentado, pero no se ejecutó `--execute` ni se
-construyó ninguna imagen en este incremento.
+gate sobre `a66c24f1f0b2aef7c62e7be4ed59e0e17d45265e` construyó la API y
+se detuvo en Scout por CVE de la base. La imagen worker aún no fue evaluada en
+esa revisión; consultar [`API_CONTEXT.md`](API_CONTEXT.md) para el estado actual.
 
 ## Ejecución científica directa
 

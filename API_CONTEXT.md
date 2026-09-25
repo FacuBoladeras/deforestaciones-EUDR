@@ -1,6 +1,6 @@
 # Contexto de API, worker y cliente web
 
-Actualizado: **21 de septiembre de 2026**.
+Actualizado: **25 de septiembre de 2026**.
 
 ## 1. Objetivo
 
@@ -301,9 +301,14 @@ quedó en Docker Desktop `4.89.0`, Engine `29.7.2`, Buildx `0.36.1`, BuildKit
 `0.32.2`, Scout `1.24.0` y containerd image store. El gate real sobre Bookworm
 bloqueó vulnerabilidades heredadas de la base. Después de migrar a Trixie, la
 API pasó sin hallazgos high/critical y el worker quedó bloqueado sólo por
-CVE-2026-69247 en `cryptography==49.0.0`. El 21 de septiembre el workspace
-incorporó una restricción transitiva `cryptography>=50.0.1,<51` y regeneró el
-lock con `50.0.1`; el gate de imágenes aún debe repetirse sobre el nuevo commit.
+CVE-2026-69247 en `cryptography==49.0.0`. El lock posterior fijó `50.0.1`.
+El gate sobre `a66c24f1f0b2aef7c62e7be4ed59e0e17d45265e` construyó la API
+pero Scout bloqueó 16 hallazgos high/critical en paquetes Debian de la base
+Trixie fijada; dejó SBOM y SARIF, no produjo `release-evidence.json` ni llegó
+al worker. El pin Trixie actualizado se verificó por índice OCI remoto: su
+imagen base `linux/amd64` presenta todavía dos high sin parche declarado,
+CVE-2026-82560 (Perl) y CVE-2026-85091 (zlib). Cambiar el digest reduce
+hallazgos conocidos, pero no aprueba el gate ni demuestra el estado del worker.
 
 ```powershell
 uv run python scripts/run_local_stack.py
@@ -359,8 +364,9 @@ Los runs GEE históricos preservan el flujo anterior de seis componentes. El
 smoke RF-first de Mojones Norte completó el flujo nuevo de siete componentes;
 esto valida la integración remota del caso, no exactitud temática generalizable.
 
-No se ejecutó un nuevo build de frontend ni de contenedor después de actualizar
-`cryptography`; el release gate de esa revisión sigue pendiente.
+El build de API de `a66c24f1f0b2aef7c62e7be4ed59e0e17d45265e` se detuvo en
+el escaneo; no se ejecutó el build del worker ni el smoke Compose. El nuevo pin
+de base aún no fue construido ni escaneado como imagen de aplicación.
 
 ## 12. Evolución pendiente
 

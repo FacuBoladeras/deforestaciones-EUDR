@@ -1,6 +1,6 @@
 # Contexto general del proyecto
 
-Actualizado: **21 de septiembre de 2026**.
+Actualizado: **25 de septiembre de 2026**.
 
 ## 1. Propósito
 
@@ -66,9 +66,10 @@ tests                  gates científicos e integración multiproceso
   todavía no se ejecutó el smoke.
 - El gate de imágenes ya ejecutó build por SHA, procedencia, SBOM SPDX, SARIF y
   bloqueo high/critical. Bookworm quedó descartado por vulnerabilidades de base;
-  con Trixie la API pasó sin hallazgos high/critical y el worker quedó bloqueado
-  únicamente por `cryptography==49.0.0`. El lock y la restricción de resolución
-  ya exigen `cryptography>=50.0.1,<51`; falta repetir el gate sobre ese commit.
+  después de resolver `cryptography==49.0.0`, el gate de la revisión siguiente
+  construyó la API pero bloqueó 16 hallazgos high/critical de la base Trixie
+  fijada. El pin actualizado reduce los hallazgos conocidos de base a dos
+  pendientes sin parche; falta escanear ambas imágenes y ejecutar Compose.
 
 ## 4. Versiones autoritativas
 
