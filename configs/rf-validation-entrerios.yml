@@ -1,0 +1,44 @@
+schema_version: "1.0.0"
+pipeline_config_path: "configs/default.yml"
+input_csv_paths:
+  - "outputs/training_p0/raw/entre_rios_training_2020_p0_utm20.csv"
+  - "outputs/training_p0/raw/entre_rios_training_2020_p0_utm21.csv"
+output_directory: "outputs/rf_validation_2020"
+earth_engine_project: "ee-facuboladerasgee"
+seed: 20260803
+pilot:
+  split: "validation"
+  quotas_per_utm:
+    forest: 10
+    non_forest: 10
+    ambiguous: 5
+test:
+  split: "test"
+  quotas_per_utm:
+    forest: 40
+    non_forest: 40
+    ambiguous: 20
+imagery:
+  collection_id: "COPERNICUS/S2_SR_HARMONIZED"
+  years: [2019, 2020, 2021]
+  reference_year: 2020
+  context_radius_m: 480
+  scale_m: 10
+  dimensions: "1024x256"
+  maximum_scene_cloud_pct: 80
+  mask_method: "SCL_and_QA60_v1"
+  rgb_bands: [B4, B3, B2]
+  false_color_bands: [B8, B4, B3]
+  rgb_min: 0.02
+  rgb_max: 0.30
+  false_color_min: 0.02
+  false_color_max: 0.40
+  gamma: 1.2
+  concurrent_downloads: 6
+gate:
+  minimum_adjudicable_fraction: 0.80
+  minimum_global_forest_recall: 0.90
+  minimum_utm_forest_recall: 0.85
+  minimum_forest_precision: 0.80
+  minimum_balanced_accuracy: 0.85
+  minimum_open_woody_recall: 0.70

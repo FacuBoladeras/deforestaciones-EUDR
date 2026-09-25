@@ -1,0 +1,722 @@
+{
+  "$defs": {
+    "DisturbanceCcdcEvidence": {
+      "additionalProperties": false,
+      "description": "Procedencia y disponibilidad del resumen escalar CCDC.",
+      "properties": {
+        "change_metric_semantics": {
+          "const": "algorithmic_breakpoint_score_not_calibrated",
+          "title": "Change Metric Semantics",
+          "type": "string"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
+        },
+        "raw_array_downloaded": {
+          "const": false,
+          "title": "Raw Array Downloaded",
+          "type": "boolean"
+        },
+        "scalar_summary_downloaded": {
+          "title": "Scalar Summary Downloaded",
+          "type": "boolean"
+        },
+        "source_product": {
+          "const": "HLSL30",
+          "title": "Source Product",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "scalar_summary_materialized",
+            "unavailable_global_failure"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw_array_downloaded",
+        "scalar_summary_downloaded",
+        "source_product",
+        "change_metric_semantics",
+        "status"
+      ],
+      "title": "DisturbanceCcdcEvidence",
+      "type": "object"
+    },
+    "DisturbanceEvaluableRange": {
+      "additionalProperties": false,
+      "description": "Período posterior al corte efectivamente evaluado.",
+      "properties": {
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "excluded_cutoff_straddling_period_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Excluded Cutoff Straddling Period Ids",
+          "type": "array"
+        },
+        "period_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Period Ids",
+          "type": "array"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_date",
+        "end_date",
+        "period_ids",
+        "excluded_cutoff_straddling_period_ids"
+      ],
+      "title": "DisturbanceEvaluableRange",
+      "type": "object"
+    },
+    "DisturbanceEvidenceAssets": {
+      "additionalProperties": false,
+      "description": "Los cinco activos compactos del expediente de perturbaciones.",
+      "properties": {
+        "diagnostics_raster": {
+          "minLength": 1,
+          "title": "Diagnostics Raster",
+          "type": "string"
+        },
+        "metadata": {
+          "minLength": 1,
+          "title": "Metadata",
+          "type": "string"
+        },
+        "period_summary_table": {
+          "minLength": 1,
+          "title": "Period Summary Table",
+          "type": "string"
+        },
+        "qa_figure": {
+          "minLength": 1,
+          "title": "Qa Figure",
+          "type": "string"
+        },
+        "summary_raster": {
+          "minLength": 1,
+          "title": "Summary Raster",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metadata",
+        "summary_raster",
+        "diagnostics_raster",
+        "qa_figure",
+        "period_summary_table"
+      ],
+      "title": "DisturbanceEvidenceAssets",
+      "type": "object"
+    },
+    "DisturbanceEvidenceParameters": {
+      "additionalProperties": false,
+      "description": "Parámetros científicos mínimos necesarios para interpretar la evidencia.",
+      "properties": {
+        "baseline_disagreement_policy": {
+          "minLength": 1,
+          "title": "Baseline Disagreement Policy",
+          "type": "string"
+        },
+        "detector_disagreement_policy": {
+          "minLength": 1,
+          "title": "Detector Disagreement Policy",
+          "type": "string"
+        },
+        "indices": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Indices",
+          "type": "array"
+        },
+        "minimum_consecutive_signal_periods": {
+          "minimum": 2,
+          "title": "Minimum Consecutive Signal Periods",
+          "type": "integer"
+        },
+        "minimum_index_support_count": {
+          "minimum": 2,
+          "title": "Minimum Index Support Count",
+          "type": "integer"
+        },
+        "robust_signal_threshold": {
+          "exclusiveMinimum": 0,
+          "title": "Robust Signal Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "indices",
+        "robust_signal_threshold",
+        "minimum_index_support_count",
+        "minimum_consecutive_signal_periods",
+        "baseline_disagreement_policy",
+        "detector_disagreement_policy"
+      ],
+      "title": "DisturbanceEvidenceParameters",
+      "type": "object"
+    },
+    "DisturbanceEvidenceRasters": {
+      "additionalProperties": false,
+      "description": "Identidad espacial y semántica común de los rasters publicados.",
+      "properties": {
+        "aoi_footprint_applied": {
+          "const": true,
+          "title": "Aoi Footprint Applied",
+          "type": "boolean"
+        },
+        "diagnostic_band_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Diagnostic Band Names",
+          "type": "array"
+        },
+        "dtype": {
+          "const": "float32",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "grid_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Grid Sha256",
+          "type": "string"
+        },
+        "integer_semantics_preserved": {
+          "const": true,
+          "title": "Integer Semantics Preserved",
+          "type": "boolean"
+        },
+        "nodata": {
+          "title": "Nodata",
+          "type": "number"
+        },
+        "summary_band_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Summary Band Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dtype",
+        "nodata",
+        "grid_sha256",
+        "summary_band_names",
+        "diagnostic_band_names",
+        "integer_semantics_preserved",
+        "aoi_footprint_applied"
+      ],
+      "title": "DisturbanceEvidenceRasters",
+      "type": "object"
+    },
+    "DisturbanceEvidenceSources": {
+      "additionalProperties": false,
+      "description": "Fuentes lógicas que respaldan la detección sin atribución.",
+      "properties": {
+        "ccdc": {
+          "const": "dense_masked_hlsl30_collection",
+          "title": "Ccdc",
+          "type": "string"
+        },
+        "forest_domain": {
+          "const": "forest_baseline_2020",
+          "title": "Forest Domain",
+          "type": "string"
+        },
+        "robust": {
+          "const": "published_and_internal_hls_seasonal_composites",
+          "title": "Robust",
+          "type": "string"
+        }
+      },
+      "required": [
+        "robust",
+        "ccdc",
+        "forest_domain"
+      ],
+      "title": "DisturbanceEvidenceSources",
+      "type": "object"
+    },
+    "DisturbanceEvidenceStatistics": {
+      "additionalProperties": false,
+      "description": "Conteos dentro de la huella exacta del AOI.",
+      "properties": {
+        "quality_flag_bit_counts": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Quality Flag Bit Counts",
+          "type": "object"
+        },
+        "reason_code": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Reason Code",
+          "type": "object"
+        },
+        "state_code": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "State Code",
+          "type": "object"
+        }
+      },
+      "required": [
+        "state_code",
+        "reason_code",
+        "quality_flag_bit_counts"
+      ],
+      "title": "DisturbanceEvidenceStatistics",
+      "type": "object"
+    },
+    "DisturbanceReferenceSupport": {
+      "additionalProperties": false,
+      "description": "Historia previa usada como referencia estacional.",
+      "properties": {
+        "actual_end_date_exclusive": {
+          "format": "date",
+          "title": "Actual End Date Exclusive",
+          "type": "string"
+        },
+        "actual_start_date": {
+          "format": "date",
+          "title": "Actual Start Date",
+          "type": "string"
+        },
+        "configured_start_date": {
+          "format": "date",
+          "title": "Configured Start Date",
+          "type": "string"
+        },
+        "internal_period_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Internal Period Ids",
+          "type": "array"
+        },
+        "minimum_observations_per_season": {
+          "minimum": 1,
+          "title": "Minimum Observations Per Season",
+          "type": "integer"
+        },
+        "period_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Period Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "configured_start_date",
+        "actual_start_date",
+        "actual_end_date_exclusive",
+        "period_ids",
+        "internal_period_ids",
+        "minimum_observations_per_season"
+      ],
+      "title": "DisturbanceReferenceSupport",
+      "type": "object"
+    },
+    "DisturbanceRequestedRange": {
+      "additionalProperties": false,
+      "description": "Años solicitados por quien ejecuta el análisis.",
+      "properties": {
+        "end_year": {
+          "minimum": 1900,
+          "title": "End Year",
+          "type": "integer"
+        },
+        "start_year": {
+          "minimum": 1900,
+          "title": "Start Year",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_year",
+        "end_year"
+      ],
+      "title": "DisturbanceRequestedRange",
+      "type": "object"
+    },
+    "DisturbanceScreeningEvidence": {
+      "additionalProperties": false,
+      "description": "Alcance del screening y señales dentro y fuera del dominio primario.",
+      "properties": {
+        "automatic_statement": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Automatic Statement"
+        },
+        "automatic_statement_generated": {
+          "title": "Automatic Statement Generated",
+          "type": "boolean"
+        },
+        "automatic_statement_period": {
+          "$ref": "#/$defs/DisturbanceStatementPeriod"
+        },
+        "automatic_statement_policy": {
+          "const": "only_when_no_signal_in_automated_forest",
+          "title": "Automatic Statement Policy",
+          "type": "string"
+        },
+        "automatic_statement_scope": {
+          "const": "automated_forest_high_confidence",
+          "title": "Automatic Statement Scope",
+          "type": "string"
+        },
+        "baseline_metrics": {
+          "$ref": "#/$defs/ForestScreeningMetrics"
+        },
+        "final_assessment_generated": {
+          "const": false,
+          "title": "Final Assessment Generated",
+          "type": "boolean"
+        },
+        "primary_interpretation_domain": {
+          "const": "automated_forest",
+          "title": "Primary Interpretation Domain",
+          "type": "string"
+        },
+        "temporal_signal_scope": {
+          "const": "entire_aoi",
+          "title": "Temporal Signal Scope",
+          "type": "string"
+        },
+        "temporal_signals_by_domain": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TemporalSignalCounts"
+          },
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Temporal Signals By Domain",
+          "type": "object"
+        }
+      },
+      "required": [
+        "primary_interpretation_domain",
+        "temporal_signal_scope",
+        "baseline_metrics",
+        "temporal_signals_by_domain",
+        "automatic_statement_policy",
+        "automatic_statement_scope",
+        "automatic_statement_period",
+        "automatic_statement_generated",
+        "final_assessment_generated"
+      ],
+      "title": "DisturbanceScreeningEvidence",
+      "type": "object"
+    },
+    "DisturbanceStatementPeriod": {
+      "additionalProperties": false,
+      "description": "Cobertura temporal exacta a la que puede referirse la frase automática.",
+      "properties": {
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_date",
+        "end_date"
+      ],
+      "title": "DisturbanceStatementPeriod",
+      "type": "object"
+    },
+    "ForestScreeningMetrics": {
+      "additionalProperties": false,
+      "description": "Superficies sobre la grilla métrica vigente, no sobre conteos asumidos.",
+      "properties": {
+        "aoi_raster_area_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Aoi Raster Area Ha",
+          "type": "number"
+        },
+        "area_crs": {
+          "title": "Area Crs",
+          "type": "string"
+        },
+        "area_method": {
+          "const": "projected_grid_affine_determinant",
+          "title": "Area Method",
+          "type": "string"
+        },
+        "automated_evaluable_area_ha": {
+          "minimum": 0,
+          "title": "Automated Evaluable Area Ha",
+          "type": "number"
+        },
+        "automated_evaluable_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Automated Evaluable Fraction",
+          "type": "number"
+        },
+        "automated_forest_area_ha": {
+          "minimum": 0,
+          "title": "Automated Forest Area Ha",
+          "type": "number"
+        },
+        "automated_forest_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Automated Forest Fraction",
+          "type": "number"
+        },
+        "automated_nonforest_area_ha": {
+          "minimum": 0,
+          "title": "Automated Nonforest Area Ha",
+          "type": "number"
+        },
+        "automated_nonforest_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Automated Nonforest Fraction",
+          "type": "number"
+        },
+        "insufficient_data_area_ha": {
+          "minimum": 0,
+          "title": "Insufficient Data Area Ha",
+          "type": "number"
+        },
+        "insufficient_data_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Insufficient Data Fraction",
+          "type": "number"
+        },
+        "pixel_area_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Pixel Area Ha",
+          "type": "number"
+        },
+        "review_required_area_ha": {
+          "minimum": 0,
+          "title": "Review Required Area Ha",
+          "type": "number"
+        },
+        "review_required_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Review Required Fraction",
+          "type": "number"
+        }
+      },
+      "required": [
+        "area_method",
+        "area_crs",
+        "pixel_area_ha",
+        "aoi_raster_area_ha",
+        "automated_evaluable_area_ha",
+        "automated_forest_area_ha",
+        "automated_nonforest_area_ha",
+        "review_required_area_ha",
+        "insufficient_data_area_ha",
+        "automated_evaluable_fraction",
+        "automated_forest_fraction",
+        "automated_nonforest_fraction",
+        "review_required_fraction",
+        "insufficient_data_fraction"
+      ],
+      "title": "ForestScreeningMetrics",
+      "type": "object"
+    },
+    "TemporalSignalCounts": {
+      "additionalProperties": false,
+      "description": "Conteos conservados por estrato, sin convertir señales en deforestación.",
+      "properties": {
+        "any_robust_signal_pixel_count": {
+          "minimum": 0,
+          "title": "Any Robust Signal Pixel Count",
+          "type": "integer"
+        },
+        "ccdc_break_pixel_count": {
+          "minimum": 0,
+          "title": "Ccdc Break Pixel Count",
+          "type": "integer"
+        },
+        "detector_disagreement_pixel_count": {
+          "minimum": 0,
+          "title": "Detector Disagreement Pixel Count",
+          "type": "integer"
+        },
+        "persistent_candidate_pixel_count": {
+          "minimum": 0,
+          "title": "Persistent Candidate Pixel Count",
+          "type": "integer"
+        },
+        "transient_signal_pixel_count": {
+          "minimum": 0,
+          "title": "Transient Signal Pixel Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "any_robust_signal_pixel_count",
+        "ccdc_break_pixel_count",
+        "persistent_candidate_pixel_count",
+        "transient_signal_pixel_count",
+        "detector_disagreement_pixel_count"
+      ],
+      "title": "TemporalSignalCounts",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:disturbance-evidence:1.2.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Contrato 1.0.0 del JSON de evidencia, todavía sin atribución.",
+  "properties": {
+    "assets": {
+      "$ref": "#/$defs/DisturbanceEvidenceAssets"
+    },
+    "attribution_generated": {
+      "const": false,
+      "title": "Attribution Generated",
+      "type": "boolean"
+    },
+    "ccdc": {
+      "$ref": "#/$defs/DisturbanceCcdcEvidence"
+    },
+    "evaluable_range": {
+      "$ref": "#/$defs/DisturbanceEvaluableRange"
+    },
+    "final_assessment_generated": {
+      "const": false,
+      "title": "Final Assessment Generated",
+      "type": "boolean"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Limitations",
+      "type": "array"
+    },
+    "parameters": {
+      "$ref": "#/$defs/DisturbanceEvidenceParameters"
+    },
+    "rasters": {
+      "$ref": "#/$defs/DisturbanceEvidenceRasters"
+    },
+    "reference_support": {
+      "$ref": "#/$defs/DisturbanceReferenceSupport"
+    },
+    "requested_range": {
+      "$ref": "#/$defs/DisturbanceRequestedRange"
+    },
+    "schema_version": {
+      "const": "1.2.0",
+      "default": "1.2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scientific_parameters_hash": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Scientific Parameters Hash",
+      "type": "string"
+    },
+    "screening": {
+      "$ref": "#/$defs/DisturbanceScreeningEvidence"
+    },
+    "sources": {
+      "$ref": "#/$defs/DisturbanceEvidenceSources"
+    },
+    "statistics": {
+      "$ref": "#/$defs/DisturbanceEvidenceStatistics"
+    }
+  },
+  "required": [
+    "generated_at",
+    "scientific_parameters_hash",
+    "requested_range",
+    "reference_support",
+    "evaluable_range",
+    "parameters",
+    "sources",
+    "ccdc",
+    "statistics",
+    "screening",
+    "rasters",
+    "assets",
+    "final_assessment_generated",
+    "attribution_generated",
+    "limitations"
+  ],
+  "title": "DisturbanceEvidenceMetadata",
+  "type": "object",
+  "x-schema-version": "1.2.0"
+}

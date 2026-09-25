@@ -1,0 +1,135 @@
+schema_version: "1.0.0"
+datasets:
+  - dataset_id: "hls_l30_v2"
+    provider: "NASA LP DAAC"
+    collection: "NASA/HLS/HLSL30/v002"
+    version: "2.0"
+    license: "NASA full and open data sharing"
+    access_date: 2026-07-24
+    attribution: >-
+      Contains modified Harmonized Landsat Sentinel-2 HLSL30 v2.0 data
+      provided by NASA LP DAAC.
+    restrictions:
+      - >-
+        Earth Engine platform terms and project registration apply
+        separately from the source data terms.
+      - >-
+        Dataset availability in Earth Engine does not establish that every
+        future commercial use is covered by the current platform modality.
+
+  - dataset_id: "hls_s30_v2"
+    provider: "NASA LP DAAC"
+    collection: "NASA/HLS/HLSS30/v002"
+    version: "2.0"
+    license: "NASA full and open data sharing"
+    access_date: 2026-07-24
+    attribution: >-
+      Contains modified Harmonized Landsat Sentinel-2 HLSS30 v2.0 data
+      provided by NASA LP DAAC.
+    restrictions:
+      - >-
+        Earth Engine platform terms and project registration apply
+        separately from the source data terms.
+      - >-
+        Dataset availability in Earth Engine does not establish that every
+        future commercial use is covered by the current platform modality.
+
+  - dataset_id: "jrc_gfc2020_v3"
+    provider: "European Commission Joint Research Centre"
+    collection: "JRC/GFC2020/V3"
+    version: "3"
+    license: "Open use with requested attribution"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified EC JRC Global Forest Cover 2020 version 3 data.
+    restrictions:
+      - >-
+        Attribution using the citation recommended by the dataset producer is
+        requested.
+      - >-
+        Known issues and later revisions published by JRC must remain visible
+        in the evidence metadata.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "esa_worldcover_2020_v100"
+    provider: "ESA WorldCover Consortium"
+    collection: "ESA/WorldCover/v100"
+    version: "1.0.0"
+    license: "CC-BY-4.0"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified Copernicus Sentinel data (2020) processed by the ESA
+      WorldCover Consortium.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        Tree-cover classes are thematic land-cover evidence and do not by
+        themselves establish the EUDR forest definition.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "hansen_gfc_2025_v1_13"
+    provider: "University of Maryland"
+    collection: "UMD/hansen/global_forest_change_2025_v1_13"
+    version: "1.13"
+    license: "CC-BY-4.0"
+    access_date: 2026-07-29
+    attribution: >-
+      Contains modified Hansen Global Forest Change v1.13 data produced by the
+      University of Maryland.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        The derived 2020 evidence starts from tree cover in 2000 and removes
+        loss through 2020; it does not fully represent subsequent regeneration.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "mapbiomas_argentina_collection2"
+    provider: "MapBiomas Argentina"
+    collection: >-
+      projects/mapbiomas-public/assets/argentina/lulc/collection2/mapbiomas_argentina_collection2_integration_v3
+    version: "Collection 2 integration v3"
+    license: "Creative Commons attribution required; exact variant unresolved"
+    access_date: 2026-07-30
+    attribution: >-
+      MapBiomas - Colección 2 de la Serie Anual de Mapas de Cobertura y Uso
+      del Suelo de Argentina, consultada el 2026-07-30 a través de
+      https://argentina.mapbiomas.org/
+    restrictions:
+      - >-
+        The official terms page states CC-BY, while the official FAQ states
+        CC-BY-SA; neither identifies a Creative Commons license version.
+        Resolve this discrepancy before redistributing derived training data.
+      - >-
+        Attribution must identify the collection version, access date, and
+        source link.
+      - >-
+        MapBiomas classes are land-cover pseudolabels and do not independently
+        establish the EUDR forest definition.
+      - >-
+        The producer recommends use at scales up to 1:100,000 and does not
+        recommend use at 1:50,000.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+
+  - dataset_id: "dynamic_world_v1"
+    provider: "Google / World Resources Institute"
+    collection: "GOOGLE/DYNAMICWORLD/V1"
+    version: "1"
+    license: "CC-BY-4.0"
+    access_date: 2026-08-11
+    attribution: >-
+      This dataset is produced for the Dynamic World Project by Google in
+      partnership with National Geographic Society and the World Resources Institute.
+      Contains modified Copernicus Sentinel data.
+    restrictions:
+      - "Attribution under CC-BY-4.0 is required."
+      - >-
+        The Copernicus Sentinel Data Legal Notice applies to the Sentinel-derived input.
+      - >-
+        Earth Engine platform terms and project registration apply separately.
+      - >-
+        Dynamic World classes are model outputs and do not independently establish
+        legal EUDR compliance or the purpose of built infrastructure.

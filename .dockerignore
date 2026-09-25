@@ -1,0 +1,42 @@
+# VCS and local environments
+.git/
+.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+
+# Frontend dependencies and generated artifacts
+**/node_modules/
+apps/web/dist/
+dist/
+build/
+
+# Operational state and generated analysis outputs
+outputs/
+output/
+tmp/
+**/*.sqlite3
+
+# Credentials and environment files never enter the daemon context
+**/credentials.json
+**/.env*
+!**/.env.example
+compose.env
+**/*.pem
+**/*.key
+
+# AOIs can contain sensitive productive coordinates. The API image receives
+# only the tracked, public operational boundary required by its validator.
+**/*.geojson
+!data/boundaries/argentina_operational.geojson
+
+# Not required by the API image; binary model artifacts are mounted at runtime.
+# Versioned JSON registries remain available for the future worker image.
+data/models/**/*.joblib
+data/models/**/*.pkl
+data/models/**/*.onnx
+data/samples/

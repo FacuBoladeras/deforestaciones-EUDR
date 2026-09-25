@@ -1,0 +1,462 @@
+{
+  "$defs": {
+    "AgriculturalCollectionEvent": {
+      "additionalProperties": false,
+      "description": "Estado de recolección de un evento, incluso cuando falta onset.",
+      "properties": {
+        "collection_status": {
+          "enum": [
+            "collected",
+            "insufficient_onset",
+            "insufficient_post_onset_window"
+          ],
+          "title": "Collection Status",
+          "type": "string"
+        },
+        "estimated_onset_window_end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Estimated Onset Window End"
+        },
+        "event_area_exact_ha": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Event Area Exact Ha"
+        },
+        "event_area_raster_ha": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Event Area Raster Ha"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "grid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RasterGridSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grid_error_area_ha": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Grid Error Area Ha"
+        },
+        "quality_flags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "window_count": {
+          "minimum": 0,
+          "title": "Window Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "collection_status",
+        "estimated_onset_window_end",
+        "window_count",
+        "quality_flags",
+        "event_area_exact_ha",
+        "event_area_raster_ha",
+        "grid_error_area_ha",
+        "grid"
+      ],
+      "title": "AgriculturalCollectionEvent",
+      "type": "object"
+    },
+    "AgriculturalCollectionRow": {
+      "additionalProperties": false,
+      "description": "Área de una clase para un evento, fuente y ventana mensual.",
+      "properties": {
+        "area_ha": {
+          "minimum": 0,
+          "title": "Area Ha",
+          "type": "number"
+        },
+        "class_name": {
+          "enum": [
+            "crop",
+            "unknown",
+            "nodata"
+          ],
+          "title": "Class Name",
+          "type": "string"
+        },
+        "end_date_exclusive": {
+          "format": "date",
+          "title": "End Date Exclusive",
+          "type": "string"
+        },
+        "event_area_exact_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Event Area Exact Ha",
+          "type": "number"
+        },
+        "event_area_ha": {
+          "exclusiveMinimum": 0,
+          "title": "Event Area Ha",
+          "type": "number"
+        },
+        "event_footprint_path": {
+          "minLength": 1,
+          "title": "Event Footprint Path",
+          "type": "string"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "grid_error_area_ha": {
+          "title": "Grid Error Area Ha",
+          "type": "number"
+        },
+        "grid_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Grid Sha256",
+          "type": "string"
+        },
+        "matched_scene_count": {
+          "minimum": 0,
+          "title": "Matched Scene Count",
+          "type": "integer"
+        },
+        "mean_crop_observation_fraction": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mean Crop Observation Fraction"
+        },
+        "mean_crop_probability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mean Crop Probability"
+        },
+        "persistence_evaluated": {
+          "const": false,
+          "title": "Persistence Evaluated",
+          "type": "boolean"
+        },
+        "qualifying_count_band": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qualifying Count Band"
+        },
+        "raster_path": {
+          "minLength": 1,
+          "title": "Raster Path",
+          "type": "string"
+        },
+        "source_id": {
+          "const": "dynamic_world_v1",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        },
+        "valid_count_band": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Count Band"
+        },
+        "window_id": {
+          "pattern": "^\\d{4}-\\d{2}$",
+          "title": "Window Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "window_id",
+        "start_date",
+        "end_date_exclusive",
+        "source_id",
+        "class_name",
+        "area_ha",
+        "event_area_ha",
+        "event_area_exact_ha",
+        "grid_error_area_ha",
+        "matched_scene_count",
+        "mean_crop_probability",
+        "mean_crop_observation_fraction",
+        "raster_path",
+        "event_footprint_path",
+        "grid_sha256",
+        "persistence_evaluated"
+      ],
+      "title": "AgriculturalCollectionRow",
+      "type": "object"
+    },
+    "RasterGridSpec": {
+      "additionalProperties": false,
+      "description": "Contrato espacial inmutable para comparar productos píxel a píxel.",
+      "properties": {
+        "alignment_strategy": {
+          "const": "projected_crs_origin_outward_snap",
+          "title": "Alignment Strategy",
+          "type": "string"
+        },
+        "aoi_mask_required": {
+          "const": true,
+          "title": "Aoi Mask Required",
+          "type": "boolean"
+        },
+        "bounds": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Bounds",
+          "type": "array"
+        },
+        "grid_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Grid Sha256",
+          "type": "string"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "nodata": {
+          "title": "Nodata",
+          "type": "number"
+        },
+        "pixel_orientation": {
+          "const": "north_up",
+          "title": "Pixel Orientation",
+          "type": "string"
+        },
+        "resolution_m": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution M",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target_crs": {
+          "minLength": 1,
+          "title": "Target Crs",
+          "type": "string"
+        },
+        "transform": {
+          "maxItems": 6,
+          "minItems": 6,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Transform",
+          "type": "array"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_crs",
+        "resolution_m",
+        "width",
+        "height",
+        "transform",
+        "bounds",
+        "alignment_strategy",
+        "pixel_orientation",
+        "nodata",
+        "aoi_mask_required",
+        "grid_sha256"
+      ],
+      "title": "RasterGridSpec",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:agricultural-collection:1.1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Contrato del JSON crudo previo al gate de persistencia.",
+  "properties": {
+    "analysis_end_date": {
+      "format": "date",
+      "title": "Analysis End Date",
+      "type": "string"
+    },
+    "analysis_id": {
+      "format": "uuid",
+      "title": "Analysis Id",
+      "type": "string"
+    },
+    "attribution_generated": {
+      "const": false,
+      "title": "Attribution Generated",
+      "type": "boolean"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "establishment_id": {
+      "minLength": 1,
+      "title": "Establishment Id",
+      "type": "string"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/AgriculturalCollectionEvent"
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "persistence_evaluated": {
+      "const": false,
+      "title": "Persistence Evaluated",
+      "type": "boolean"
+    },
+    "rows": {
+      "items": {
+        "$ref": "#/$defs/AgriculturalCollectionRow"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "schema_version": {
+      "enum": [
+        "1.0.0",
+        "1.1.0"
+      ],
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "collected",
+        "insufficient_data"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "analysis_id",
+    "establishment_id",
+    "created_at",
+    "analysis_end_date",
+    "status",
+    "attribution_generated",
+    "persistence_evaluated",
+    "events",
+    "rows"
+  ],
+  "title": "AgriculturalCollectionDocument",
+  "type": "object",
+  "x-schema-version": "1.1.0"
+}

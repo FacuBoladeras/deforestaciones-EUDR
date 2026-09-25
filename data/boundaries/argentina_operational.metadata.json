@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0.0",
+  "provider": "Instituto Geografico Nacional de la Republica Argentina (IGN)",
+  "source_url": "https://wms.ign.gob.ar/geoserver/ows?service=WFS&version=2.0.0&request=GetFeature&typeNames=ign:pais&outputFormat=application/json&srsName=EPSG:4326",
+  "source_layer": "ign:pais",
+  "accessed_at": "2026-08-17",
+  "source_sha256": "6cfa03a03105721368fcb66ab24782549225cb5d35d41c065fc9f985560ca764",
+  "derived_file": "argentina_operational.geojson",
+  "derived_sha256": "ecdb99b99ed37495165d22dc3150ddaa822c5ff9b681bd4e0b6903fd156f2b8f",
+  "transformation": {
+    "clip_bbox_wgs84": [
+      -74.0,
+      -56.0,
+      -53.0,
+      -21.0
+    ],
+    "simplify_tolerance_degrees": 0.0005,
+    "preserve_topology": true,
+    "coordinate_precision_degrees": 1e-06
+  },
+  "limitations": [
+    "Operational screening boundary; it is not cadastral or legal evidence.",
+    "The operational clip excludes Antarctic geometry south of latitude -56.",
+    "Near-border cases require human review against the authoritative current IGN layer.",
+    "The source portal did not expose an explicit license in the inspected dataset metadata; verify reuse terms before external redistribution."
+  ]
+}

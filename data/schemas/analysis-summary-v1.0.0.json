@@ -1,0 +1,306 @@
+{
+  "$defs": {
+    "AssessmentStatus": {
+      "description": "Estados públicos permitidos por el contrato de salida 1.0.0.",
+      "enum": [
+        "low_risk",
+        "review_required",
+        "conversion_likely",
+        "insufficient_data"
+      ],
+      "title": "AssessmentStatus",
+      "type": "string"
+    },
+    "ChangeEvent": {
+      "additionalProperties": false,
+      "description": "Evento de cambio separado de una conclusión legal o humana.",
+      "properties": {
+        "change_magnitude": {
+          "title": "Change Magnitude",
+          "type": "number"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "detected_change_area_ha": {
+          "minimum": 0,
+          "title": "Detected Change Area Ha",
+          "type": "number"
+        },
+        "end_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "End Date"
+        },
+        "event_id": {
+          "format": "uuid",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "likely_conversion_area_ha": {
+          "minimum": 0,
+          "title": "Likely Conversion Area Ha",
+          "type": "number"
+        },
+        "persistence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Persistence",
+          "type": "number"
+        },
+        "post_change_land_use": {
+          "$ref": "#/$defs/PostChangeLandUse"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "sensors": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Sensors",
+          "type": "array"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "start_date",
+        "end_date",
+        "detected_change_area_ha",
+        "likely_conversion_area_ha",
+        "change_magnitude",
+        "persistence",
+        "sensors",
+        "post_change_land_use",
+        "confidence",
+        "quality_flags",
+        "reason_codes"
+      ],
+      "title": "ChangeEvent",
+      "type": "object"
+    },
+    "DatasetRecord": {
+      "additionalProperties": false,
+      "description": "Procedencia y condiciones de uso de un dataset efectivamente utilizado.",
+      "properties": {
+        "access_date": {
+          "format": "date",
+          "title": "Access Date",
+          "type": "string"
+        },
+        "attribution": {
+          "minLength": 1,
+          "title": "Attribution",
+          "type": "string"
+        },
+        "collection": {
+          "minLength": 1,
+          "title": "Collection",
+          "type": "string"
+        },
+        "dataset_id": {
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "restrictions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Restrictions",
+          "type": "array"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "provider",
+        "collection",
+        "version",
+        "license",
+        "access_date",
+        "attribution",
+        "restrictions"
+      ],
+      "title": "DatasetRecord",
+      "type": "object"
+    },
+    "GeometrySource": {
+      "description": "Procedencia declarada de una geometría.",
+      "enum": [
+        "declared",
+        "renspa",
+        "other"
+      ],
+      "title": "GeometrySource",
+      "type": "string"
+    },
+    "PostChangeLandUse": {
+      "description": "Coberturas posteriores consideradas por la etapa de atribución.",
+      "enum": [
+        "forest_or_regeneration",
+        "pasture",
+        "cropland",
+        "persistent_bare_soil",
+        "infrastructure",
+        "water",
+        "fire_or_temporary_disturbance",
+        "unknown"
+      ],
+      "title": "PostChangeLandUse",
+      "type": "string"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:analysis-summary:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Contrato 1.0.0 del resumen por establecimiento.",
+  "properties": {
+    "analysis_end_date": {
+      "format": "date",
+      "title": "Analysis End Date",
+      "type": "string"
+    },
+    "analysis_id": {
+      "format": "uuid",
+      "title": "Analysis Id",
+      "type": "string"
+    },
+    "analysis_version": {
+      "minLength": 1,
+      "title": "Analysis Version",
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "cutoff_date": {
+      "default": "2020-12-31",
+      "format": "date",
+      "title": "Cutoff Date",
+      "type": "string"
+    },
+    "datasets": {
+      "items": {
+        "$ref": "#/$defs/DatasetRecord"
+      },
+      "title": "Datasets",
+      "type": "array"
+    },
+    "detected_change_area_ha": {
+      "minimum": 0,
+      "title": "Detected Change Area Ha",
+      "type": "number"
+    },
+    "establishment_id": {
+      "minLength": 1,
+      "title": "Establishment Id",
+      "type": "string"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/ChangeEvent"
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "forest_area_2020_ha": {
+      "minimum": 0,
+      "title": "Forest Area 2020 Ha",
+      "type": "number"
+    },
+    "geometry_source": {
+      "$ref": "#/$defs/GeometrySource"
+    },
+    "likely_conversion_area_ha": {
+      "minimum": 0,
+      "title": "Likely Conversion Area Ha",
+      "type": "number"
+    },
+    "parameters_hash": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Parameters Hash",
+      "type": "string"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/AssessmentStatus"
+    }
+  },
+  "required": [
+    "establishment_id",
+    "analysis_id",
+    "analysis_version",
+    "analysis_end_date",
+    "geometry_source",
+    "forest_area_2020_ha",
+    "detected_change_area_ha",
+    "likely_conversion_area_ha",
+    "status",
+    "confidence",
+    "quality_flags",
+    "events",
+    "datasets",
+    "parameters_hash",
+    "created_at"
+  ],
+  "title": "AnalysisSummary",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

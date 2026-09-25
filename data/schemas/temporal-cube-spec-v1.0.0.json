@@ -1,0 +1,587 @@
+{
+  "$defs": {
+    "RasterGridSpec": {
+      "additionalProperties": false,
+      "description": "Contrato espacial inmutable para comparar productos píxel a píxel.",
+      "properties": {
+        "alignment_strategy": {
+          "const": "projected_crs_origin_outward_snap",
+          "title": "Alignment Strategy",
+          "type": "string"
+        },
+        "aoi_mask_required": {
+          "const": true,
+          "title": "Aoi Mask Required",
+          "type": "boolean"
+        },
+        "bounds": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Bounds",
+          "type": "array"
+        },
+        "grid_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Grid Sha256",
+          "type": "string"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "nodata": {
+          "title": "Nodata",
+          "type": "number"
+        },
+        "pixel_orientation": {
+          "const": "north_up",
+          "title": "Pixel Orientation",
+          "type": "string"
+        },
+        "resolution_m": {
+          "exclusiveMinimum": 0,
+          "title": "Resolution M",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target_crs": {
+          "minLength": 1,
+          "title": "Target Crs",
+          "type": "string"
+        },
+        "transform": {
+          "maxItems": 6,
+          "minItems": 6,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Transform",
+          "type": "array"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_crs",
+        "resolution_m",
+        "width",
+        "height",
+        "transform",
+        "bounds",
+        "alignment_strategy",
+        "pixel_orientation",
+        "nodata",
+        "aoi_mask_required",
+        "grid_sha256"
+      ],
+      "title": "RasterGridSpec",
+      "type": "object"
+    },
+    "SeasonCode": {
+      "enum": [
+        "DJF",
+        "MAM",
+        "JJA",
+        "SON"
+      ],
+      "title": "SeasonCode",
+      "type": "string"
+    },
+    "SeasonDefinition": {
+      "additionalProperties": false,
+      "description": "Regla calendaria versionada para una estación meteorológica.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/SeasonCode"
+        },
+        "end_day": {
+          "maximum": 31,
+          "minimum": 1,
+          "title": "End Day",
+          "type": "integer"
+        },
+        "end_month": {
+          "maximum": 12,
+          "minimum": 1,
+          "title": "End Month",
+          "type": "integer"
+        },
+        "end_year_offset": {
+          "const": 0,
+          "title": "End Year Offset",
+          "type": "integer"
+        },
+        "label_es": {
+          "enum": [
+            "verano",
+            "otoño",
+            "invierno",
+            "primavera"
+          ],
+          "title": "Label Es",
+          "type": "string"
+        },
+        "start_day": {
+          "maximum": 31,
+          "minimum": 1,
+          "title": "Start Day",
+          "type": "integer"
+        },
+        "start_month": {
+          "maximum": 12,
+          "minimum": 1,
+          "title": "Start Month",
+          "type": "integer"
+        },
+        "start_year_offset": {
+          "enum": [
+            -1,
+            0
+          ],
+          "title": "Start Year Offset",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "label_es",
+        "start_month",
+        "start_day",
+        "start_year_offset",
+        "end_month",
+        "end_day",
+        "end_year_offset"
+      ],
+      "title": "SeasonDefinition",
+      "type": "object"
+    },
+    "SpectralIndex": {
+      "description": "Índices ópticos candidatos para el benchmark inicial.",
+      "enum": [
+        "NDVI",
+        "EVI2",
+        "NBR",
+        "NDMI",
+        "NMDI",
+        "LSWI",
+        "NIRv",
+        "kNDVI"
+      ],
+      "title": "SpectralIndex",
+      "type": "string"
+    },
+    "TemporalWindow": {
+      "additionalProperties": false,
+      "description": "Período cerrado, ordenable y sin ambigüedad de límites.",
+      "properties": {
+        "complete_period": {
+          "const": true,
+          "default": true,
+          "title": "Complete Period",
+          "type": "boolean"
+        },
+        "crosses_calendar_year": {
+          "title": "Crosses Calendar Year",
+          "type": "boolean"
+        },
+        "end_date_exclusive": {
+          "format": "date",
+          "title": "End Date Exclusive",
+          "type": "string"
+        },
+        "expected_days": {
+          "exclusiveMinimum": 0,
+          "title": "Expected Days",
+          "type": "integer"
+        },
+        "period_id": {
+          "pattern": "^\\d{4}-(DJF|MAM|JJA|SON)$",
+          "title": "Period Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "season": {
+          "$ref": "#/$defs/SeasonCode"
+        },
+        "season_year": {
+          "minimum": 2015,
+          "title": "Season Year",
+          "type": "integer"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "period_id",
+        "season_year",
+        "season",
+        "start_date",
+        "end_date_exclusive",
+        "expected_days",
+        "crosses_calendar_year"
+      ],
+      "title": "TemporalWindow",
+      "type": "object"
+    },
+    "TemporalWindowPlan": {
+      "additionalProperties": false,
+      "description": "Plan completo que separa años solicitados de fechas auxiliares.",
+      "properties": {
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "plan_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "requested_end_year": {
+          "minimum": 2015,
+          "title": "Requested End Year",
+          "type": "integer"
+        },
+        "requested_start_year": {
+          "minimum": 2015,
+          "title": "Requested Start Year",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "season_definitions": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/SeasonDefinition"
+            },
+            {
+              "$ref": "#/$defs/SeasonDefinition"
+            },
+            {
+              "$ref": "#/$defs/SeasonDefinition"
+            },
+            {
+              "$ref": "#/$defs/SeasonDefinition"
+            }
+          ],
+          "title": "Season Definitions",
+          "type": "array"
+        },
+        "support_end_date_exclusive": {
+          "format": "date",
+          "title": "Support End Date Exclusive",
+          "type": "string"
+        },
+        "support_start_date": {
+          "format": "date",
+          "title": "Support Start Date",
+          "type": "string"
+        },
+        "temporal_scheme": {
+          "const": "meteorological_south_v1",
+          "title": "Temporal Scheme",
+          "type": "string"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/TemporalWindow"
+          },
+          "minItems": 4,
+          "title": "Windows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "generated_at",
+        "temporal_scheme",
+        "season_definitions",
+        "requested_start_year",
+        "requested_end_year",
+        "support_start_date",
+        "support_end_date_exclusive",
+        "windows",
+        "plan_sha256"
+      ],
+      "title": "TemporalWindowPlan",
+      "type": "object"
+    }
+  },
+  "$id": "urn:deforestation-pipeline:temporal-cube-spec:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Contrato lógico del cubo; todavía no implica persistencia Zarr.",
+  "properties": {
+    "composite_method": {
+      "const": "median_reflectance_then_indices",
+      "default": "median_reflectance_then_indices",
+      "title": "Composite Method",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "grid": {
+      "$ref": "#/$defs/RasterGridSpec"
+    },
+    "interpolation_allowed": {
+      "const": false,
+      "default": false,
+      "title": "Interpolation Allowed",
+      "type": "boolean"
+    },
+    "missing_data_policy": {
+      "const": "preserve_missing_no_interpolation",
+      "default": "preserve_missing_no_interpolation",
+      "title": "Missing Data Policy",
+      "type": "string"
+    },
+    "observation_count_dimensions": {
+      "default": [
+        "time",
+        "sensor",
+        "y",
+        "x"
+      ],
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "time",
+          "type": "string"
+        },
+        {
+          "const": "sensor",
+          "type": "string"
+        },
+        {
+          "const": "y",
+          "type": "string"
+        },
+        {
+          "const": "x",
+          "type": "string"
+        }
+      ],
+      "title": "Observation Count Dimensions",
+      "type": "array"
+    },
+    "reflectance_band_names": {
+      "maxItems": 6,
+      "minItems": 6,
+      "prefixItems": [
+        {
+          "const": "blue",
+          "type": "string"
+        },
+        {
+          "const": "green",
+          "type": "string"
+        },
+        {
+          "const": "red",
+          "type": "string"
+        },
+        {
+          "const": "nir",
+          "type": "string"
+        },
+        {
+          "const": "swir1",
+          "type": "string"
+        },
+        {
+          "const": "swir2",
+          "type": "string"
+        }
+      ],
+      "title": "Reflectance Band Names",
+      "type": "array"
+    },
+    "reflectance_dimensions": {
+      "default": [
+        "time",
+        "reflectance_band",
+        "y",
+        "x"
+      ],
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "time",
+          "type": "string"
+        },
+        {
+          "const": "reflectance_band",
+          "type": "string"
+        },
+        {
+          "const": "y",
+          "type": "string"
+        },
+        {
+          "const": "x",
+          "type": "string"
+        }
+      ],
+      "title": "Reflectance Dimensions",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sensor_names": {
+      "default": [
+        "total",
+        "HLSL30",
+        "HLSS30"
+      ],
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "total",
+          "type": "string"
+        },
+        {
+          "const": "HLSL30",
+          "type": "string"
+        },
+        {
+          "const": "HLSS30",
+          "type": "string"
+        }
+      ],
+      "title": "Sensor Names",
+      "type": "array"
+    },
+    "spectral_index_dimensions": {
+      "default": [
+        "time",
+        "index",
+        "y",
+        "x"
+      ],
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "time",
+          "type": "string"
+        },
+        {
+          "const": "index",
+          "type": "string"
+        },
+        {
+          "const": "y",
+          "type": "string"
+        },
+        {
+          "const": "x",
+          "type": "string"
+        }
+      ],
+      "title": "Spectral Index Dimensions",
+      "type": "array"
+    },
+    "spectral_indices": {
+      "items": {
+        "$ref": "#/$defs/SpectralIndex"
+      },
+      "minItems": 1,
+      "title": "Spectral Indices",
+      "type": "array"
+    },
+    "time_bounds_semantics": {
+      "const": "start_inclusive_end_exclusive",
+      "default": "start_inclusive_end_exclusive",
+      "title": "Time Bounds Semantics",
+      "type": "string"
+    },
+    "time_coordinate": {
+      "const": "period_start",
+      "default": "period_start",
+      "title": "Time Coordinate",
+      "type": "string"
+    },
+    "window_plan": {
+      "$ref": "#/$defs/TemporalWindowPlan"
+    },
+    "window_plan_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Window Plan Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "created_at",
+    "grid",
+    "window_plan",
+    "window_plan_sha256",
+    "reflectance_band_names",
+    "spectral_indices"
+  ],
+  "title": "TemporalCubeSpec",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

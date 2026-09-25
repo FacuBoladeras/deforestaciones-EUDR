@@ -1,0 +1,33 @@
+{
+  "type": "Feature",
+  "properties": {
+    "description": "Polígono sintético y anonimizado para pruebas locales"
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -63.0,
+          -33.0
+        ],
+        [
+          -62.99,
+          -33.0
+        ],
+        [
+          -62.99,
+          -32.99
+        ],
+        [
+          -63.0,
+          -32.99
+        ],
+        [
+          -63.0,
+          -33.0
+        ]
+      ]
+    ]
+  }
+}

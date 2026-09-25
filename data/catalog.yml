@@ -1,0 +1,291 @@
+schema_version: "2.1.0"
+
+sources:
+  - source_id: "hls_l30_v2"
+    family: "HLS"
+    product: "HLSL30"
+    provider: "NASA LP DAAC"
+    collection_id: "NASA/HLS/HLSL30/v002"
+    version: "2.0"
+    spatial_resolution_m: 30
+    availability_start: 2013-04-11
+    availability_end: null
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-24
+    doi_url: "https://doi.org/10.5067/HLS/HLSL30.002"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/NASA_HLS_HLSL30_v002"
+    documentation_url: "https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf"
+    data_terms_summary: >-
+      NASA promotes full and open sharing with research, applications,
+      private industry, academia, and the general public.
+    platform_terms_separate: true
+    bands:
+      - role: "blue"
+        source_band: "B2"
+      - role: "green"
+        source_band: "B3"
+      - role: "red"
+        source_band: "B4"
+      - role: "nir"
+        source_band: "B5"
+      - role: "swir1"
+        source_band: "B6"
+      - role: "swir2"
+        source_band: "B7"
+      - role: "qa"
+        source_band: "Fmask"
+    qa_mask_bits:
+      cloud: 1
+      adjacent_to_cloud_or_shadow: 2
+      cloud_shadow: 3
+      snow_or_ice: 4
+      water: 5
+      aerosol_first_bit: 6
+      aerosol_last_bit: 7
+
+  - source_id: "hls_s30_v2"
+    family: "HLS"
+    product: "HLSS30"
+    provider: "NASA LP DAAC"
+    collection_id: "NASA/HLS/HLSS30/v002"
+    version: "2.0"
+    spatial_resolution_m: 30
+    availability_start: 2015-11-28
+    availability_end: null
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-24
+    doi_url: "https://doi.org/10.5067/HLS/HLSS30.002"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/NASA_HLS_HLSS30_v002"
+    documentation_url: "https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf"
+    data_terms_summary: >-
+      NASA promotes full and open sharing with research, applications,
+      private industry, academia, and the general public.
+    platform_terms_separate: true
+    bands:
+      - role: "blue"
+        source_band: "B2"
+      - role: "green"
+        source_band: "B3"
+      - role: "red"
+        source_band: "B4"
+      - role: "nir"
+        source_band: "B8A"
+      - role: "swir1"
+        source_band: "B11"
+      - role: "swir2"
+        source_band: "B12"
+      - role: "qa"
+        source_band: "Fmask"
+    qa_mask_bits:
+      cloud: 1
+      adjacent_to_cloud_or_shadow: 2
+      cloud_shadow: 3
+      snow_or_ice: 4
+      water: 5
+      aerosol_first_bit: 6
+      aerosol_last_bit: 7
+
+  - source_id: "jrc_gfc2020_v3"
+    family: "FOREST_BASELINE"
+    product: "JRC_GFC2020"
+    provider: "European Commission Joint Research Centre"
+    collection_id: "JRC/GFC2020/V3"
+    version: "3"
+    asset_type: "image"
+    spatial_resolution_m: 10
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.2760/9982436"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/JRC_GFC2020_V3"
+    documentation_url: "https://forobs.jrc.ec.europa.eu/GFC"
+    data_terms_summary: >-
+      The dataset may be used by anyone without permission, license, or
+      royalty payment; attribution using the recommended citation is requested.
+    license: "Open use with requested attribution"
+    platform_terms_separate: true
+    evidence_role: "core_forest_map"
+    independence_group: "jrc_gfc2020"
+    eligible_for_core_consensus: true
+    rule:
+      kind: "categorical_values"
+      source_band: "Map"
+      forest_values: [1]
+    limitations:
+      - "A global map is evidence, not ground truth for an individual establishment."
+      - "Known issues and future revisions published by JRC must remain review flags."
+
+  - source_id: "esa_worldcover_2020_v100"
+    family: "FOREST_BASELINE"
+    product: "ESA_WORLDCOVER_2020"
+    provider: "ESA WorldCover Consortium"
+    collection_id: "ESA/WorldCover/v100"
+    version: "1.0.0"
+    asset_type: "image_collection"
+    spatial_resolution_m: 10
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.5281/zenodo.5571936"
+    catalog_url: "https://developers.google.com/earth-engine/datasets/catalog/ESA_WorldCover_v100"
+    documentation_url: "https://esa-worldcover.org/en/data-access"
+    data_terms_summary: "ESA WorldCover 2020 is distributed under CC-BY-4.0."
+    license: "CC-BY-4.0"
+    platform_terms_separate: true
+    evidence_role: "core_land_cover"
+    independence_group: "esa_worldcover"
+    eligible_for_core_consensus: true
+    rule:
+      kind: "categorical_values"
+      source_band: "Map"
+      forest_values: [10, 95]
+    limitations:
+      - "Tree cover and mangrove classes are land-cover evidence, not an EUDR conclusion."
+      - "The thematic map does not itself enforce the minimum connected area."
+
+  - source_id: "hansen_gfc_2025_v1_13"
+    family: "FOREST_BASELINE"
+    product: "HANSEN_GLOBAL_FOREST_CHANGE"
+    provider: "University of Maryland"
+    collection_id: "UMD/hansen/global_forest_change_2025_v1_13"
+    version: "1.13"
+    asset_type: "image"
+    spatial_resolution_m: 30.92
+    reference_year: 2020
+    access_status: "cataloged_not_accessed"
+    catalog_checked_at: 2026-07-29
+    doi_url: "https://doi.org/10.1126/science.1244693"
+    catalog_url: >-
+      https://developers.google.com/earth-engine/datasets/catalog/UMD_hansen_global_forest_change_2025_v1_13
+    documentation_url: "https://storage.googleapis.com/earthenginepartners-hansen/GFC-2025-v1.13/download.html"
+    data_terms_summary: "Hansen Global Forest Change v1.13 is distributed under CC-BY-4.0."
+    license: "CC-BY-4.0"
+    platform_terms_separate: true
+    evidence_role: "supporting_derived"
+    independence_group: "umd_hansen"
+    eligible_for_core_consensus: false
+    rule:
+      kind: "hansen_2020_reconstruction"
+      tree_cover_band: "treecover2000"
+      loss_year_band: "lossyear"
+      minimum_tree_cover_percent: 10
+      loss_year_cutoff_code: 20
+    limitations:
+      - >-
+        The 2020 reconstruction starts from canopy cover in 2000 and removes
+        recorded stand-replacement loss through 2020.
+      - >-
+        Regeneración posterior y ganancias no actualizadas impiden tratar esta
+        derivación como verdad forestal 2020.
+
+  - source_id: "mapbiomas_argentina_collection2"
+    family: "REFERENCE_LABEL"
+    product: "MAPBIOMAS_ARGENTINA_LULC"
+    provider: "MapBiomas Argentina"
+    collection_id: >-
+      projects/mapbiomas-public/assets/argentina/lulc/collection2/mapbiomas_argentina_collection2_integration_v3
+    version: "Collection 2 integration v3"
+    asset_type: "image"
+    spatial_resolution_m: 30
+    availability_start: 1985
+    availability_end: 2024
+    access_status: "metadata_access_verified"
+    catalog_checked_at: 2026-07-30
+    catalog_url: "https://argentina.mapbiomas.org/herramientas/"
+    documentation_url: "https://argentina.mapbiomas.org/productos/"
+    legend_url: >-
+      https://argentina.mapbiomas.org/wp-content/uploads/sites/12/2025/09/Leyenda_Code.pdf
+    terms_url: "https://argentina.mapbiomas.org/terminos-de-uso/"
+    data_terms_summary: >-
+      MapBiomas Argentina publishes the data as public, open, and free with
+      Creative Commons attribution requirements. Its current terms page states
+      CC-BY, while its FAQ states CC-BY-SA; neither page specifies a version.
+    license: "Creative Commons attribution required; exact variant unresolved"
+    platform_terms_separate: true
+    evidence_role: "land_cover_pseudolabel"
+    independence_group: "mapbiomas_argentina"
+    eligible_for_core_consensus: false
+    bands:
+      pattern: "classification_{year}"
+      verified_start: "classification_1985"
+      verified_end: "classification_2024"
+      p0_reference_band: "classification_2020"
+    rule:
+      kind: "categorical_values"
+      forest_values: [3, 4, 6]
+      forest_classes:
+        3: "closed_forest"
+        4: "open_forest"
+        6: "flooded_forest"
+    limitations:
+      - >-
+        MapBiomas classes are pseudolabels for model development, not ground
+        truth or an EUDR forest determination.
+      - >-
+        The Collection 2 Pampas legend defines open forest using canopy cover
+        above 20 percent, which does not reproduce the EUDR 10 percent canopy
+        threshold.
+      - >-
+        The producer recommends use at scales up to 1:100,000 and does not
+        recommend use at 1:50,000.
+
+  - source_id: "dynamic_world_v1"
+    family: "AGRICULTURAL_EVIDENCE"
+    product: "DYNAMIC_WORLD_V1"
+    provider: "Google / World Resources Institute"
+    collection_id: "GOOGLE/DYNAMICWORLD/V1"
+    version: "1"
+    asset_type: "image_collection"
+    spatial_resolution_m: 10
+    availability_start: 2015-06-27
+    availability_end: null
+    access_status: "metadata_access_verified"
+    catalog_checked_at: 2026-08-11
+    doi_url: "https://doi.org/10.1038/s41597-022-01307-4"
+    catalog_url: >-
+      https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1
+    documentation_url: >-
+      https://developers.google.com/earth-engine/tutorials/community/introduction-to-dynamic-world-pt-1
+    data_terms_summary: >-
+      Dynamic World V1 is a 10 m near-real-time land-cover image collection
+      produced from Sentinel-2 L1C scenes and distributed under CC-BY-4.0.
+    license: "CC-BY-4.0"
+    attribution: >-
+      This dataset is produced for the Dynamic World Project by Google in
+      partnership with National Geographic Society and the World Resources Institute.
+      Contains modified Copernicus Sentinel data.
+    platform_terms_separate: true
+    evidence_role: "candidate_independent"
+    sensor_family: "sentinel2"
+    upstream_dataset_ids: ["copernicus_s2_l1c"]
+    temporal_granularity: "source_scene"
+    grid_conversion: "nearest_equal_area_10m_fractional_event_footprint"
+    class_rules:
+      - output_land_use: "crop"
+        source_probability_band: "crops"
+        source_label_value: 4
+        automatic_gate_eligible: true
+        interpretation: >-
+          Crop is eligible only when label=4 and the crops score exceeds the
+          versioned threshold over repeated valid observations.
+      - output_land_use: "other"
+        source_probability_band: "built"
+        source_label_value: 6
+        automatic_gate_eligible: false
+        interpretation: >-
+          Built is generic infrastructure context and cannot by itself prove
+          livestock infrastructure.
+    limitations:
+      - >-
+        Dynamic World predictions are per Sentinel-2 scene; a single crop label
+        does not demonstrate persistent post-change agricultural use.
+      - >-
+        The grass class includes natural and managed grassland and is not accepted
+        automatically as pasture evidence.
+      - >-
+        Built cover does not identify the purpose of infrastructure and remains
+        review-only unless supported by independent contextual evidence.
+      - >-
+        Crop top-1 scores may be comparatively low because crop identity depends
+        partly on temporal context; thresholds and valid-observation support must
+        remain explicit.

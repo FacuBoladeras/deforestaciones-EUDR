@@ -8,7 +8,23 @@ version = "0.1.0"
 description = "Pipeline reproducible de evidencia geoespacial para cadenas bovinas y EUDR."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "deforestation-domain",
+    "earthengine-api>=1.7.35,<1.8",
+    "geopandas>=1.1,<2",
+    "geemap>=0.36,<1",
+    "joblib>=1.5,<2",
+    "matplotlib>=3.10,<4",
+    "numpy>=2.3,<3",
+    "pillow>=11,<13",
+    "pydantic>=2.12,<3",
+    "pyproj>=3.7,<4",
+    "pyogrio>=0.11,<1",
+    "pyyaml>=6,<7",
+    "rasterio>=1.4,<2",
+    "scikit-learn>=1.7,<2",
+    "shapely>=2.1,<3",
+]
 
 [dependency-groups]
 dev = [
@@ -16,15 +32,48 @@ dev = [
     "pytest>=8.4,<9",
     "pytest-cov>=6.2,<7",
     "ruff>=0.12,<1",
+    "types-pyyaml>=6,<7",
+    "types-shapely>=2.1,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deforestation_pipeline"]
 
+[tool.uv]
+constraint-dependencies = ["cryptography>=50.0.1,<51"]
+
+[tool.uv.sources]
+deforestation-domain = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*", "services/*"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts", "packages", "services"]
+
+[[tool.mypy.overrides]]
+module = [
+    "geopandas",
+    "geopandas.*",
+    "geemap",
+    "geemap.*",
+    "joblib",
+    "pandas",
+    "pandas.*",
+    "pyogrio",
+    "pyogrio.*",
+    "rasterio",
+    "rasterio.*",
+    "reportlab",
+    "reportlab.*",
+    "pypdf",
+    "pypdf.*",
+    "sklearn",
+    "sklearn.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = [
@@ -32,12 +81,25 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-fail-under=90",
 ]
-testpaths = ["tests"]
+testpaths = ["tests", "packages/domain/tests", "packages/reporting/tests"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
+src = [
+    "src",
+    "tests",
+    "packages/jobs/src",
+    "packages/jobs/tests",
+    "packages/domain/src",
+    "packages/domain/tests",
+    "packages/reporting/src",
+    "packages/reporting/tests",
+    "services/api/src",
+    "services/api/tests",
+    "services/worker/src",
+    "services/worker/tests",
+]
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "RUF", "UP"]

@@ -1,0 +1,20 @@
+schema_version: "2.1.0"
+source_id: dynamic_world_v1
+minimum_valid_periods: 3
+minimum_qualifying_periods: 1
+minimum_post_onset_duration_days: 180
+primary_crop_observation_fraction: 0.50
+minimum_candidate_agricultural_coverage_fraction: 0.05
+sensitivity_crop_observation_fractions:
+  - 0.40
+  - 0.50
+  - 0.60
+minimum_valid_observations_per_period: 2
+maximum_unobserved_gap_periods: 3
+evidence_rule: candidate_coverage_at_least_five_percent_post_cutoff
+signal_strength_periods:
+  weak: 1
+  moderate: 2
+  strong: 3
+long_gap_interpolation_used: false
+support_raster_nodata: -9999.0

@@ -1,0 +1,120 @@
+{
+  "$id": "urn:deforestation-pipeline:raster-grid:1.0.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Contrato espacial inmutable para comparar productos píxel a píxel.",
+  "properties": {
+    "alignment_strategy": {
+      "const": "projected_crs_origin_outward_snap",
+      "title": "Alignment Strategy",
+      "type": "string"
+    },
+    "aoi_mask_required": {
+      "const": true,
+      "title": "Aoi Mask Required",
+      "type": "boolean"
+    },
+    "bounds": {
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "title": "Bounds",
+      "type": "array"
+    },
+    "grid_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Grid Sha256",
+      "type": "string"
+    },
+    "height": {
+      "exclusiveMinimum": 0,
+      "title": "Height",
+      "type": "integer"
+    },
+    "nodata": {
+      "title": "Nodata",
+      "type": "number"
+    },
+    "pixel_orientation": {
+      "const": "north_up",
+      "title": "Pixel Orientation",
+      "type": "string"
+    },
+    "resolution_m": {
+      "exclusiveMinimum": 0,
+      "title": "Resolution M",
+      "type": "number"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target_crs": {
+      "minLength": 1,
+      "title": "Target Crs",
+      "type": "string"
+    },
+    "transform": {
+      "maxItems": 6,
+      "minItems": 6,
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "title": "Transform",
+      "type": "array"
+    },
+    "width": {
+      "exclusiveMinimum": 0,
+      "title": "Width",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "target_crs",
+    "resolution_m",
+    "width",
+    "height",
+    "transform",
+    "bounds",
+    "alignment_strategy",
+    "pixel_orientation",
+    "nodata",
+    "aoi_mask_required",
+    "grid_sha256"
+  ],
+  "title": "RasterGridSpec",
+  "type": "object",
+  "x-schema-version": "1.0.0"
+}

@@ -1,0 +1,218 @@
+schema_version: "1.13.0"
+
+analysis:
+  cutoff_date: 2020-12-31
+  benchmark_start_date: 2019-01-01
+  analysis_end_date: null
+  random_seed: 42
+
+spatial:
+  interchange_crs: "EPSG:4326"
+  area_crs_strategy: "auto_equal_area"
+  raster_crs_strategy: "local_utm"
+  forest_definition_min_area_ha: 0.5
+  minimum_coordinate_decimals: 6
+  preserve_subthreshold_events: true
+
+data:
+  benchmark_sensor: "HLS"
+  target_resolution_m: 30
+  composition_interval: "annual"
+  composition_reducer: "median"
+  source_native_reflectance_scale_factor: 0.0001
+  source_native_reflectance_offset: 0.0
+  earth_engine_reflectance_multiplier: 1.0
+  earth_engine_reflectance_offset: 0.0
+  mask_high_aerosol: true
+  preserve_water: true
+  indices:
+    - "NDVI"
+    - "EVI2"
+    - "NBR"
+    - "NDMI"
+    - "NMDI"
+    - "LSWI"
+    - "NIRv"
+    - "kNDVI"
+
+forest_baseline:
+  schema_version: "1.0.0"
+  reference_date: 2020-12-31
+  feature_start_date: 2019-01-01
+  feature_end_date_exclusive: 2021-01-01
+  benchmark_resolution_m: 30
+  minimum_independent_sources: 2
+  forest_definition:
+    minimum_area_ha: 0.5
+    minimum_tree_height_m: 5.0
+    minimum_canopy_cover_percent: 10.0
+    exclude_predominantly_agricultural_or_urban: true
+  preserve_source_evidence: true
+  preserve_disagreement: true
+  post_cutoff_observations_allowed: false
+  long_gap_interpolation_allowed: false
+
+forest_model:
+  schema_version: "1.0.0"
+  asset_id: "projects/ee-facuboladerasgee/assets/models/rf_forest_2020"
+  asset_type: "geemap_tree_feature_collection"
+  tree_property: "tree"
+  expected_tree_count: 500
+  reference_year: 2020
+  jurisdiction: "entre_rios"
+  non_forest_class_code: 0
+  forest_class_code: 1
+  training_label_semantics: "multisource_unanimity_proxy_v1"
+  score_semantics: "uncalibrated_binary_tree_vote_fraction"
+  evidence_role: "learned_supporting_evidence"
+  independent_evidence: false
+  temporal_transfer_validated: false
+  calibrated_probability: false
+
+forest_screening:
+  schema_version: "1.1.0"
+  minimum_core_source_count: 2
+  expected_tree_count: 500
+  forest_vote_fraction_minimum: 0.80
+  nonforest_vote_fraction_maximum: 0.20
+  core_nonforest_max_evidence_fraction: 0.0
+  forest_rule: "rf_complete_and_core_sufficient_and_unanimous_forest_and_vote_gte_threshold"
+  nonforest_rule: "rf_complete_and_core_sufficient_and_unanimous_nonforest_and_vote_lte_threshold"
+  temporal_signal_scope: "entire_aoi_primary_interpretation_automated_forest_only"
+  score_semantics: "uncalibrated_binary_tree_vote_fraction"
+  automatic_final_assessment_allowed: false
+
+disturbance_detection:
+  schema_version: "1.5.0"
+  reference_history_start_date: 2017-01-01
+  analysis_start_date: 2021-01-01
+  minimum_baseline_source_count: 2
+  detection_indices: [NDVI, NBR, NDMI, NIRv]
+  planned_detectors: [robust_seasonal_pre_post, ccdc_benchmark]
+  robust_seasonal:
+    schema_version: "1.2.0"
+    minimum_reference_observations: 3
+    mad_scale_constant: 1.4826
+    vegetation_loss_direction: "decrease_is_positive"
+    reference_comparison_policy: "same_season_only"
+    zero_scale_policy: "not_standardizable"
+    scale_stabilization_policy: "seasonal_index_spatial_quantile_floor"
+    scale_floor_quantile: 0.25
+    scale_floor_minimum_valid_pixels: 4
+    scale_floor_fallback_policy: "leave_local_scale_unchanged"
+    missing_data_policy: "preserve_nan_without_interpolation"
+    standardized_magnitude_threshold: 3.0
+    minimum_index_support_count: 2
+    minimum_consecutive_signal_periods: 2
+    minimum_valid_post_cutoff_periods: 2
+    missing_period_streak_policy: "break_without_recovery_inference"
+    long_gap_minimum_consecutive_missing_periods: 2
+    threshold_calibration_status: "conservative_benchmark_requires_independent_validation"
+    score_aggregation: "maximum_positive_standardized_magnitude"
+    anomaly_threshold_applied: true
+    persistence_rule_applied: true
+  ccdc_benchmark:
+    schema_version: "1.0.0"
+    earth_engine_python_api_version: "1.7.36"
+    api_reference_url: "https://developers.google.com/earth-engine/apidocs/ee-algorithms-temporalsegmentation-ccdc"
+    api_reference_last_updated: 2026-04-20
+    api_reference_accessed_at: 2026-07-29
+    output_semantics_reference_url: "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_GLOBAL_CCDC_V1"
+    source_profile: "hlsl30_only"
+    source_product: "HLSL30"
+    input_temporal_granularity: "dense_masked_observations"
+    breakpoint_bands: [NDVI, NBR, NDMI, NIRv]
+    min_observations: 6
+    chi_square_probability: 0.99
+    min_num_of_years_scaler: 1.33
+    date_format: 1
+    lambda: 20.0
+    max_iterations: 25000
+    tmask_policy: "disabled_hls_fmask_preapplied"
+    tmask_bands: []
+    magnitude_direction: "decrease_is_positive"
+    change_probability_semantics: "algorithmic_breakpoint_pseudo_probability_not_deforestation_probability"
+    comparative_sensor_profile: "hlsl30_hlss30_deferred"
+    comparative_sensor_profile_enabled: false
+    raw_array_output_preserved: true
+    post_cutoff_break_threshold_applied: false
+  convergence:
+    schema_version: "1.0.0"
+    temporal_compatibility_policy: "ccdc_break_within_robust_signal_interval"
+    interval_boundary_policy: "closed_start_open_end"
+    temporal_compatibility_margin_days: 0
+    unavailable_detector_policy: "preserve_available_evidence_without_convergence"
+    isolated_ccdc_break_policy: "transient_signal_requires_review"
+    detector_disagreement_resolution_policy: "preserve"
+    score_fusion_allowed: false
+  score_semantics: "uncalibrated_disturbance_evidence_score"
+  baseline_disagreement_policy: "evaluate_and_flag"
+  cutoff_straddling_period_policy: "exclude"
+  preserve_detector_evidence: true
+  preserve_detector_disagreement: true
+  long_gap_interpolation_allowed: false
+  attribution_allowed: false
+  spatial_area_threshold_applied: false
+  automatic_final_assessment_allowed: false
+
+disturbance_events:
+  schema_version: "1.2.0"
+  connectivity: 8
+  visec_operational_event_area_threshold_ha: 0.5
+  visec_area_threshold_relation: "strictly_greater_than"
+  area_threshold_basis: "candidate_footprint_reference_only_no_event_promotion"
+  area_method: "projected_grid_affine_determinant"
+  area_threshold_policy: "preserve_all_candidates_publish_events_only_after_attribution"
+  maximum_onset_period_difference: 1
+  missing_onset_policy: "separate_unknown_episode"
+  event_id_strategy: "grid_temporal_episode_and_pixels_sha256_v2"
+  ordering_policy: "area_descending_then_event_id"
+  detail_figure_limit: 5
+  detail_selection_policy: "largest_area_then_event_id"
+  comparison_policy: "latest_pre_cutoff_same_season_vs_earliest_event_onset_window"
+  geometry_crs: "EPSG:4326"
+  primary_interpretation_domain: "automated_forest"
+  automatic_final_assessment_allowed: false
+  attribution_allowed: false
+
+output:
+  directory: "outputs"
+  artifact_profile: "lean"
+  formats:
+    - "json"
+    - "geojson"
+    - "csv"
+    - "png"
+    - "geotiff"
+  raster_nodata: -9999.0
+  maximum_direct_download_bytes: 32000000
+  maximum_direct_download_dimension: 10000
+  maximum_series_download_bytes: 256000000
+  rgb_min_reflectance: 0.01
+  rgb_max_reflectance: 0.18
+  index_visualization_ranges:
+    - index: "NDVI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "EVI2"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NBR"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NDMI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NMDI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "LSWI"
+      minimum: -1.0
+      maximum: 1.0
+    - index: "NIRv"
+      minimum: -0.1
+      maximum: 0.8
+    - index: "kNDVI"
+      minimum: 0.0
+      maximum: 1.0
+  png_dpi: 150

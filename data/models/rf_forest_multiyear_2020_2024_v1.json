@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0.0",
+  "model_name": "rf_forest_multiyear_2020_2024_v1",
+  "asset_id": "projects/ee-facuboladerasgee/assets/models/rf_forest_multiyear_2020_2024_v1",
+  "expected_tree_count": 500,
+  "predictor_columns_sha256": "35b5b2ba36bfccb07e798a27e354fb9fae0ba0819975986975b5c20c5fdd6d0f",
+  "joblib": {
+    "path": "outputs/models/rf_forest_multiyear_2020_2024_v1/random_forest_forest_multiyear_2020_2024.joblib",
+    "size_bytes": 14081686,
+    "sha256": "eca34f6e22d34908c0bce3030a1bb138af6a08f0355415ff162884d3f5aa8da7",
+    "availability": "external_or_retrained_not_committed"
+  },
+  "training_dataset": {
+    "path": "outputs/training_p0/raw/entre_rios_training_2020_2024_multiyear.csv",
+    "size_bytes": 7038720,
+    "sha256": "0701a5f80a44861f5e2fcd0daf19dd4ad75de3dcbeedd99466ef724fead651a2",
+    "availability": "external_or_regenerated_not_committed"
+  },
+  "training_manifest": {
+    "path": "outputs/training_p0/training-multiyear-2020-2024-validation.json",
+    "sha256": "3e84bb38021aaea24f947f3bf9aa9131a444e28c107b61942e65bfc784c77065",
+    "availability": "external_or_regenerated_not_committed"
+  },
+  "serialized_trees": {
+    "path": "outputs/models/rf_forest_multiyear_2020_2024_v1/gee_export/rf_trees_classification.csv",
+    "size_bytes": 10872591,
+    "file_sha256": "efd8b9d6c3a02f594136b369a6bbfa315126ecfefb1b42b4fe330dcb5dbd29d4",
+    "multiset_sha256": "ebb6752bafc3939f673d0c915e89b29cb5efd3826957e83ae1da3e4e55d139a3",
+    "encoding": "one_hash_encoded_tree_per_utf8_line",
+    "availability": "external_or_regenerated_not_committed"
+  },
+  "gee_asset": {
+    "tree_property": "tree",
+    "expected_tree_multiset_sha256": "ebb6752bafc3939f673d0c915e89b29cb5efd3826957e83ae1da3e4e55d139a3",
+    "content_verification_required": true
+  },
+  "reproduction": {
+    "random_seed": 42,
+    "training_script": {
+      "path": "scripts/train_random_forest_forest.py",
+      "sha256": "f68d6b8714c4754d2f4630c9d8697532e82eb1fc2dcb2ba2a7f6f01e33c8fbe9"
+    },
+    "export_script": {
+      "path": "scripts/export_rf_to_gee_asset.py",
+      "historical_execution_sha256": "a7851628115f7bbf70b3802952f01ff79dd00117cee33ec8f1e26a62c5b360b2",
+      "current_reproducer_sha256_at_registration": "d9184672a98fdc1bea9ed2e327bf19001942f93b8dc6f9eeed9028e7e871cf5f"
+    },
+    "command": ".\\.venv\\Scripts\\python.exe scripts/train_random_forest_forest.py <csv-shards-or-directory> --manifest outputs/training_p0/training-multiyear-2020-2024-validation.json --output-dir outputs/models/rf_forest_multiyear_2020_2024_v1 --trees 500 --seed 42"
+  },
+  "limitations": [
+    "The ignored binary and training inputs are not bundled with the repository.",
+    "A fresh checkout must restore matching external artifacts or regenerate them and verify every recorded SHA-256 before inference.",
+    "This is a stable forest/non-forest proxy classifier, not a deforestation model."
+  ]
+}

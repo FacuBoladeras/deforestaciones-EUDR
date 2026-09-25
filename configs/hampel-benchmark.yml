@@ -1,0 +1,26 @@
+schema_version: "1.0.0"
+temporal_granularity: "seasonal_composite_medians"
+season_stratification: "same_meteorological_season_only"
+visec_reference_order: "scene_level_before_aggregation"
+methodological_equivalence_to_visec: false
+indices: [NDVI, EVI2, NMDI, LSWI, NIRv, kNDVI]
+window_size: 5
+sigma_threshold: 3.0
+mad_scale_constant: 1.4826
+minimum_window_support: 3
+minimum_absolute_deviation: 0.000001
+zero_mad_policy: "candidate_if_nonzero_deviation"
+return_window_size: 2
+minimum_return_support_each_side: 1
+maximum_replacement_run_length: 1
+edge_policy: "flag_without_replacement"
+missing_data_policy: "preserve_nan_without_interpolation"
+replacement_value: "local_median"
+stable_control_count: 10
+stable_control_radius_pixels: 1
+stable_control_minimum_center_distance_pixels: 5
+stable_control_selection: "sha256_ranked_strict_stable_neighborhood_v1"
+activation_gate: "independent_validation_required"
+activation_allowed: false
+activated: false
+

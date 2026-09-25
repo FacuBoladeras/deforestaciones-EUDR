@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:deforestation-pipeline:post-change-attribution:5.0.0",
+  "title": "Post-change attribution v5.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "analysis_id", "establishment_id", "created_at", "status",
+    "automatic_final_assessment_generated", "conversion_confirmed_count",
+    "conversion_likely_count", "observed_candidate_count", "candidate_count",
+    "event_count", "likely_conversion_area_ha", "counts_by_post_change_use",
+    "counts_by_interpretation_status", "records", "candidates", "events"
+  ],
+  "properties": {
+    "schema_version": {"const": "5.0.0"},
+    "analysis_id": {"type": "string", "format": "uuid"},
+    "establishment_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["low_risk", "review_required", "conversion_likely"]},
+    "automatic_final_assessment_generated": {"const": false},
+    "conversion_confirmed_count": {"const": 0},
+    "conversion_likely_count": {"type": "integer", "minimum": 0},
+    "observed_candidate_count": {"type": "integer", "minimum": 0},
+    "candidate_count": {"type": "integer", "minimum": 0},
+    "event_count": {"type": "integer", "minimum": 0},
+    "likely_conversion_area_ha": {"type": "number", "minimum": 0},
+    "counts_by_post_change_use": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "counts_by_interpretation_status": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "records": {"type": "array", "items": {"$ref": "#/$defs/record"}},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {"$ref": "#/$defs/record"},
+          {
+            "properties": {
+              "record_type": {"const": "disturbance_candidate"},
+              "interpretation_level": {"const": "candidate_episode"},
+              "event_id": {"type": "null"}
+            }
+          }
+        ]
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {"$ref": "#/$defs/record"},
+          {
+            "properties": {
+              "record_type": {"const": "conversion_likely_event"},
+              "interpretation_level": {"const": "event"},
+              "interpretation_status": {"const": "conversion_likely"},
+              "event_id": {"type": "string", "minLength": 1}
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema_version", "candidate_id", "event_id", "record_type",
+        "interpretation_level", "interpretation_status", "post_change_use",
+        "automatic_status", "conversion_confirmed", "human_review_required",
+        "gates", "reason_codes", "reasons_for", "reasons_against",
+        "candidate_area_ha", "persistent_agricultural_area_ha",
+        "conjunctive_conversion_evidence_area_ha", "likely_conversion_area_ha",
+        "candidate_geometry", "conjunctive_conversion_evidence_geometry",
+        "likely_conversion_geometry",
+        "alternative_explanation_assessment",
+        "trajectory", "context", "quality_flags"
+      ],
+      "properties": {
+        "schema_version": {"const": "5.0.0"},
+        "candidate_id": {"type": "string", "minLength": 1},
+        "event_id": {"type": ["string", "null"]},
+        "record_type": {
+          "enum": ["disturbance_candidate", "conversion_likely_event"]
+        },
+        "interpretation_level": {"enum": ["candidate_episode", "event"]},
+        "interpretation_status": {
+          "enum": [
+            "candidate_only", "temporary_or_recovered", "persistent_unattributed",
+            "insufficient_data", "subthreshold_conversion_evidence", "conversion_likely"
+          ]
+        },
+        "post_change_use": {
+          "enum": [
+            "agriculture_likely", "forest_recovery", "managed_harvest",
+            "temporary_disturbance", "unknown"
+          ]
+        },
+        "automatic_status": {
+          "enum": ["low_risk", "review_required", "conversion_likely"]
+        },
+        "conversion_confirmed": {"const": false},
+        "human_review_required": {"type": "boolean"},
+        "gates": {"type": "object"},
+        "reason_codes": {"type": "array", "items": {"type": "string"}},
+        "reasons_for": {"type": "array", "items": {"type": "string"}},
+        "reasons_against": {"type": "array", "items": {"type": "string"}},
+        "persistent_agricultural_area_ha": {"type": "number", "minimum": 0},
+        "candidate_area_ha": {"type": "number", "minimum": 0},
+        "conjunctive_conversion_evidence_area_ha": {"type": "number", "minimum": 0},
+        "likely_conversion_area_ha": {"type": "number", "minimum": 0},
+        "candidate_geometry": {"$ref": "#/$defs/polygonalGeometry"},
+        "conjunctive_conversion_evidence_geometry": {
+          "oneOf": [{"$ref": "#/$defs/polygonalGeometry"}, {"type": "null"}]
+        },
+        "likely_conversion_geometry": {
+          "oneOf": [{"$ref": "#/$defs/polygonalGeometry"}, {"type": "null"}]
+        },
+        "alternative_explanation_assessment": {"type": "object"},
+        "agricultural_spatial_support": {"type": ["object", "null"]},
+        "trajectory": {"type": "object"},
+        "context": {"type": "object"},
+        "quality_flags": {"type": "array", "items": {"type": "string"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"record_type": {"const": "disturbance_candidate"}}},
+          "then": {
+            "properties": {
+              "event_id": {"type": "null"},
+              "interpretation_level": {"const": "candidate_episode"},
+              "likely_conversion_area_ha": {"const": 0},
+              "likely_conversion_geometry": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"record_type": {"const": "conversion_likely_event"}}},
+          "then": {
+            "properties": {
+              "event_id": {"type": "string", "minLength": 1},
+              "interpretation_level": {"const": "event"},
+              "interpretation_status": {"const": "conversion_likely"},
+              "automatic_status": {"const": "conversion_likely"},
+              "likely_conversion_area_ha": {"type": "number", "exclusiveMinimum": 0.5},
+              "conjunctive_conversion_evidence_geometry": {
+                "$ref": "#/$defs/polygonalGeometry"
+              },
+              "likely_conversion_geometry": {"$ref": "#/$defs/polygonalGeometry"}
+            }
+          }
+        }
+      ]
+    },
+    "polygonalGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "coordinates"],
+      "properties": {
+        "type": {"enum": ["Polygon", "MultiPolygon"]},
+        "coordinates": {"type": "array", "minItems": 1}
+      }
+    }
+  }
+}

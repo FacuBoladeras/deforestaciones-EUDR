@@ -1,0 +1,32 @@
+schema_version: "1.1.0"
+pipeline_config_path: "configs/default.yml"
+source_catalog_path: "data/catalog.yml"
+manifest_directory: "outputs/training_p0"
+earth_engine_project: "ee-facuboladerasgee"
+year: 2024
+preflight_count_mode: "deferred_to_export_validation"
+seed: 42
+scale_m: 30
+block_size_m: 3000
+boundary_longitude: -60.0
+boundary_buffer_m: 3000
+provincial_quotas:
+  forest: 800
+  non_forest: 800
+  ambiguous: 400
+partitions:
+  - utm_zone: 20
+    grid_crs: "EPSG:32720"
+    quotas:
+      forest: 400
+      non_forest: 400
+      ambiguous: 200
+  - utm_zone: 21
+    grid_crs: "EPSG:32721"
+    quotas:
+      forest: 400
+      non_forest: 400
+      ambiguous: 200
+drive:
+  folder: "deforestation-pipeline-training-p0"
+  file_name_prefix: "entre_rios_training_2024_p0"
