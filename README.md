@@ -106,14 +106,17 @@ Para una instalación que no conserve el layout del checkout, definir
 se confía por ubicación: se verifican tamaño, SHA-256 y metadata contra el
 registry versionado antes de usarlo.
 
-## Operación local recomendada
+## Ejecutar el proyecto completo en local
 
-El supervisor inicia exactamente una API, un worker y Vite con almacenamiento
-compartido:
+Desde la raíz del repositorio, el comando canónico para levantar el proyecto
+completo es:
 
 ```powershell
 uv run python scripts/run_local_stack.py
 ```
+
+El supervisor inicia exactamente una API, un worker y Vite con almacenamiento
+compartido. La terminal queda ocupada y `Ctrl+C` detiene los tres procesos.
 
 Modo desacoplado:
 
